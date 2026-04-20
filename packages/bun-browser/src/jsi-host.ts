@@ -42,9 +42,23 @@ export const enum TypeTag {
 /** HostFunction 回调签名（由 Zig 侧 `jsi_host_invoke` 反向驱动 —— 通过 WASM 导出，不经由 imports 表）。 */
 export type HostFnImpl = (thisHandle: number, argv: number[]) => number;
 
+/** 打印级别，对应 `jsi_print` level 参数。 */
+export const enum PrintLevel {
+  Stdout = 1,
+  Stderr = 2,
+}
+
 export interface JsiHostOptions {
   global?: object;
   memory?: WebAssembly.Memory | undefined;
+  /** stdout/stderr 输出回调。默认路由到 console.log / console.error。 */
+  onPrint?: (data: string, level: PrintLevel) => void;
+  /**
+   * TypeScript 转译回调。接收原始 TS 源码 + 文件名，返回 转译后 JS。
+   * 默认为恒等（identity）——即不提供转译，原文直接返回。
+   * 中高级用法：插入 esbuild-wasm / swc-wasm 实现。
+   */
+  transpile?: (source: string, filename: string) => string;
 }
 
 export class JsiHost {
@@ -54,12 +68,21 @@ export class JsiHost {
   private textEncoder = new TextEncoder();
   private lastException: unknown = undefined;
   private memory: WebAssembly.Memory | undefined;
+  private onPrint: (data: string, level: PrintLevel) => void;
+  private transpile: (source: string, filename: string) => string;
   public wasmExports: WebAssembly.Exports | undefined;
 
   constructor(opts: JsiHostOptions = {}) {
     const g = opts.global ?? globalThis;
     this.handles = [undefined, null, true, false, g];
     this.memory = opts.memory;
+    this.onPrint =
+      opts.onPrint ??
+      ((data, level) => {
+        if (level === PrintLevel.Stderr) console.error(data);
+        else console.log(data);
+      });
+    this.transpile = opts.transpile ?? ((source) => source);
   }
 
   bind(instance: WebAssembly.Instance): void {
@@ -355,6 +378,32 @@ export class JsiHost {
       jsi_schedule_microtask: (): void => {
         const tick = self.wasmExports?.bun_tick as (() => void) | undefined;
         if (tick) queueMicrotask(tick);
+      },
+
+      // ── 直接打印（Zig → Host stdout/stderr）──────────────
+      jsi_print: (ptr: number, len: number, level: number): void => {
+        const data = self.textDecoder.decode(
+          new Uint8Array(self.memBytes().buffer, ptr, len),
+        );
+        self.onPrint(data, level as PrintLevel);
+      },
+
+      // ── TypeScript transpile ─────────────────────
+      jsi_transpile: (
+        srcPtr: number,
+        srcLen: number,
+        filenamePtr: number,
+        filenameLen: number,
+      ): number => {
+        try {
+          const source = self.readString(srcPtr, srcLen);
+          const filename = filenameLen > 0 ? self.readString(filenamePtr, filenameLen) : "unknown.ts";
+          const js = self.transpile(source, filename);
+          return self.retain(js);
+        } catch (e) {
+          self.lastException = e;
+          return EXCEPTION_SENTINEL;
+        }
       },
     };
   }

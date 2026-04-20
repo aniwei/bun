@@ -5,13 +5,16 @@
  * 浏览器端需通过 `new Worker(new URL("./kernel-worker.ts", import.meta.url), { type: "module" })` 加载。
  */
 
-import { JsiHost } from "./jsi-host";
+import { JsiHost, PrintLevel } from "./jsi-host";
 import { PROTOCOL_VERSION, type HostRequest, type KernelEvent } from "./protocol";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const self: any;
 
-const host = new JsiHost({ global: self });
+const host = new JsiHost({
+  global: self,
+  onPrint: (data, level) => writeStd(level === PrintLevel.Stderr ? "stderr" : "stdout", data),
+});
 let instance: WebAssembly.Instance | undefined;
 let exitCode: number | undefined;
 
@@ -80,7 +83,24 @@ async function instantiate(module: WebAssembly.Module): Promise<void> {
   if (initFn) initFn();
   else if (startFn) startFn();
 }
-
+/**
+ * 将字节写入 WASM 内存，调用 fn，然后释放内存。
+ * @param data 内容
+ * @param fn   接收 (ptr, len) 的 WASM 导出
+ */
+function withWasmBytes(data: Uint8Array, fn: (ptr: number, len: number) => void): void {
+  const alloc = instance!.exports.bun_malloc as (n: number) => number;
+  const free = instance!.exports.bun_free as (ptr: number) => void;
+  const ptr = alloc(data.byteLength);
+  new Uint8Array((instance!.exports.memory as WebAssembly.Memory).buffer, ptr, data.byteLength).set(
+    data,
+  );
+  try {
+    fn(ptr, data.byteLength);
+  } finally {
+    free(ptr);
+  }
+}
 self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
   const msg = ev.data;
   try {
@@ -98,25 +118,26 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
           const loader = instance?.exports.bun_vfs_load_snapshot as
             | ((ptr: number, len: number) => number)
             | undefined;
-          const alloc = instance?.exports.bun_malloc as ((n: number) => number) | undefined;
-          const free = instance?.exports.bun_free as ((ptr: number) => void) | undefined;
-          if (loader && alloc) {
-            const data = new Uint8Array(msg.vfsSnapshot);
-            const ptr = alloc(data.byteLength);
-            new Uint8Array(
-              (instance!.exports.memory as WebAssembly.Memory).buffer,
-              ptr,
-              data.byteLength,
-            ).set(data);
-            try {
-              loader(ptr, data.byteLength);
-            } finally {
-              free?.(ptr);
-            }
+          if (loader) {
+            withWasmBytes(new Uint8Array(msg.vfsSnapshot), (ptr, len) => loader(ptr, len));
           }
         }
 
         post({ kind: "ready" });
+
+        // 自动运行入口文件（如果 handshake 带有 entry）
+        if (msg.entry) {
+          const runner = instance?.exports.bun_browser_run as
+            | ((entryPtr: number, entryLen: number) => number)
+            | undefined;
+          if (runner) {
+            const entryBytes = new TextEncoder().encode(msg.entry);
+            withWasmBytes(entryBytes, (ptr, len) => {
+              const code = runner(ptr, len);
+              post({ kind: "exit", code });
+            });
+          }
+        }
         break;
       }
 
@@ -125,21 +146,40 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
           | ((entryPtr: number, entryLen: number) => number)
           | undefined;
         if (!runner) throw new Error("bun_browser_run export missing");
-        const alloc = instance!.exports.bun_malloc as (n: number) => number;
-        const free = instance!.exports.bun_free as (ptr: number) => void;
         const entryBytes = new TextEncoder().encode(msg.entry);
-        const ptr = alloc(entryBytes.byteLength);
-        new Uint8Array(
-          (instance!.exports.memory as WebAssembly.Memory).buffer,
-          ptr,
-          entryBytes.byteLength,
-        ).set(entryBytes);
-        try {
-          const code = runner(ptr, entryBytes.byteLength);
+        withWasmBytes(entryBytes, (ptr, len) => {
+          const code = runner(ptr, len);
           post({ kind: "exit", code });
-        } finally {
-          free(ptr);
+        });
+        break;
+      }
+
+      case "vfs:snapshot": {
+        const loader = instance?.exports.bun_vfs_load_snapshot as
+          | ((ptr: number, len: number) => number)
+          | undefined;
+        if (loader) {
+          withWasmBytes(new Uint8Array(msg.snapshot), (ptr, len) => loader(ptr, len));
         }
+        break;
+      }
+
+      case "eval": {
+        const evalFn = instance?.exports.bun_browser_eval as
+          | ((srcPtr: number, srcLen: number, filePtr: number, fileLen: number) => number)
+          | undefined;
+        if (!evalFn) throw new Error("bun_browser_eval export missing");
+        const enc = new TextEncoder();
+        const srcBytes = enc.encode(msg.source);
+        const fileBytes = enc.encode(msg.filename ?? "<eval>");
+        let evalErr: string | undefined;
+        withWasmBytes(srcBytes, (srcPtr, srcLen) => {
+          withWasmBytes(fileBytes, (filePtr, fileLen) => {
+            const code = evalFn(srcPtr, srcLen, filePtr, fileLen);
+            if (code !== 0) evalErr = `eval returned exit code ${code}`;
+          });
+        });
+        post({ kind: "eval:result", id: msg.id, error: evalErr });
         break;
       }
 

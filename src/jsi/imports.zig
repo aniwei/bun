@@ -78,3 +78,13 @@ pub extern "jsi" fn jsi_eval_module(
 
 /// 请求宿主在下一个 microtask 回调 WASM 的 `bun_tick()`。用于 I/O 完成唤醒。
 pub extern "jsi" fn jsi_schedule_microtask() void;
+
+/// 向宿主 stdout (level=1) 或 stderr (level=2) 打印 UTF-8 字节（无换行）。
+/// 对应 `packages/bun-browser/src/jsi-host.ts` 的 `jsi_print`。
+pub extern "jsi" fn jsi_print(ptr: u32, len: usize, level: u32) void;
+
+/// 请求 Host 对给定源码进行 TypeScript → JavaScript 转译。
+/// 成功返回已 retain 的 string handle（转译后 JS）；
+/// 若 Host 未注册 transpiler，返回原 src 的 string handle；
+/// 失败返回 `Value.exception_sentinel`。
+pub extern "jsi" fn jsi_transpile(src_ptr: u32, src_len: usize, filename_ptr: u32, filename_len: usize) u32;

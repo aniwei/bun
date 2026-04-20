@@ -26,6 +26,7 @@ export type KernelEvent =
   | StderrEvent
   | ExitEvent
   | ErrorEvent
+  | EvalResultEvent
   | FetchRequest
   | VfsEvent;
 
@@ -76,6 +77,15 @@ export interface EvalRequest {
 
 export interface ReadyEvent {
   kind: "ready";
+}
+
+/** Kernel → UI：eval 请求的执行结果。 */
+export interface EvalResultEvent {
+  kind: "eval:result";
+  /** 对应 EvalRequest.id。 */
+  id: string;
+  /** undefined = 成功（无异常）。 */
+  error?: string | undefined;
 }
 
 export interface StdoutEvent {
