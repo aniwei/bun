@@ -16,10 +16,12 @@
   },
   "files": [
     "src/**/*.ts",
+    "bun-core.wasm",
     "README.md"
   ],
   "scripts": {
-    "build:wasm": "cd ../.. && bun scripts/build.ts --target=wasm --wasm_profile=browser_runtime --profile=release",
+    "build:wasm": "cd ../.. && zig build --build-file build-wasm-smoke.zig build-wasm && cp zig-out/packages/bun-browser/bun-core.wasm packages/bun-browser/bun-core.wasm",
+    "build:wasm:release": "cd ../.. && zig build --build-file build-wasm-smoke.zig build-wasm -Doptimize=ReleaseFast && cp zig-out/packages/bun-browser/bun-core.wasm packages/bun-browser/bun-core.wasm",
     "typecheck": "tsc -p .",
     "test": "bun test test/"
   },

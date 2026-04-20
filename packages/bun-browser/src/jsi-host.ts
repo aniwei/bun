@@ -408,3 +408,39 @@ export class JsiHost {
     };
   }
 }
+
+/**
+ * 类型化的 imports 表——主要用于测试中将 `host.imports()` cast 成可调用类型。
+ * 生产炴不要使用；运行时 ABI 由 `src/jsi/imports.zig` 定义。
+ */
+export interface JsiImportsTyped {
+  jsi_retain: (handle: number) => number;
+  jsi_release: (handle: number) => void;
+  jsi_make_number: (value: number) => number;
+  jsi_make_string: (ptr: number, len: number) => number;
+  jsi_make_object: () => number;
+  jsi_make_array: (length: number) => number;
+  jsi_make_arraybuffer: (ptr: number, len: number, copy: number) => number;
+  jsi_make_error: (ptr: number, len: number) => number;
+  jsi_typeof: (handle: number) => number;
+  jsi_to_number: (handle: number) => number;
+  jsi_to_boolean: (handle: number) => number;
+  jsi_string_length: (handle: number) => number;
+  jsi_string_read: (handle: number, bufPtr: number, bufLen: number) => void;
+  jsi_get_prop: (obj: number, namePtr: number, nameLen: number) => number;
+  jsi_set_prop: (obj: number, namePtr: number, nameLen: number, val: number) => void;
+  jsi_get_index: (arr: number, idx: number) => number;
+  jsi_set_index: (arr: number, idx: number, val: number) => void;
+  jsi_has_prop: (obj: number, namePtr: number, nameLen: number) => number;
+  jsi_call: (fn: number, thisH: number, argvPtr: number, argc: number) => number;
+  jsi_new: (ctor: number, argvPtr: number, argc: number) => number;
+  jsi_make_host_function: (tag: number, namePtr: number, nameLen: number, argc: number) => number;
+  jsi_make_promise: (resolverTag: number) => number;
+  jsi_resolve: (promise: number, value: number) => void;
+  jsi_reject: (promise: number, value: number) => void;
+  jsi_eval: (codePtr: number, codeLen: number, urlPtr: number, urlLen: number) => number;
+  jsi_eval_module: (codePtr: number, codeLen: number, urlPtr: number, urlLen: number) => number;
+  jsi_schedule_microtask: () => void;
+  jsi_print: (ptr: number, len: number, level: number) => void;
+  jsi_transpile: (srcPtr: number, srcLen: number, filenamePtr: number, filenameLen: number) => number;
+}

@@ -27,15 +27,15 @@ describe("vfs-client", () => {
     const parsed = parseSnapshot(buf);
 
     expect(parsed).toHaveLength(2);
-    expect(parsed[0].path).toBe("/index.js");
-    expect(parsed[1].path).toBe("/lib/util.ts");
+    expect(parsed[0]!.path).toBe("/index.js");
+    expect(parsed[1]!.path).toBe("/lib/util.ts");
 
     const dec = new TextDecoder();
-    expect(dec.decode(parsed[0].data as Uint8Array)).toBe("console.log('hello')");
-    expect(dec.decode(parsed[1].data as Uint8Array)).toBe("export const x = 1;");
+    expect(dec.decode(parsed[0]!.data as Uint8Array)).toBe("console.log('hello')");
+    expect(dec.decode(parsed[1]!.data as Uint8Array)).toBe("export const x = 1;");
 
-    expect(parsed[0].mode).toBe(0o644);
-    expect(parsed[1].mode).toBe(0o644);
+    expect(parsed[0]!.mode).toBe(0o644);
+    expect(parsed[1]!.mode).toBe(0o644);
   });
 
   test("round-trip: buildSnapshot → parseSnapshot（二进制内容）", () => {
@@ -45,9 +45,9 @@ describe("vfs-client", () => {
     const parsed = parseSnapshot(buf);
 
     expect(parsed).toHaveLength(1);
-    expect(parsed[0].path).toBe("/data.bin");
-    expect(parsed[0].mode).toBe(0o600);
-    expect(new Uint8Array(parsed[0].data as ArrayBuffer)).toEqual(bin);
+    expect(parsed[0]!.path).toBe("/data.bin");
+    expect(parsed[0]!.mode).toBe(0o600);
+    expect(parsed[0]!.data as Uint8Array).toEqual(bin);
   });
 
   test("round-trip: 多文件含 unicode 路径", () => {
@@ -58,10 +58,10 @@ describe("vfs-client", () => {
     const buf = buildSnapshot(files);
     const parsed = parseSnapshot(buf);
 
-    expect(parsed[0].path).toBe("/你好/世界.js");
-    expect(parsed[1].path).toBe("/emoji🚀/app.ts");
+    expect(parsed[0]!.path).toBe("/你好/世界.js");
+    expect(parsed[1]!.path).toBe("/emoji🚀/app.ts");
     const dec = new TextDecoder();
-    expect(dec.decode(parsed[1].data as Uint8Array)).toBe("");
+    expect(dec.decode(parsed[1]!.data as Uint8Array)).toBe("");
   });
 
   test("parseSnapshot: file_count=0", () => {

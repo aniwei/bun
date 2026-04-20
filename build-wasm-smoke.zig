@@ -1,15 +1,16 @@
-//! Phase 0 smoke-test build script (Zig 0.15).
+//! Smoke-test + browser-runtime WASM build script (Zig 0.15).
 //!
-//! Purpose: type-check the new WASM browser-runtime modules (`src/jsi/**`,
-//! `src/sys_wasm/**`, `src/async/wasm_event_loop.zig`) **in isolation**
-//! from the massive main build graph. Runs VFS + wasm_event_loop unit
-//! tests on the host, and additionally sem-checks the jsi package
-//! against `wasm32-freestanding` so `extern "jsi" fn ...` declarations
-//! are exercised.
+//! Steps:
+//!   test         — run host-native VFS / wasm_event_loop unit tests
+//!   check-wasm   — sema-check `src/jsi/jsi.zig` against wasm32-freestanding
+//!   build-wasm   — compile `src/bun_browser_standalone.zig` → bun-core.wasm
+//!                  Output: packages/bun-browser/bun-core.wasm
 //!
 //! Usage from repo root:
-//!   zig build --build-file build-wasm-smoke.zig test         # run host tests
-//!   zig build --build-file build-wasm-smoke.zig check-wasm   # wasm32 sema only
+//!   zig build --build-file build-wasm-smoke.zig test
+//!   zig build --build-file build-wasm-smoke.zig check-wasm
+//!   zig build --build-file build-wasm-smoke.zig build-wasm
+//!   zig build --build-file build-wasm-smoke.zig build-wasm -Doptimize=ReleaseFast
 //!
 //! Disjoint from `build.zig`; no generated code, no vendor deps.
 
@@ -41,17 +42,44 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_vfs.step);
     test_step.dependOn(&run_event.step);
 
-    // ── wasm32-freestanding sema check for jsi package ──
+    // ── wasm32-freestanding target ──
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag = .freestanding,
     });
 
+    // ── Shared bun Environment shim (used by jsi/* under wasm) ──
+    const bun_env_shim = b.createModule(.{
+        .root_source_file = b.path("src/jsi/bun_env_shim.zig"),
+        .target = wasm_target,
+        .optimize = .Debug,
+    });
+    // bun shim wraps Environment fields; the "bun" module the jsi code sees
+    // is a struct that has a field `Environment` pointing at bun_env_shim.
+    // We create a tiny anonymous wrapper to satisfy `const bun = @import("bun"); bun.Environment`.
+    const bun_shim = b.createModule(.{
+        .root_source_file = b.path("src/jsi/bun_env_shim.zig"),
+        .target = wasm_target,
+        .optimize = .Debug,
+    });
+    _ = bun_env_shim; // used via bun_shim directly
+
+    // ── jsi module with bun shim injected ──
     const jsi_mod = b.createModule(.{
         .root_source_file = b.path("src/jsi/jsi.zig"),
         .target = wasm_target,
         .optimize = .Debug,
     });
+    jsi_mod.addImport("bun", bun_shim);
+
+    // ── sys_wasm module ──
+    const sys_wasm_mod = b.createModule(.{
+        .root_source_file = b.path("src/sys_wasm/sys_wasm.zig"),
+        .target = wasm_target,
+        .optimize = .Debug,
+    });
+
+    // ── check-wasm: sema only ──
     const jsi_lib = b.addLibrary(.{
         .name = "jsi-smoke",
         .root_module = jsi_mod,
@@ -61,6 +89,34 @@ pub fn build(b: *std.Build) void {
     const check_wasm = b.step("check-wasm", "Sema-check jsi package against wasm32-freestanding");
     check_wasm.dependOn(&jsi_lib.step);
 
+    // ── build-wasm: produce packages/bun-browser/bun-core.wasm ──
+    const wasm_out_dir = "packages/bun-browser";
+
+    const wasm_exe = b.addExecutable(.{
+        .name = "bun-core",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bun_browser_standalone.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+            .single_threaded = true,
+        }),
+        // wasm32-freestanding executables are the standard way to get a .wasm file in Zig
+    });
+    wasm_exe.entry = .disabled; // no _start — we export named functions
+    wasm_exe.rdynamic = true;   // keep all export fn symbols
+
+    // Inject module dependencies
+    wasm_exe.root_module.addImport("jsi", jsi_mod);
+    wasm_exe.root_module.addImport("sys_wasm", sys_wasm_mod);
+
+    const install_wasm = b.addInstallArtifact(wasm_exe, .{
+        .dest_dir = .{ .override = .{ .custom = wasm_out_dir } },
+    });
+
+    const build_wasm_step = b.step("build-wasm", "Compile bun_browser_standalone.zig → " ++ wasm_out_dir ++ "/bun-core.wasm");
+    build_wasm_step.dependOn(&install_wasm.step);
+
     b.default_step.dependOn(test_step);
     b.default_step.dependOn(check_wasm);
 }
+

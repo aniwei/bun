@@ -9,10 +9,16 @@ import { describe, expect, test } from "bun:test";
 import {
   EXCEPTION_SENTINEL,
   JsiHost,
+  type JsiImportsTyped,
   PrintLevel,
   ReservedHandle,
   TypeTag,
 } from "../src/jsi-host";
+
+/** 返回类型化的 imports 表，避免 WebAssembly.ModuleImports 的模糊类型。 */
+function getImports(host: JsiHost): JsiImportsTyped {
+  return host.imports() as unknown as JsiImportsTyped;
+}
 
 /** 创建一个内存页 (64 KiB) 的 WebAssembly.Memory。 */
 function makeMemory(): WebAssembly.Memory {
@@ -33,13 +39,13 @@ function writeString(mem: WebAssembly.Memory, str: string, offset = 0x100): [num
 describe("保留 handle", () => {
   test("undefined → ReservedHandle.Undefined (0)", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     expect(imp.jsi_retain(ReservedHandle.Undefined)).toBe(ReservedHandle.Undefined);
   });
 
   test("null → ReservedHandle.Null (1)", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     expect(imp.jsi_retain(ReservedHandle.Null)).toBe(ReservedHandle.Null);
   });
 });
@@ -51,7 +57,7 @@ describe("保留 handle", () => {
 describe("jsi_make_number", () => {
   test("存入 42，typeof = number，to_number = 42", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     const h = imp.jsi_make_number(42);
     expect(h).toBeGreaterThan(ReservedHandle.Global);
     expect(imp.jsi_typeof(h)).toBe(TypeTag.Number);
@@ -60,7 +66,7 @@ describe("jsi_make_number", () => {
 
   test("负数与浮点不丢失精度", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     const h = imp.jsi_make_number(-Math.PI);
     expect(imp.jsi_to_number(h)).toBe(-Math.PI);
   });
@@ -71,7 +77,7 @@ describe("jsi_make_string + jsi_string_length + jsi_string_read", () => {
     const mem = makeMemory();
     const [ptr, len] = writeString(mem, "hello");
     const host = new JsiHost({ memory: mem });
-    const imp = host.imports();
+    const imp = getImports(host);
     const h = imp.jsi_make_string(ptr, len);
     expect(imp.jsi_typeof(h)).toBe(TypeTag.String);
     expect(imp.jsi_string_length(h)).toBe(5);
@@ -87,7 +93,7 @@ describe("jsi_make_string + jsi_string_length + jsi_string_read", () => {
     const mem = makeMemory();
     const [ptr, len] = writeString(mem, "你好");
     const host = new JsiHost({ memory: mem });
-    const imp = host.imports();
+    const imp = getImports(host);
     const h = imp.jsi_make_string(ptr, len);
     // "你好" 编码为 6 字节 UTF-8
     const byteLen = imp.jsi_string_length(h);
@@ -102,14 +108,14 @@ describe("jsi_make_string + jsi_string_length + jsi_string_read", () => {
 describe("jsi_make_object / jsi_make_array", () => {
   test("object typeof = object", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     const h = imp.jsi_make_object();
     expect(imp.jsi_typeof(h)).toBe(TypeTag.Object);
   });
 
   test("array typeof = array", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     const h = imp.jsi_make_array(3);
     expect(imp.jsi_typeof(h)).toBe(TypeTag.Array);
   });
@@ -123,25 +129,21 @@ describe("jsi_set_prop / jsi_get_prop / jsi_has_prop", () => {
   test("set + get + has", () => {
     const mem = makeMemory();
     const host = new JsiHost({ memory: mem });
-    const imp = host.imports();
-
+    const imp = getImports(host);
     const obj = imp.jsi_make_object();
     const val = imp.jsi_make_number(99);
-
     const [namePtr, nameLen] = writeString(mem, "score");
     imp.jsi_set_prop(obj, namePtr, nameLen, val);
-
     const [rPtr, rLen] = writeString(mem, "score", 0x200);
     const got = imp.jsi_get_prop(obj, rPtr, rLen);
     expect(imp.jsi_to_number(got)).toBe(99);
-
     expect(imp.jsi_has_prop(obj, rPtr, rLen)).toBe(1);
   });
 
   test("get 不存在属性 → undefined handle", () => {
     const mem = makeMemory();
     const host = new JsiHost({ memory: mem });
-    const imp = host.imports();
+    const imp = getImports(host);
     const obj = imp.jsi_make_object();
     const [p, l] = writeString(mem, "missing");
     const got = imp.jsi_get_prop(obj, p, l);
@@ -156,7 +158,7 @@ describe("jsi_set_prop / jsi_get_prop / jsi_has_prop", () => {
 describe("jsi_set_index / jsi_get_index", () => {
   test("设置索引再读回", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     const arr = imp.jsi_make_array(2);
     const v = imp.jsi_make_number(7);
     imp.jsi_set_index(arr, 0, v);
@@ -172,14 +174,14 @@ describe("jsi_set_index / jsi_get_index", () => {
 describe("jsi_retain / jsi_release", () => {
   test("retain 返回同一 handle", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     const h = imp.jsi_make_number(1);
     expect(imp.jsi_retain(h)).toBe(h);
   });
 
   test("release 后 handle 回收, 下次 make 可复用", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     const h = imp.jsi_make_number(1);
     const nextBefore = imp.jsi_make_number(2); // h 还未释放时 nextBefore > h
     imp.jsi_release(nextBefore);
@@ -198,25 +200,25 @@ describe("jsi_retain / jsi_release", () => {
 describe("jsi_to_boolean", () => {
   test("0 → falsy", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     expect(imp.jsi_to_boolean(imp.jsi_make_number(0))).toBe(0);
   });
 
   test("1 → truthy", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     expect(imp.jsi_to_boolean(imp.jsi_make_number(1))).toBe(1);
   });
 
   test("true handle → 1", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     expect(imp.jsi_to_boolean(ReservedHandle.True)).toBe(1);
   });
 
   test("false handle → 0", () => {
     const host = new JsiHost({ memory: makeMemory() });
-    const imp = host.imports();
+    const imp = getImports(host);
     expect(imp.jsi_to_boolean(ReservedHandle.False)).toBe(0);
   });
 });
@@ -230,24 +232,22 @@ describe("jsi_print", () => {
     const mem = makeMemory();
     const printed: Array<{ data: string; level: PrintLevel }> = [];
     const host = new JsiHost({ memory: mem, onPrint: (d, l) => printed.push({ data: d, level: l }) });
-    const imp = host.imports();
-
+    const imp = getImports(host);
     const [ptr, len] = writeString(mem, "hello stdout");
     imp.jsi_print(ptr, len, PrintLevel.Stdout);
     expect(printed).toHaveLength(1);
-    expect(printed[0].data).toBe("hello stdout");
-    expect(printed[0].level).toBe(PrintLevel.Stdout);
+    expect(printed[0]!.data).toBe("hello stdout");
+    expect(printed[0]!.level).toBe(PrintLevel.Stdout);
   });
 
   test("level=2 → stderr 回调", () => {
     const mem = makeMemory();
     const printed: Array<{ data: string; level: PrintLevel }> = [];
     const host = new JsiHost({ memory: mem, onPrint: (d, l) => printed.push({ data: d, level: l }) });
-    const imp = host.imports();
-
+    const imp = getImports(host);
     const [ptr, len] = writeString(mem, "ERROR!", 0x200);
     imp.jsi_print(ptr, len, PrintLevel.Stderr);
-    expect(printed[0].level).toBe(PrintLevel.Stderr);
+    expect(printed[0]!.level).toBe(PrintLevel.Stderr);
   });
 });
 
@@ -259,8 +259,7 @@ describe("jsi_transpile (default = identity)", () => {
   test("未提供 transpile 选项 → 原文返回", () => {
     const mem = makeMemory();
     const host = new JsiHost({ memory: mem });
-    const imp = host.imports();
-
+    const imp = getImports(host);
     const src = "const x: number = 1;";
     const [sPtr, sLen] = writeString(mem, src);
     const [fPtr, fLen] = writeString(mem, "index.ts", 0x200);
@@ -279,8 +278,7 @@ describe("jsi_transpile (default = identity)", () => {
       memory: mem,
       transpile: (src) => src.replace(/const (\w+): \w+/g, "const $1"),
     });
-    const imp = host.imports();
-
+    const imp = getImports(host);
     const src = "const x: number = 1;";
     const [sPtr, sLen] = writeString(mem, src);
     const [fPtr, fLen] = writeString(mem, "app.ts", 0x200);
@@ -301,22 +299,18 @@ describe("jsi_call", () => {
   test("调用 JS 函数并传递参数", () => {
     const mem = makeMemory();
     const host = new JsiHost({ memory: mem });
-    const imp = host.imports();
-
+    const imp = getImports(host);
     // 构造一个 JS 函数 handle
     const fn = (a: number, b: number) => a + b;
     const fnHandle = host.retain(fn);
-
     // 参数 handle：2 个数字
     const h1 = imp.jsi_make_number(3);
     const h2 = imp.jsi_make_number(4);
-
     // 写 argv 到 mem（u32 小端）
     const argvPtr = 0x300;
     const view = new DataView(mem.buffer);
     view.setUint32(argvPtr, h1, true);
     view.setUint32(argvPtr + 4, h2, true);
-
     const thisH = ReservedHandle.Global;
     const result = imp.jsi_call(fnHandle, thisH, argvPtr, 2);
     expect(result).not.toBe(EXCEPTION_SENTINEL);

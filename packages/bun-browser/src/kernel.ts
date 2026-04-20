@@ -117,7 +117,7 @@ export class Kernel {
     await this.ready;
     return new Promise<void>((resolve, reject) => {
       this.pendingEvals.set(id, { resolve, reject });
-      this.post({ kind: "eval", id, source, filename });
+      this.post({ kind: "eval", id, source, ...(filename !== undefined ? { filename } : {}) });
     });
   }
 

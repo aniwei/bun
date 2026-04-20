@@ -75,7 +75,8 @@ async function instantiate(module: WebAssembly.Module): Promise<void> {
       jsi_now_ms: (): bigint => BigInt(Date.now()),
     },
   };
-  instance = await WebAssembly.instantiate(module, imports);
+  // 当 module 是 WebAssembly.Module 时， instantiate 返回 Instance。
+  instance = (await WebAssembly.instantiate(module, imports)) as unknown as WebAssembly.Instance;
   host.bind(instance);
 
   const startFn = instance.exports._start as (() => void) | undefined;
