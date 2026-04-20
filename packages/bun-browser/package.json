@@ -22,7 +22,9 @@
   "scripts": {
     "build:wasm": "cd ../.. && /tmp/zig-dl/bootstrap-aarch64-linux-musl/zig build --build-file build-wasm-smoke.zig build-wasm && cp zig-out/packages/bun-browser/bun-core.wasm packages/bun-browser/bun-core.wasm",
     "build:wasm:release": "cd ../.. && /tmp/zig-dl/bootstrap-aarch64-linux-musl/zig build --build-file build-wasm-smoke.zig build-wasm -Doptimize=ReleaseFast && cp zig-out/packages/bun-browser/bun-core.wasm packages/bun-browser/bun-core.wasm",
-    "build:wasm:opt": "cd ../.. && /tmp/zig-dl/bootstrap-aarch64-linux-musl/zig build --build-file build-wasm-smoke.zig build-wasm -Doptimize=ReleaseFast && wasm-opt -O3 --strip-debug --strip-producers -o packages/bun-browser/bun-core.wasm zig-out/packages/bun-browser/bun-core.wasm",
+    "build:wasm:opt": "cd ../.. && /tmp/zig-dl/bootstrap-aarch64-linux-musl/zig build --build-file build-wasm-smoke.zig build-wasm -Doptimize=ReleaseFast && wasm-opt -O3 --enable-bulk-memory --strip-debug --strip-producers -o packages/bun-browser/bun-core.wasm zig-out/packages/bun-browser/bun-core.wasm",
+    "build:demo": "bun demo/build.ts",
+    "demo:serve": "bun run build:demo && bunx serve demo/dist",
     "typecheck": "tsc -p .",
     "test": "bun test test/"
   },
