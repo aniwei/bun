@@ -20,7 +20,8 @@
   ],
   "scripts": {
     "build:wasm": "cd ../.. && bun scripts/build.ts --target=wasm --wasm_profile=browser_runtime --profile=release",
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "test": "bun test test/"
   },
   "devDependencies": {
     "@types/node": "^20.4.10",
