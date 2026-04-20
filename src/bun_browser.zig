@@ -341,9 +341,15 @@ export fn bun_browser_eval(src_ptr: [*]const u8, src_len: u32, file_ptr: [*]cons
 export fn jsi_host_invoke(fn_id: u32, this_handle: u32, argv_ptr: [*]const u32, argc: u32) u32 {
     if (!initialized) return jsi.Value.exception_sentinel;
 
+    // argv_ptr may alias host_arg_scratch memory (set by jsi_host_arg_scratch).
+    // Copy args to a stack-local temp BEFORE mutating the scratch buffer.
+    var args_tmp: [64]u32 = undefined;
+    const safe_count = @min(argc, args_tmp.len);
+    for (0..safe_count) |i| args_tmp[i] = argv_ptr[i];
+
     host_arg_scratch.clearRetainingCapacity();
     host_arg_scratch.append(this_handle) catch return jsi.Value.exception_sentinel;
-    host_arg_scratch.appendSlice(argv_ptr[0..argc]) catch return jsi.Value.exception_sentinel;
+    host_arg_scratch.appendSlice(args_tmp[0..safe_count]) catch return jsi.Value.exception_sentinel;
 
     return jsi.host_function.dispatchHostFn(
         &runtime_g.host_fns,
