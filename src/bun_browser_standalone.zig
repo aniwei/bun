@@ -332,6 +332,67 @@ const BUFFER_POLYFILL_SRC: []const u8 =
     \\})();
 ;
 
+/// Bun 全局对象 polyfill。
+/// Bun.serve({ fetch, port? }) — 注册路由到 `globalThis.__bun_routes`；Host 侧可通过
+/// `kernel.fetch(port, init)` 把请求派发给已注册的 fetch handler。
+/// 端口 0 或缺省时自动分配（从 40000 起递增）。
+/// RFC Phase 3 T3.4：最小可工作的 Bun.serve 注入；真实 TCP 在 Phase 4+。
+const BUN_GLOBAL_SRC: []const u8 =
+    \\(function(){
+    \\  if(globalThis.__bun_wasm_serve_installed)return;
+    \\  globalThis.__bun_wasm_serve_installed=true;
+    \\  globalThis.__bun_routes=globalThis.__bun_routes||Object.create(null);
+    \\  globalThis.__bun_next_port=globalThis.__bun_next_port||40000;
+    \\  function serve(opts){
+    \\    if(!opts||typeof opts.fetch!=='function')throw new TypeError('Bun.serve requires { fetch }');
+    \\    var port=opts.port;
+    \\    if(port===undefined||port===0)port=globalThis.__bun_next_port++;
+    \\    globalThis.__bun_routes[port]={fetch:opts.fetch,hostname:opts.hostname||'localhost',development:!!opts.development};
+    \\    return {
+    \\      port:port,
+    \\      hostname:opts.hostname||'localhost',
+    \\      url:new URL('http://'+(opts.hostname||'localhost')+':'+port+'/'),
+    \\      stop:function(){delete globalThis.__bun_routes[port];},
+    \\      reload:function(newOpts){if(newOpts&&typeof newOpts.fetch==='function')globalThis.__bun_routes[port].fetch=newOpts.fetch;},
+    \\      development:!!opts.development,
+    \\      pendingRequests:0,
+    \\      pendingWebSockets:0,
+    \\      publish:function(){return 0;},
+    \\      upgrade:function(){return false;},
+    \\      requestIP:function(){return null;},
+    \\      timeout:function(){},
+    \\      unref:function(){return this;},
+    \\      ref:function(){return this;},
+    \\    };
+    \\  }
+    \\  /** Host 派发入口：Host 侧拿到 Response 后序列化；此函数返回 Promise<Response>。 */
+    \\  function __dispatch(port,reqInit){
+    \\    var route=globalThis.__bun_routes[port];
+    \\    if(!route)return Promise.resolve(new Response('no route for port '+port,{status:502}));
+    \\    try{
+    \\      var url=reqInit.url||('http://localhost:'+port+'/');
+    \\      var init={method:reqInit.method||'GET'};
+    \\      if(reqInit.headers)init.headers=reqInit.headers;
+    \\      if(reqInit.body!==undefined&&reqInit.body!==null)init.body=reqInit.body;
+    \\      var req=new Request(url,init);
+    \\      return Promise.resolve(route.fetch(req));
+    \\    }catch(e){return Promise.resolve(new Response(String(e),{status:500}));}
+    \\  }
+    \\  // 若宿主 global 已有真实 Bun（Bun 自身进程/Worker 中 `globalThis.Bun` 为 non-configurable），
+    \\  // 我们保存它到 `__bun_real_Bun`，然后尝试把 Bun 整体替换为 WASM 版本。
+    \\  // 若替换失败（non-configurable），退化为在真实 Bun 上逐属性覆盖 serve/version。
+    \\  var __bunObj={serve:serve,version:'0.1.0-bun-browser'};
+    \\  if(globalThis.Bun&&globalThis.Bun.serve)globalThis.__bun_real_Bun=globalThis.Bun;
+    \\  var __replaced=false;
+    \\  try{Object.defineProperty(globalThis,'Bun',{value:__bunObj,writable:true,configurable:true});__replaced=(globalThis.Bun===__bunObj);}catch(_e){}
+    \\  if(!__replaced){try{globalThis.Bun=__bunObj;__replaced=(globalThis.Bun===__bunObj);}catch(_e){}}
+    \\  if(!__replaced&&globalThis.Bun){
+    \\    try{Object.defineProperty(globalThis.Bun,'serve',{value:serve,writable:true,configurable:true});}catch(_e){try{globalThis.Bun.serve=serve;}catch(_e2){}}
+    \\  }
+    \\  globalThis.__bun_dispatch_fetch=__dispatch;
+    \\})();
+;
+
 fn evalBuiltinSrc(src: []const u8, url: []const u8) !jsi.Value {
     const wrapper = try std.fmt.allocPrint(
         allocator,
@@ -716,6 +777,7 @@ fn setupGlobals(rt: *jsi.Runtime) !void {
         "<bun-browser:polyfill>",
     );
     _ = try rt.evalScript(BUFFER_POLYFILL_SRC, "<bun-browser:buffer>");
+    _ = try rt.evalScript(BUN_GLOBAL_SRC, "<bun-browser:Bun>");
 }
 
 // ──────────────────────────────────────────────────────────

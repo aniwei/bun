@@ -17,6 +17,7 @@ export type HostRequest =
   | StopRequest
   | EvalRequest
   | SpawnRequest
+  | ServeFetchRequest
   | FetchResponse; // host resolving a prior FetchRequest
 
 /** Kernel → UI 事件/响应。 */
@@ -29,6 +30,7 @@ export type KernelEvent =
   | ErrorEvent
   | EvalResultEvent
   | SpawnExitEvent
+  | ServeFetchResponse
   | FetchRequest
   | VfsEvent;
 
@@ -161,4 +163,45 @@ export interface SpawnExitEvent {
   id: string;
   /** 进程退出码（0 = 正常）。 */
   code: number;
+}
+
+/**
+ * UI → Kernel：向已注册的 `Bun.serve({ fetch })` 路由派发一个请求。
+ *
+ * 用户在 WASM 内调用 `Bun.serve({ fetch, port })`（见 `BUN_GLOBAL_SRC`）将 handler
+ * 写入 `globalThis.__bun_routes[port]`；本消息则调用 `globalThis.__bun_dispatch_fetch`
+ * 在 WASM 侧执行 handler 并将响应序列化回传。
+ *
+ * Phase 3 T3.3/T3.4 最小切片：尚无 ServiceWorker / iframe 预览，主要用于
+ * 单测与服务端渲染类场景。
+ */
+export interface ServeFetchRequest {
+  kind: "serve:fetch";
+  /** 市一请求 id，用于匹配 serve:fetch:response。 */
+  id: string;
+  /** 注册端口号，即 `Bun.serve({ port }).port`。 */
+  port: number;
+  /** 请求 URL（包含 method/headers/body 以外的信息）。 */
+  url: string;
+  /** HTTP 方法，默认 GET。 */
+  method?: string;
+  /** 请求头。用 `Record` 而非 Headers 以便 postMessage 序列化。 */
+  headers?: Record<string, string>;
+  /** 请求体，UTF-8 字符串或 ArrayBuffer。 */
+  body?: string | ArrayBuffer;
+}
+
+/** Kernel → UI：serve:fetch 执行结果。 */
+export interface ServeFetchResponse {
+  kind: "serve:fetch:response";
+  /** 对应 ServeFetchRequest.id。 */
+  id: string;
+  /** 非 2xx 时 status 也会如实返回；只有派发失败才设 error。 */
+  status: number;
+  statusText?: string;
+  headers: Record<string, string>;
+  /** UTF-8 文本 body；二进制负载暂时以 base64 传输或后续扩展为 ArrayBuffer。 */
+  body: string;
+  /** 派发失败（如端口未注册）的错误信息。 */
+  error?: string;
 }

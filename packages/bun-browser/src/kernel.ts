@@ -8,6 +8,7 @@ import {
   type KernelEvent,
   type VfsSnapshotRequest,
   type SpawnRequest,
+  type ServeFetchRequest,
 } from "./protocol";
 import { buildSnapshot, type VfsFile } from "./vfs-client";
 
@@ -36,6 +37,10 @@ export interface KernelOptions {
 
 type PendingEval = { resolve: () => void; reject: (e: Error) => void };
 type PendingSpawn = { resolve: (code: number) => void; reject: (e: Error) => void };
+type PendingServeFetch = {
+  resolve: (r: { status: number; statusText?: string; headers: Record<string, string>; body: string }) => void;
+  reject: (e: Error) => void;
+};
 
 export class Kernel {
   private worker: Worker;
@@ -44,6 +49,7 @@ export class Kernel {
   private rejectReady!: (e: unknown) => void;
   private pendingEvals = new Map<string, PendingEval>();
   private pendingSpawns = new Map<string, PendingSpawn>();
+  private pendingServeFetches = new Map<string, PendingServeFetch>();
 
   constructor(private readonly opts: KernelOptions) {
     this.worker = new Worker(opts.workerUrl, { type: "module" });
@@ -104,6 +110,20 @@ export class Kernel {
         if (pending) {
           this.pendingSpawns.delete(msg.id);
           pending.resolve(msg.code);
+        }
+        break;
+      }
+      case "serve:fetch:response": {
+        const pending = this.pendingServeFetches.get(msg.id);
+        if (pending) {
+          this.pendingServeFetches.delete(msg.id);
+          if (msg.error) pending.reject(new Error(msg.error));
+          else pending.resolve({
+            status: msg.status,
+            ...(msg.statusText !== undefined ? { statusText: msg.statusText } : {}),
+            headers: msg.headers,
+            body: msg.body,
+          });
         }
         break;
       }
@@ -170,6 +190,45 @@ export class Kernel {
     const snapshot = buildSnapshot([{ path, data, mode }]);
     const msg: VfsSnapshotRequest = { kind: "vfs:snapshot", snapshot };
     this.post(msg, [snapshot]);
+  }
+
+  /**
+   * 向已注册的 `Bun.serve({ fetch, port })` 路由派发一个请求。
+   *
+   * Phase 3 T3.3 最小切片：Host 直接绕过 ServiceWorker 主动调用路由 handler。
+   * 本方法并非从浏览器地址栏浏览的 `http://localhost:PORT/` 路径，
+   * 而是测试与 SSR 场景下的直调通道。
+   */
+  async fetch(
+    port: number,
+    init: {
+      url?: string;
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string | ArrayBuffer;
+    } = {},
+  ): Promise<{
+    status: number;
+    statusText?: string;
+    headers: Record<string, string>;
+    body: string;
+  }> {
+    await this.ready;
+    const id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    const url = init.url ?? `http://localhost:${port}/`;
+    return new Promise((resolve, reject) => {
+      this.pendingServeFetches.set(id, { resolve, reject });
+      const req: ServeFetchRequest = {
+        kind: "serve:fetch",
+        id,
+        port,
+        url,
+        ...(init.method !== undefined ? { method: init.method } : {}),
+        ...(init.headers !== undefined ? { headers: init.headers } : {}),
+        ...(init.body !== undefined ? { body: init.body } : {}),
+      };
+      this.post(req);
+    });
   }
 
   stop(code = 130): void {

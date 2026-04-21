@@ -209,6 +209,59 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
         break;
       }
 
+      case "serve:fetch": {
+        if (!rt) throw new Error("not initialized");
+        // 用户 JS 经由 `jsi_eval` = `new Function(code)()` 在 worker globalThis 下执行；
+        // `Bun.serve()` 把路由写到 `globalThis.__bun_routes[port]`，这里直接读同一 globalThis。
+        const routes = (self as Record<string, unknown>).__bun_routes as
+          | Record<number, { fetch: (req: Request) => Response | Promise<Response> }>
+          | undefined;
+        const route = routes?.[msg.port];
+        if (!route) {
+          post({
+            kind: "serve:fetch:response",
+            id: msg.id,
+            status: 502,
+            headers: {},
+            body: "",
+            error: `no route registered for port ${msg.port}`,
+          });
+          break;
+        }
+        // 异步派发；响应到达后再 post。注意不要 await —— onMessage 是同步回调。
+        void (async () => {
+          try {
+            const init: RequestInit = { method: msg.method ?? "GET" };
+            if (msg.headers) init.headers = msg.headers;
+            if (msg.body !== undefined) init.body = msg.body as BodyInit;
+            const req = new Request(msg.url, init);
+            const res = await route.fetch(req);
+            const body = await res.text();
+            const headers: Record<string, string> = {};
+            res.headers.forEach((v, k) => { headers[k] = v; });
+            post({
+              kind: "serve:fetch:response",
+              id: msg.id,
+              status: res.status,
+              statusText: res.statusText,
+              headers,
+              body,
+            });
+          } catch (err) {
+            post({
+              kind: "serve:fetch:response",
+              id: msg.id,
+              status: 500,
+              headers: {},
+              body: "",
+              error: (err as Error).message,
+            });
+          }
+          wakeTickLoop();
+        })();
+        break;
+      }
+
       case "stop": {
         clearTickTimer();
         post({ kind: "exit", code: msg.code ?? 130 });

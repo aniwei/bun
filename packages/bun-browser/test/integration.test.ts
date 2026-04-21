@@ -8,6 +8,7 @@ import { describe, expect, test, beforeAll } from "bun:test";
 import { buildSnapshot } from "../src/vfs-client";
 import { Kernel } from "../src/kernel";
 import { createWasmRuntime, type WasmRuntime } from "../src/wasm";
+import { createContext, runInContext } from "node:vm";
 
 const WASM_PATH = import.meta.dir + "/../bun-core.wasm";
 const WORKER_URL = new URL("../src/kernel-worker.ts", import.meta.url);
@@ -21,10 +22,50 @@ beforeAll(async () => {
 
 // ──────────────────────────────────────────────────────────
 // 辅助：创建独立运行时实例（每个测试独立）
+//
+// 关键：必须使用 vm.Context 沙盒作为 evaluator，否则 setupGlobals 内的 polyfill
+// 会替换 Bun 测试进程的 globalThis.console / Bun / setTimeout 等，污染测试运行时。
 // ──────────────────────────────────────────────────────────
 
 async function makeRuntime(onPrint?: (data: string, kind: "stdout" | "stderr") => void): Promise<WasmRuntime> {
-  return createWasmRuntime(wasmModule, onPrint !== undefined ? { onPrint } : {});
+  const sandbox = createContext({
+    console,
+    queueMicrotask,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    URL,
+    URLSearchParams,
+    TextEncoder,
+    TextDecoder,
+    Uint8Array,
+    ArrayBuffer,
+    Request,
+    Response,
+    Headers,
+    JSON,
+    Math,
+    Date,
+    Promise,
+    Error,
+    TypeError,
+    Object,
+    Array,
+    Symbol,
+    ...((globalThis as { fetch?: unknown }).fetch !== undefined
+      ? { fetch: (globalThis as { fetch: unknown }).fetch }
+      : {}),
+  });
+  const evaluator = (code: string, url: string): unknown => {
+    const wrapped = `(function(){\n${code}\n})()\n//# sourceURL=${url}`;
+    return runInContext(wrapped, sandbox, { filename: url });
+  };
+  return createWasmRuntime(wasmModule, {
+    ...(onPrint !== undefined ? { onPrint } : {}),
+    evaluator,
+    global: sandbox,
+  });
 }
 
 // ──────────────────────────────────────────────────────────
@@ -984,5 +1025,179 @@ describe("Node host (vm.Context) 适配器", () => {
 
     expect(code).toBe(0);
     expect(printed.join("")).toContain("node spawn ok");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Bun.serve()（Phase 3 T3.4）+ Kernel.fetch()（Phase 3 T3.3 minimal）
+// ──────────────────────────────────────────────────────────
+
+describe("Bun.serve() polyfill", () => {
+  test("Bun 全局可用且 serve 返回 { port, stop, url }", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number,
+    ) => number;
+
+    rt.withString(
+      `const s = Bun.serve({ fetch: () => new Response("ok"), port: 40123 });
+       console.log(JSON.stringify({ port: s.port, hasStop: typeof s.stop, url: s.url.href }));
+       s.stop();`,
+      (sp, sl) => {
+        rt.withString("<serve>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+      },
+    );
+
+    const out = printed.join("");
+    expect(out).toContain("\"port\":40123");
+    expect(out).toContain("\"hasStop\":\"function\"");
+    expect(out).toContain("http://localhost:40123/");
+  });
+
+  test("Bun.serve 自动分配端口（port=0 或缺省）", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number,
+    ) => number;
+
+    rt.withString(
+      `const a = Bun.serve({ fetch: () => new Response("a") });
+       const b = Bun.serve({ fetch: () => new Response("b"), port: 0 });
+       console.log("ports:" + a.port + "," + b.port);
+       a.stop(); b.stop();`,
+      (sp, sl) => {
+        rt.withString("<serve-auto>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+      },
+    );
+    const out = printed.join("");
+    const match = out.match(/ports:(\d+),(\d+)/);
+    expect(match).not.toBeNull();
+    const [_, a, b] = match!;
+    expect(Number(a)).toBeGreaterThanOrEqual(40000);
+    expect(Number(b)).toBeGreaterThanOrEqual(40000);
+    expect(a).not.toBe(b);
+  });
+
+  test("__bun_dispatch_fetch 路由到已注册 handler 并返回 Response", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number,
+    ) => number;
+
+    rt.withString(
+      `Bun.serve({
+        port: 40456,
+        fetch(req) { return new Response("hello " + new URL(req.url).pathname, { status: 201 }); }
+       });
+       globalThis.__bun_dispatch_fetch(40456, { url: "http://x/greet" })
+         .then(r => Promise.all([r.text(), Promise.resolve(r.status)]))
+         .then(([body, status]) => console.log("DISPATCH:" + status + ":" + body));`,
+      (sp, sl) => {
+        rt.withString("<dispatch>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+      },
+    );
+
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline) {
+      if (printed.some(p => p.includes("DISPATCH:"))) break;
+      await Bun.sleep(20);
+    }
+    expect(printed.join("")).toContain("DISPATCH:201:hello /greet");
+  });
+
+  test("未注册端口 → 502 响应", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number,
+    ) => number;
+
+    rt.withString(
+      `globalThis.__bun_dispatch_fetch(99999, { url: "http://x/" })
+         .then(r => Promise.all([r.text(), Promise.resolve(r.status)]))
+         .then(([body, status]) => console.log("MISS:" + status));`,
+      (sp, sl) => {
+        rt.withString("<miss>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+      },
+    );
+
+    const deadline = Date.now() + 500;
+    while (Date.now() < deadline) {
+      if (printed.some(p => p.includes("MISS:"))) break;
+      await Bun.sleep(10);
+    }
+    expect(printed.join("")).toContain("MISS:502");
+  });
+});
+
+describe("Kernel.fetch() via Worker", () => {
+  test("Worker 内 polyfill 已替换 Bun.serve（probe）", async () => {
+    let output = "";
+    const kernel = new Kernel({
+      wasmModule,
+      workerUrl: WORKER_URL,
+      onStdout: (d) => { output += d; },
+    });
+    try {
+      await kernel.whenReady();
+      await kernel.eval(
+        "probe",
+        `console.log("installed=" + globalThis.__bun_wasm_serve_installed);
+         console.log("serve_is_polyfill=" + (Bun.serve.toString().indexOf("__bun_next_port") >= 0 || Bun.serve.toString().indexOf("__bun_routes") >= 0));`,
+      );
+      await Bun.sleep(50);
+      expect(output).toContain("installed=true");
+      expect(output).toContain("serve_is_polyfill=true");
+    } finally {
+      kernel.terminate();
+    }
+  });
+
+  test("注册路由 → Kernel.fetch 派发 → 收到 Response", async () => {
+    const kernel = new Kernel({
+      wasmModule,
+      workerUrl: WORKER_URL,
+    });
+
+    try {
+      await kernel.whenReady();
+      // 在 worker 里注册一个路由
+      await kernel.eval(
+        "reg",
+        `Bun.serve({
+           port: 40789,
+           fetch(req) {
+             const u = new URL(req.url);
+             return new Response("kernel-fetch:" + u.pathname + ":" + req.method, { status: 200, headers: { "x-test": "1" } });
+           },
+         });`,
+      );
+
+      const res = await Promise.race([
+        kernel.fetch(40789, { url: "http://localhost:40789/hello", method: "POST" }),
+        Bun.sleep(2000).then(() => { throw new Error("timeout"); }),
+      ]);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("kernel-fetch:/hello:POST");
+      expect(res.headers["x-test"]).toBe("1");
+    } finally {
+      kernel.terminate();
+    }
+  });
+
+  test("未注册端口 → 502 + error", async () => {
+    const kernel = new Kernel({ wasmModule, workerUrl: WORKER_URL });
+    try {
+      await kernel.whenReady();
+      await expect(
+        kernel.fetch(55555, { url: "http://localhost:55555/" }),
+      ).rejects.toThrow(/no route registered/);
+    } finally {
+      kernel.terminate();
+    }
   });
 });
