@@ -9,6 +9,7 @@ import {
   type VfsSnapshotRequest,
   type SpawnRequest,
   type ServeFetchRequest,
+  type InstallRequest,
 } from "./protocol";
 import { buildSnapshot, type VfsFile } from "./vfs-client";
 import { PreviewPortRegistry, buildPreviewUrl } from "./preview-router";
@@ -42,6 +43,25 @@ type PendingServeFetch = {
   resolve: (r: { status: number; statusText?: string; headers: Record<string, string>; body: string }) => void;
   reject: (e: Error) => void;
 };
+type InstallProgressFromWorker = {
+  name: string;
+  version?: string | undefined;
+  phase: "metadata" | "tarball" | "extract" | "done";
+};
+type InstallResultFromWorker = {
+  packages: { name: string; version: string; fileCount: number; dependencies: Record<string, string> }[];
+  lockfile: {
+    lockfileVersion: 1;
+    workspaceCount: 1;
+    packageCount: number;
+    packages: { key: string; name: string; version: string }[];
+  };
+};
+type PendingInstall = {
+  resolve: (r: InstallResultFromWorker) => void;
+  reject: (e: Error) => void;
+  onProgress?: (p: InstallProgressFromWorker) => void;
+};
 
 export class Kernel {
   private worker: Worker;
@@ -51,6 +71,7 @@ export class Kernel {
   private pendingEvals = new Map<string, PendingEval>();
   private pendingSpawns = new Map<string, PendingSpawn>();
   private pendingServeFetches = new Map<string, PendingServeFetch>();
+  private pendingInstalls = new Map<string, PendingInstall>();
   /** Phase 3 T3.1：已注册的预览端口（供 ServiceWorker 同步）。 */
   readonly previewPorts = new PreviewPortRegistry();
 
@@ -127,6 +148,25 @@ export class Kernel {
             headers: msg.headers,
             body: msg.body,
           });
+        }
+        break;
+      }
+      case "install:progress": {
+        const pending = this.pendingInstalls.get(msg.id);
+        pending?.onProgress?.({
+          name: msg.name,
+          ...(msg.version !== undefined ? { version: msg.version } : {}),
+          phase: msg.phase,
+        });
+        break;
+      }
+      case "install:result": {
+        const pending = this.pendingInstalls.get(msg.id);
+        if (pending) {
+          this.pendingInstalls.delete(msg.id);
+          if (msg.error) pending.reject(new Error(msg.error));
+          else if (msg.result) pending.resolve(msg.result);
+          else pending.reject(new Error("install:result missing result payload"));
         }
         break;
       }
@@ -258,27 +298,42 @@ export class Kernel {
   }
 
   /**
-   * Phase 4 T4.1 / T4.2：在浏览器中执行最小 `bun install`。
+   * Phase 4 T4.1 / T4.2：在 **Worker 线程**中执行最小 `bun install`。
    *
-   * 流程：拉取每个顶层依赖的 metadata → 解析版本 → 下载 tarball →
-   * gunzip + ustar 解析 → 把所有文件写入 VFS（`/node_modules/<name>/...`）。
+   * 整个 fetch → gunzip → ustar → 写 VFS 流水线跑在 Kernel Worker 内，
+   * 不再占用 UI 主线程；文件字节也不穿回主线程，而是在 Worker 侧直接
+   * 写入 WASM VFS（`bun_vfs_load_snapshot`）。
    *
-   * 仅展开顶层 dependencies 表，不展开传递依赖；用于 RFC Phase 4 验收
-   * 的最小可验证切片。完整的 lockfile 解析与依赖图扁平化是 Phase 5 的工作。
+   * 仅展开顶层 dependencies 表，不展开传递依赖；完整的 lockfile 解析与
+   * 依赖图扁平化是 Phase 5 的工作。
    */
   async installPackages(
     deps: Record<string, string>,
-    opts: import("./installer").InstallerOptions = {},
-  ): Promise<import("./installer").InstallResult> {
-    const { installPackages } = await import("./installer");
-    const result = await installPackages(deps, opts);
-    if (result.files.length > 0) {
-      await this.ready;
-      const snapshot = buildSnapshot(result.files);
-      const msg: VfsSnapshotRequest = { kind: "vfs:snapshot", snapshot };
-      this.post(msg, [snapshot]);
-    }
-    return result;
+    opts: {
+      registry?: string;
+      installRoot?: string;
+      onProgress?: (p: InstallProgressFromWorker) => void;
+    } = {},
+  ): Promise<InstallResultFromWorker> {
+    await this.ready;
+    const id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    return new Promise<InstallResultFromWorker>((resolve, reject) => {
+      this.pendingInstalls.set(id, {
+        resolve,
+        reject,
+        ...(opts.onProgress !== undefined ? { onProgress: opts.onProgress } : {}),
+      });
+      const req: InstallRequest = {
+        kind: "install:request",
+        id,
+        deps,
+        opts: {
+          ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
+          ...(opts.installRoot !== undefined ? { installRoot: opts.installRoot } : {}),
+        },
+      };
+      this.post(req);
+    });
   }
 
   terminate(): void {

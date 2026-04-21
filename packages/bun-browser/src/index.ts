@@ -22,3 +22,9 @@ export {
   type InstallProgress,
   type TarEntry,
 } from "./installer";
+export {
+  WorkerPool,
+  type WorkerLike,
+  type WorkerFactory,
+  type WorkerPoolOptions,
+} from "./worker-pool";

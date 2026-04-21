@@ -18,6 +18,7 @@ export type HostRequest =
   | EvalRequest
   | SpawnRequest
   | ServeFetchRequest
+  | InstallRequest
   | FetchResponse; // host resolving a prior FetchRequest
 
 /** Kernel → UI 事件/响应。 */
@@ -31,6 +32,8 @@ export type KernelEvent =
   | EvalResultEvent
   | SpawnExitEvent
   | ServeFetchResponse
+  | InstallProgressEvent
+  | InstallResultEvent
   | FetchRequest
   | VfsEvent;
 
@@ -203,5 +206,53 @@ export interface ServeFetchResponse {
   /** UTF-8 文本 body；二进制负载暂时以 base64 传输或后续扩展为 ArrayBuffer。 */
   body: string;
   /** 派发失败（如端口未注册）的错误信息。 */
+  error?: string;
+}
+
+/**
+ * Phase 4：UI → Kernel，在 Worker 内运行 `installPackages()`。
+ *
+ * 整个 fetch → gunzip → tar parse → 写 VFS 流水线都跑在 Worker 线程，避免
+ * 阻塞主线程。Worker 解压完后直接调用 `bun_vfs_load_snapshot` 写入 WASM VFS，
+ * 不再把字节穿回 UI 线程。
+ */
+export interface InstallRequest {
+  kind: "install:request";
+  /** 唯一请求 id。 */
+  id: string;
+  /** 顶层 dependencies 表。 */
+  deps: Record<string, string>;
+  /** InstallerOptions 的可序列化子集（fetch / DecompressionStream 从 worker 自带）。 */
+  opts?: {
+    registry?: string | undefined;
+    installRoot?: string | undefined;
+  };
+}
+
+/** Kernel → UI：install 的进度事件（每个 phase 一次）。 */
+export interface InstallProgressEvent {
+  kind: "install:progress";
+  id: string;
+  name: string;
+  version?: string | undefined;
+  phase: "metadata" | "tarball" | "extract" | "done";
+}
+
+/** Kernel → UI：install 完成。 */
+export interface InstallResultEvent {
+  kind: "install:result";
+  id: string;
+  /**
+   * 简化版 lockfile + 已安装包清单；文件字节不回传（已在 Worker 写入 VFS）。
+   */
+  result?: {
+    packages: { name: string; version: string; fileCount: number; dependencies: Record<string, string> }[];
+    lockfile: {
+      lockfileVersion: 1;
+      workspaceCount: 1;
+      packageCount: number;
+      packages: { key: string; name: string; version: string }[];
+    };
+  };
   error?: string;
 }

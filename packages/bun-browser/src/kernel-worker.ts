@@ -7,6 +7,7 @@
 
 import { PROTOCOL_VERSION, type HostRequest, type KernelEvent } from "./protocol";
 import { createWasmRuntime, type WasmRuntime } from "./wasm";
+import { buildSnapshot } from "./vfs-client";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const self: any;
@@ -265,6 +266,58 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
       case "stop": {
         clearTickTimer();
         post({ kind: "exit", code: msg.code ?? 130 });
+        break;
+      }
+
+      case "install:request": {
+        if (!rt) throw new Error("not initialized");
+        // 在 Worker 内跑完整的 fetch → gunzip → tar → 写 VFS 流水线。
+        // 注意：不阻塞 onmessage，所以用 void + async IIFE。
+        void (async () => {
+          try {
+            const { installPackages } = await import("./installer");
+            const result = await installPackages(msg.deps, {
+              ...(msg.opts?.registry !== undefined ? { registry: msg.opts.registry } : {}),
+              ...(msg.opts?.installRoot !== undefined ? { installRoot: msg.opts.installRoot } : {}),
+              onProgress: (p) => {
+                post({
+                  kind: "install:progress",
+                  id: msg.id,
+                  name: p.name,
+                  ...(p.version !== undefined ? { version: p.version } : {}),
+                  phase: p.phase,
+                });
+              },
+            });
+
+            // 直接在 Worker 内把文件写入 WASM VFS——不再把字节穿回 UI 线程。
+            if (result.files.length > 0 && rt) {
+              const loader = rt.instance.exports.bun_vfs_load_snapshot as
+                | ((ptr: number, len: number) => number)
+                | undefined;
+              if (loader) {
+                const snap = buildSnapshot(result.files);
+                rt.withBytes(new Uint8Array(snap), (ptr, len) => loader(ptr, len));
+              }
+            }
+
+            post({
+              kind: "install:result",
+              id: msg.id,
+              result: {
+                packages: result.packages,
+                lockfile: result.lockfile,
+              },
+            });
+          } catch (err) {
+            post({
+              kind: "install:result",
+              id: msg.id,
+              error: (err as Error).message,
+            });
+          }
+          wakeTickLoop();
+        })();
         break;
       }
 
