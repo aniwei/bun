@@ -15,6 +15,10 @@ export interface WasmRuntimeOptions {
   onPrint?: (data: string, kind: StdKind) => void;
   /** Forwarded to JsiHost — optional transpile callback. */
   transpile?: (src: string, filename: string) => string;
+  /** Forwarded to JsiHost — optional evaluator (e.g. vm.runInContext for Node host). */
+  evaluator?: (code: string, url: string) => unknown;
+  /** Forwarded to JsiHost — the object that becomes `globalThis` inside WASM (handle 4). */
+  global?: object;
 }
 
 /** Opaque runtime handle returned by {@link createWasmRuntime}. */
@@ -37,7 +41,7 @@ export async function createWasmRuntime(
   module: WebAssembly.Module,
   opts: WasmRuntimeOptions = {},
 ): Promise<WasmRuntime> {
-  const { onPrint, transpile } = opts;
+  const { onPrint, transpile, evaluator, global } = opts;
   let _instance: WebAssembly.Instance | undefined;
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -47,6 +51,8 @@ export async function createWasmRuntime(
       ? { onPrint: (data: string, level: PrintLevel) => onPrint(data, level === PrintLevel.Stderr ? "stderr" : "stdout") }
       : {}),
     ...(transpile !== undefined ? { transpile } : {}),
+    ...(evaluator !== undefined ? { evaluator } : {}),
+    ...(global !== undefined ? { global } : {}),
   });
 
   /** Build the minimal WASI shim that routes fd_write to onPrint. */

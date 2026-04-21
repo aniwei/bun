@@ -868,3 +868,121 @@ describe("Kernel.spawn()", () => {
     }
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// fetch() 实际调用（Phase 2 验收：fetch 从用户代码返回 Response）
+// ──────────────────────────────────────────────────────────
+
+describe("fetch 实际调用", () => {
+  test("用户代码中 fetch(localhost) → 返回 Response body", async () => {
+    // 起一个本地服务器避免外部依赖
+    using server = Bun.serve({
+      port: 0,
+      fetch: () => new Response("pong", { headers: { "content-type": "text/plain" } }),
+    });
+    const url = `http://127.0.0.1:${server.port}/`;
+
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number,
+    ) => number;
+
+    // fetch 是异步的；使用 .then(...).then(console.log) 并等待 microtask flush
+    const code = `
+      fetch(${JSON.stringify(url)})
+        .then(r => r.text())
+        .then(t => console.log("FETCH_RESULT:" + t))
+        .catch(e => console.log("FETCH_ERROR:" + e.message));
+    `;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<fetch-test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+
+    // 等待 Promise 链完成；fetch 是宿主原生调用，微任务会在事件循环下一轮触发
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      if (printed.some(p => p.includes("FETCH_RESULT:pong"))) break;
+      await Bun.sleep(20);
+    }
+    expect(printed.join("")).toContain("FETCH_RESULT:pong");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Node host 适配器（Phase 2 验收：同一 wasm 在 vm.Context 下运行）
+// ──────────────────────────────────────────────────────────
+
+describe("Node host (vm.Context) 适配器", () => {
+  test("createNodeRuntime 可加载 wasm 并在沙盒中 eval", async () => {
+    const { createNodeRuntime } = await import("../src/node-host");
+    const printed: string[] = [];
+    const { runtime, sandbox } = await createNodeRuntime(wasmModule, {
+      onPrint: (data) => printed.push(data),
+    });
+    const evalFn = runtime.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number,
+    ) => number;
+
+    runtime.withString("console.log('node host ok');", (sp, sl) => {
+      runtime.withString("<node>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+
+    expect(printed.join("")).toContain("node host ok");
+    expect(typeof sandbox).toBe("object");
+  });
+
+  test("沙盒 extraGlobals 被注入，用户代码可见", async () => {
+    const { createNodeRuntime } = await import("../src/node-host");
+    const printed: string[] = [];
+    const { runtime } = await createNodeRuntime(wasmModule, {
+      onPrint: (data) => printed.push(data),
+      extraGlobals: { SANDBOX_MARK: "xyz123" },
+    });
+    const evalFn = runtime.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number,
+    ) => number;
+
+    runtime.withString("console.log('mark=' + SANDBOX_MARK);", (sp, sl) => {
+      runtime.withString("<mark>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+
+    expect(printed.join("")).toContain("mark=xyz123");
+  });
+
+  test("沙盒与外部 globalThis 隔离：沙盒内 var 不污染外部", async () => {
+    const { createNodeRuntime } = await import("../src/node-host");
+    const { runtime } = await createNodeRuntime(wasmModule);
+    const evalFn = runtime.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number,
+    ) => number;
+
+    // 清理可能残留的外部标识
+    delete (globalThis as Record<string, unknown>).__LEAKED__;
+
+    runtime.withString("globalThis.__LEAKED__ = 42;", (sp, sl) => {
+      runtime.withString("<leak>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+
+    expect((globalThis as Record<string, unknown>).__LEAKED__).toBeUndefined();
+  });
+
+  test("Node host 下 spawn bun -e → 退出码 0 + stdout", async () => {
+    const { createNodeRuntime } = await import("../src/node-host");
+    const printed: string[] = [];
+    const { runtime } = await createNodeRuntime(wasmModule, {
+      onPrint: (data) => printed.push(data),
+    });
+    const spawnFn = runtime.instance.exports.bun_spawn as (
+      ptr: number, len: number,
+    ) => number;
+
+    let code = -1;
+    runtime.withString(JSON.stringify(["bun", "-e", "console.log('node spawn ok');"]), (ptr, len) => {
+      code = spawnFn(ptr, len);
+    });
+
+    expect(code).toBe(0);
+    expect(printed.join("")).toContain("node spawn ok");
+  });
+});

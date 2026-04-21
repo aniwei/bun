@@ -59,6 +59,12 @@ export interface JsiHostOptions {
    * 中高级用法：插入 esbuild-wasm / swc-wasm 实现。
    */
   transpile?: (source: string, filename: string) => string;
+  /**
+   * 代码求值器。默认为 `new Function(code)()`（宿主 global 作用域）。
+   * Node 宿主可注入 `vm.runInContext` 以隔离到沙箱 Context，满足 Phase 2 验收
+   * "同一 wasm 在 Node.js 宿主下用 vm.Context 作为 JSI backend"。
+   */
+  evaluator?: (code: string, url: string) => unknown;
 }
 
 export class JsiHost {
@@ -70,6 +76,7 @@ export class JsiHost {
   private memory: WebAssembly.Memory | undefined;
   private onPrint: (data: string, level: PrintLevel) => void;
   private transpile: (source: string, filename: string) => string;
+  private evaluator: (code: string, url: string) => unknown;
   public wasmExports: WebAssembly.Exports | undefined;
 
   constructor(opts: JsiHostOptions = {}) {
@@ -83,6 +90,13 @@ export class JsiHost {
         else console.log(data);
       });
     this.transpile = opts.transpile ?? ((source) => source);
+    this.evaluator =
+      opts.evaluator ??
+      ((code, url) => {
+        // 默认：宿主 global 作用域 eval。sourceURL 注释便于 DevTools 栈帧归属。
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+        return new Function(`${code}\n//# sourceURL=${url}`)();
+      });
   }
 
   bind(instance: WebAssembly.Instance): void {
@@ -351,9 +365,7 @@ export class JsiHost {
         try {
           const code = self.readString(codePtr, codeLen);
           const url = urlLen > 0 ? self.readString(urlPtr, urlLen) : "<eval>";
-          // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-          const compiled = new Function(`${code}\n//# sourceURL=${url}`);
-          return self.retain(compiled());
+          return self.retain(self.evaluator(code, url));
         } catch (e) {
           self.lastException = e;
           return EXCEPTION_SENTINEL;
@@ -369,9 +381,7 @@ export class JsiHost {
         try {
           const code = self.readString(codePtr, codeLen);
           const url = urlLen > 0 ? self.readString(urlPtr, urlLen) : "<module>";
-          // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-          const compiled = new Function(`${code}\n//# sourceURL=${url}`);
-          return self.retain(compiled());
+          return self.retain(self.evaluator(code, url));
         } catch (e) {
           self.lastException = e;
           return EXCEPTION_SENTINEL;
