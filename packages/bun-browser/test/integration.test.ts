@@ -1201,3 +1201,68 @@ describe("Kernel.fetch() via Worker", () => {
     }
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// Phase 3 T3.1：Kernel.registerPreviewPort / unregisterPreviewPort
+// ──────────────────────────────────────────────────────────
+
+describe("Kernel preview port registry", () => {
+  test("registerPreviewPort 返回预览 URL 且 previewPorts 已登记", async () => {
+    const kernel = new Kernel({ wasmModule, workerUrl: WORKER_URL });
+    try {
+      await kernel.whenReady();
+      const url = kernel.registerPreviewPort(40123, "https://app.example.com");
+      expect(url).toBe("https://app.example.com/__bun_preview__/40123/");
+      expect(kernel.previewPorts.has(40123)).toBe(true);
+      expect(kernel.previewPorts.list()).toEqual([40123]);
+      expect(kernel.unregisterPreviewPort(40123)).toBe(true);
+      expect(kernel.previewPorts.has(40123)).toBe(false);
+    } finally {
+      kernel.terminate();
+    }
+  });
+
+  test("registerPreviewPort 在没有 origin 时退化为 http://localhost", async () => {
+    const kernel = new Kernel({ wasmModule, workerUrl: WORKER_URL });
+    try {
+      await kernel.whenReady();
+      const url = kernel.registerPreviewPort(40456);
+      // Bun 测试进程下无 globalThis.location：应退化为 http://localhost
+      expect(url).toBe("http://localhost/__bun_preview__/40456/");
+    } finally {
+      kernel.terminate();
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Phase 3 T3.1：Kernel.registerPreviewPort / unregisterPreviewPort
+// ──────────────────────────────────────────────────────────
+
+describe("Kernel preview port registry", () => {
+  test("registerPreviewPort 返回预览 URL 且 previewPorts 已登记", async () => {
+    const kernel = new Kernel({ wasmModule, workerUrl: WORKER_URL });
+    try {
+      await kernel.whenReady();
+      const url = kernel.registerPreviewPort(40123, "https://app.example.com");
+      expect(url).toBe("https://app.example.com/__bun_preview__/40123/");
+      expect(kernel.previewPorts.has(40123)).toBe(true);
+      expect(kernel.previewPorts.list()).toEqual([40123]);
+      expect(kernel.unregisterPreviewPort(40123)).toBe(true);
+      expect(kernel.previewPorts.has(40123)).toBe(false);
+    } finally {
+      kernel.terminate();
+    }
+  });
+
+  test("registerPreviewPort 在没有 origin 时退化为 http://localhost", async () => {
+    const kernel = new Kernel({ wasmModule, workerUrl: WORKER_URL });
+    try {
+      await kernel.whenReady();
+      const url = kernel.registerPreviewPort(40456);
+      expect(url).toBe("http://localhost/__bun_preview__/40456/");
+    } finally {
+      kernel.terminate();
+    }
+  });
+});

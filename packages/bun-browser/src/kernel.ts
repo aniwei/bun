@@ -11,6 +11,7 @@ import {
   type ServeFetchRequest,
 } from "./protocol";
 import { buildSnapshot, type VfsFile } from "./vfs-client";
+import { PreviewPortRegistry, buildPreviewUrl } from "./preview-router";
 
 export interface KernelOptions {
   /** 已编译的 bun-core.wasm 模块（可由 `WebAssembly.compileStreaming(fetch(...))` 得到）。 */
@@ -50,6 +51,8 @@ export class Kernel {
   private pendingEvals = new Map<string, PendingEval>();
   private pendingSpawns = new Map<string, PendingSpawn>();
   private pendingServeFetches = new Map<string, PendingServeFetch>();
+  /** Phase 3 T3.1：已注册的预览端口（供 ServiceWorker 同步）。 */
+  readonly previewPorts = new PreviewPortRegistry();
 
   constructor(private readonly opts: KernelOptions) {
     this.worker = new Worker(opts.workerUrl, { type: "module" });
@@ -233,6 +236,25 @@ export class Kernel {
 
   stop(code = 130): void {
     this.post({ kind: "stop", code });
+  }
+
+  /**
+   * Phase 3 T3.1：标记一个端口已由 `Bun.serve()` 注册，供 ServiceWorker 拦截
+   * `${origin}/__bun_preview__/{port}/...` 时转发到本 Kernel。
+   *
+   * 返回对应的预览 URL 基地址。调用方应将 `iframe.src` 指向该 URL。
+   */
+  registerPreviewPort(port: number, origin?: string): string {
+    this.previewPorts.add(port);
+    const resolvedOrigin =
+      origin ??
+      (typeof location !== "undefined" && location?.origin ? location.origin : "http://localhost");
+    return buildPreviewUrl(resolvedOrigin, port, "/");
+  }
+
+  /** 解除某个端口的预览注册。 */
+  unregisterPreviewPort(port: number): boolean {
+    return this.previewPorts.remove(port);
   }
 
   terminate(): void {
