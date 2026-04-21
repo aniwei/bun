@@ -26,6 +26,9 @@ pub extern "jsi" fn jsi_make_error(msg_ptr: u32, msg_len: usize) u32;
 pub extern "jsi" fn jsi_typeof(handle: u32) u32;
 pub extern "jsi" fn jsi_to_number(handle: u32) f64;
 pub extern "jsi" fn jsi_to_boolean(handle: u32) u32;
+/// String.prototype.toString() — coerces any value to its JS string representation.
+/// Returns a newly retained string handle; caller must jsi_release when done.
+pub extern "jsi" fn jsi_to_string(handle: u32) u32;
 pub extern "jsi" fn jsi_string_length(handle: u32) usize;
 pub extern "jsi" fn jsi_string_read(handle: u32, buf_ptr: u32, buf_len: usize) void;
 

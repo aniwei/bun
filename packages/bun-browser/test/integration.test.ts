@@ -1266,3 +1266,111 @@ describe("Kernel preview port registry", () => {
     }
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// WASM semver: bun_semver_select（真实 Zig semver）
+// ──────────────────────────────────────────────────────────
+
+describe("WasmRuntime.semverSelect", () => {
+  test("bun_semver_select 导出存在", async () => {
+    const rt = await makeRuntime();
+    expect(rt.instance.exports.bun_semver_select).toBeInstanceOf(Function);
+  });
+
+  test("^1.0.0 匹配最高 1.x", async () => {
+    const rt = await makeRuntime();
+    const versions = ["1.0.0", "1.1.0", "1.2.3", "2.0.0"];
+    const result = rt.semverSelect(JSON.stringify(versions), "^1.0.0");
+    expect(result).toBe("1.2.3");
+  });
+
+  test("~1.1.0 只匹配 1.1.x", async () => {
+    const rt = await makeRuntime();
+    const versions = ["1.0.9", "1.1.0", "1.1.5", "1.2.0"];
+    const result = rt.semverSelect(JSON.stringify(versions), "~1.1.0");
+    expect(result).toBe("1.1.5");
+  });
+
+  test("精确版本", async () => {
+    const rt = await makeRuntime();
+    const versions = ["1.0.0", "2.0.0", "3.0.0"];
+    expect(rt.semverSelect(JSON.stringify(versions), "2.0.0")).toBe("2.0.0");
+  });
+
+  test("无匹配版本返回 null", async () => {
+    const rt = await makeRuntime();
+    const versions = ["1.0.0", "1.1.0"];
+    expect(rt.semverSelect(JSON.stringify(versions), "^2.0.0")).toBeNull();
+  });
+
+  test("latest tag", async () => {
+    const rt = await makeRuntime();
+    const versions = ["1.0.0", "2.0.0", "3.0.0"];
+    const result = rt.semverSelect(JSON.stringify(versions), "latest");
+    // "latest" 不是合法 semver range，Zig 解析失败时 WASM 返回空（null）
+    // 这里主要确认不崩溃
+    expect(result === null || typeof result === "string").toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// WASM integrity: bun_integrity_verify
+// ──────────────────────────────────────────────────────────
+
+describe("WasmRuntime.integrityVerify", () => {
+  test("bun_integrity_verify 导出存在", async () => {
+    const rt = await makeRuntime();
+    expect(rt.instance.exports.bun_integrity_verify).toBeInstanceOf(Function);
+  });
+
+  test("空 integrity → ok（无约束）", async () => {
+    const rt = await makeRuntime();
+    const data = new Uint8Array([1, 2, 3, 4]);
+    expect(rt.integrityVerify(data, "")).toBe("ok");
+  });
+
+  test("sha512 正确哈希 → ok", async () => {
+    const rt = await makeRuntime();
+    const data = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
+    // 用 Web Crypto 计算期望值，再传给 WASM 验证
+    const digest = await crypto.subtle.digest("SHA-512", data);
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    const sri = "sha512-" + b64.replace(/=+$/, "");
+    expect(rt.integrityVerify(data, sri)).toBe("ok");
+  });
+
+  test("sha256 正确哈希 → ok", async () => {
+    const rt = await makeRuntime();
+    const data = new Uint8Array([104, 105]); // "hi"
+    const digest = await crypto.subtle.digest("SHA-256", data);
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    const sri = "sha256-" + b64.replace(/=+$/, "");
+    expect(rt.integrityVerify(data, sri)).toBe("ok");
+  });
+
+  test("sha512 篡改数据 → fail", async () => {
+    const rt = await makeRuntime();
+    const original = new Uint8Array([1, 2, 3]);
+    const tampered = new Uint8Array([1, 2, 4]); // 最后一字节改变
+    const digest = await crypto.subtle.digest("SHA-512", original);
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    const sri = "sha512-" + b64.replace(/=+$/, "");
+    expect(rt.integrityVerify(tampered, sri)).toBe("fail");
+  });
+
+  test("未知算法 → ok（向前兼容）", async () => {
+    const rt = await makeRuntime();
+    const data = new Uint8Array([1, 2, 3]);
+    expect(rt.integrityVerify(data, "sha3-abc123")).toBe("ok");
+  });
+
+  test("sha1 hex（shasum 字段）→ ok", async () => {
+    const rt = await makeRuntime();
+    const data = new Uint8Array([65, 66, 67]); // "ABC"
+    const digest = await crypto.subtle.digest("SHA-1", data);
+    const hex = Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    expect(rt.integrityVerify(data, hex)).toBe("ok");
+  });
+});

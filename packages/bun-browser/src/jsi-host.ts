@@ -213,6 +213,15 @@ export class JsiHost {
       },
       jsi_to_number: (handle: number): number => Number(self.deref(handle)),
       jsi_to_boolean: (handle: number): number => (self.deref(handle) ? 1 : 0),
+      // 将任意值强制转为 JS 字符串（等价于 String(v)），返回新 retain 的 handle。
+      jsi_to_string: (handle: number): number => {
+        try {
+          return self.retain(String(self.deref(handle)));
+        } catch (e) {
+          self.lastException = e;
+          return EXCEPTION_SENTINEL;
+        }
+      },
       jsi_string_length: (handle: number): number => {
         const s = self.deref(handle);
         if (typeof s !== "string") return 0;
@@ -439,6 +448,7 @@ export interface JsiImportsTyped {
   jsi_typeof: (handle: number) => number;
   jsi_to_number: (handle: number) => number;
   jsi_to_boolean: (handle: number) => number;
+  jsi_to_string: (handle: number) => number;
   jsi_string_length: (handle: number) => number;
   jsi_string_read: (handle: number, bufPtr: number, bufLen: number) => void;
   jsi_get_prop: (obj: number, namePtr: number, nameLen: number) => number;

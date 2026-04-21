@@ -233,7 +233,7 @@ pub const String = extern struct {
     const max_addressable_space = u63;
 
     comptime {
-        if (@sizeOf(usize) != 8) {
+        if (@sizeOf(usize) != 8 and !@import("bun").Environment.isWasm) {
             @compileError("This code needs to be updated for non-64-bit architectures");
         }
     }

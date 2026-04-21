@@ -279,6 +279,8 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
             const result = await installPackages(msg.deps, {
               ...(msg.opts?.registry !== undefined ? { registry: msg.opts.registry } : {}),
               ...(msg.opts?.installRoot !== undefined ? { installRoot: msg.opts.installRoot } : {}),
+              // 把 WASM runtime 传给 installer，让 semverSelect 走真 Zig 实现
+              wasmRuntime: rt,
               onProgress: (p) => {
                 post({
                   kind: "install:progress",

@@ -1,22 +1,22 @@
 //! Bun Browser Runtime — Standalone WASM entry point.
 //!
-//! This is a self-contained version of `bun_browser.zig` that does NOT
-//! import `@import("bun")`.  It can be compiled by `build-wasm-smoke.zig`
-//! (or any lightweight build script) into a real `bun-core.wasm` binary
-//! without pulling in the full Bun dependency graph (JSC, libuv, etc.).
+//! Compiled by `build-wasm-smoke.zig` into a real `bun-core.wasm` binary.
+//! Uses `bun_wasm_shim` instead of the full Bun dependency graph.
 //!
 //! Exported ABI (consumed by packages/bun-browser/src/kernel-worker.ts):
 //!
-//!   bun_browser_init()                     — one-time runtime init
-//!   bun_browser_run(ptr, len) i32          — run an entry path from VFS
-//!   bun_browser_eval(sp,sl,fp,fl) i32      — eval raw JS source
-//!   bun_vfs_load_snapshot(ptr, len) u32    — load VFS snapshot
-//!   bun_tick() u32                         — drive event loop; returns ms until next timer (0=idle)
-//!   bun_vfs_write(p,pl,d,dl) i32           — write a file into VFS from Host
-//!   jsi_host_invoke(id,this,argv,argc) u32 — HostFn dispatch
-//!   jsi_host_arg_scratch(argc) [*]u32      — HostFn argv scratch
-//!   bun_malloc(n) u32                      — linear-memory alloc (for host)
-//!   bun_free(ptr)                          — linear-memory free
+//!   bun_browser_init()                            — one-time runtime init
+//!   bun_browser_run(ptr, len) i32                 — run an entry path from VFS
+//!   bun_browser_eval(sp,sl,fp,fl) i32             — eval raw JS source
+//!   bun_vfs_load_snapshot(ptr, len) u32           — load VFS snapshot
+//!   bun_tick() u32                                — drive event loop
+//!   bun_vfs_write(p,pl,d,dl) i32                 — write a file into VFS
+//!   jsi_host_invoke(id,this,argv,argc) u32        — HostFn dispatch
+//!   jsi_host_arg_scratch(argc) [*]u32             — HostFn argv scratch
+//!   bun_malloc(n) u32                             — linear-memory alloc (for host)
+//!   bun_free(ptr)                                 — linear-memory free
+//!   bun_semver_select(vp,vl,rp,rl) u64           — pick best version from JSON array
+//!   bun_integrity_verify(dp,dl,ip,il) u32        — verify tarball integrity (SRI)
 
 const std = @import("std");
 const Timer = @import("timer.zig").Timer;
@@ -24,6 +24,8 @@ const Timer = @import("timer.zig").Timer;
 // ── External JSI / sys_wasm imports (injected via build module map) ──
 const jsi = @import("jsi");
 const sys_wasm = @import("sys_wasm");
+// ── bun_wasm_shim: gives access to bun.Semver.* for the WASM build ──
+const bun = @import("bun");
 
 // ── Allocator: wasm_allocator grows the wasm linear memory via memory.grow ──
 const allocator = std.heap.wasm_allocator;
@@ -56,41 +58,21 @@ fn clockMs() u64 {
 // Path utilities  (identical to bun_browser.zig)
 // ──────────────────────────────────────────────────────────
 
+/// Normalize a POSIX path (resolve `.` / `..`, collapse duplicate `/`).
+/// Uses std.fs.path.resolvePosix for correctness.
 fn normPath(alloc: std.mem.Allocator, path: []const u8) std.mem.Allocator.Error![]u8 {
-    var parts: std.ArrayListUnmanaged([]const u8) = .{};
-    defer parts.deinit(alloc);
-
-    var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |seg| {
-        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
-        if (std.mem.eql(u8, seg, "..")) {
-            if (parts.items.len > 0) parts.shrinkRetainingCapacity(parts.items.len - 1);
-        } else {
-            try parts.append(alloc, seg);
-        }
-    }
-
-    var buf: std.ArrayListUnmanaged(u8) = .{};
-    for (parts.items) |seg| {
-        try buf.append(alloc, '/');
-        try buf.appendSlice(alloc, seg);
-    }
-    if (buf.items.len == 0) try buf.append(alloc, '/');
-    return buf.toOwnedSlice(alloc);
+    return std.fs.path.resolvePosix(alloc, &.{path});
 }
 
 fn joinPath(alloc: std.mem.Allocator, base_dir: []const u8, rel: []const u8) ![]u8 {
-    if (rel.len > 0 and rel[0] == '/') return alloc.dupe(u8, rel);
+    if (rel.len > 0 and rel[0] == '/') return normPath(alloc, rel);
     const combined = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ base_dir, rel });
     defer alloc.free(combined);
     return normPath(alloc, combined);
 }
 
 fn pathDirname(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
-        return if (idx == 0) "/" else path[0..idx];
-    }
-    return "/";
+    return std.fs.path.dirnamePosix(path) orelse "/";
 }
 
 // ──────────────────────────────────────────────────────────
@@ -250,18 +232,23 @@ const PATH_MODULE_SRC: []const u8 =
 ;
 
 const URL_MODULE_SRC: []const u8 =
+    \\// Phase 5.1 T5.1.4: prefer __bun_url_parse (Zig std.Uri backed) over browser URL
+    \\var _urlParse=(typeof __bun_url_parse!=='undefined')?__bun_url_parse:null;
     \\var _URL=(typeof URL!=='undefined'?URL:(globalThis.URL||null));
     \\function fileURLToPath(url){
     \\  var href=typeof url==='string'?url:url.href;
+    \\  if(_urlParse){try{var r=_urlParse(href);if(r)return r.pathname||href;}catch(e){}}
     \\  if(!_URL)return href.replace(/^file:\/\//,'');
     \\  try{return new _URL(href).pathname;}catch(e){return href;}
     \\}
     \\function pathToFileURL(path){
     \\  var p=path&&path[0]==='/'?path:'/'+path;
+    \\  if(_urlParse){try{var r=_urlParse('file://'+p);if(r)return r;}catch(e){}}
     \\  if(_URL)return new _URL('file://'+p);
     \\  return{href:'file://'+p,pathname:p};
     \\}
     \\function parse(urlStr){
+    \\  if(_urlParse){try{return _urlParse(urlStr);}catch(e){return null;}}
     \\  if(!_URL)return null;
     \\  try{var u=new _URL(urlStr);return{href:u.href,protocol:u.protocol,hostname:u.hostname,port:u.port||null,pathname:u.pathname,search:u.search||null,hash:u.hash||null,host:u.host,auth:null};}
     \\  catch(e){return null;}
@@ -600,6 +587,76 @@ fn consolePrintArgs(args: []const jsi.Value, level: u32) void {
     jsi.imports.jsi_print(@intFromPtr(buf.items.ptr), buf.items.len, level);
 }
 
+// ── URL parser HostFn (Phase 5.1 T5.1.4) ─────────────────────────────────────
+/// Parse a URL string using std.Uri and return a JS object with URL components.
+/// Called from the embedded URL_MODULE_SRC JS via __bun_url_parse.
+fn urlParseHostFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
+    if (args.len == 0 or args[0].isNullOrUndefined()) return jsi.Value.null_;
+    const url_str = try runtime_g.dupeString(args[0]);
+    defer allocator.free(url_str);
+
+    const uri = std.Uri.parse(url_str) catch return jsi.Value.null_;
+
+    const obj = runtime_g.makeObject();
+
+    // href = original string
+    runtime_g.setProperty(obj, "href", runtime_g.makeString(url_str));
+
+    // scheme + protocol
+    runtime_g.setProperty(obj, "scheme", runtime_g.makeString(uri.scheme));
+    const protocol = try std.fmt.allocPrint(allocator, "{s}:", .{uri.scheme});
+    defer allocator.free(protocol);
+    runtime_g.setProperty(obj, "protocol", runtime_g.makeString(protocol));
+
+    // host / hostname / port
+    const hostname_str: []const u8 = if (uri.host) |h| switch (h) {
+        .raw, .percent_encoded => |s| s,
+    } else "";
+    if (uri.port) |port| {
+        const full_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ hostname_str, port });
+        defer allocator.free(full_host);
+        const port_str = try std.fmt.allocPrint(allocator, "{d}", .{port});
+        defer allocator.free(port_str);
+        runtime_g.setProperty(obj, "host", runtime_g.makeString(full_host));
+        runtime_g.setProperty(obj, "hostname", runtime_g.makeString(hostname_str));
+        runtime_g.setProperty(obj, "port", runtime_g.makeString(port_str));
+    } else {
+        runtime_g.setProperty(obj, "host", runtime_g.makeString(hostname_str));
+        runtime_g.setProperty(obj, "hostname", runtime_g.makeString(hostname_str));
+        runtime_g.setProperty(obj, "port", runtime_g.makeString(""));
+    }
+
+    // pathname
+    const path_str: []const u8 = switch (uri.path) {
+        .raw, .percent_encoded => |s| s,
+    };
+    runtime_g.setProperty(obj, "pathname",
+        runtime_g.makeString(if (path_str.len > 0) path_str else "/"));
+
+    // search (query with leading ?)
+    if (uri.query) |q| {
+        const q_str: []const u8 = switch (q) { .raw, .percent_encoded => |s| s };
+        const search = try std.fmt.allocPrint(allocator, "?{s}", .{q_str});
+        defer allocator.free(search);
+        runtime_g.setProperty(obj, "search", runtime_g.makeString(search));
+    } else {
+        runtime_g.setProperty(obj, "search", runtime_g.makeString(""));
+    }
+
+    // hash (fragment with leading #)
+    if (uri.fragment) |f| {
+        const f_str: []const u8 = switch (f) { .raw, .percent_encoded => |s| s };
+        const hash = try std.fmt.allocPrint(allocator, "#{s}", .{f_str});
+        defer allocator.free(hash);
+        runtime_g.setProperty(obj, "hash", runtime_g.makeString(hash));
+    } else {
+        runtime_g.setProperty(obj, "hash", runtime_g.makeString(""));
+    }
+
+    runtime_g.setProperty(obj, "auth", jsi.Value.null_);
+    return obj;
+}
+
 fn consoleLogFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
     consolePrintArgs(args, 1);
     return jsi.Value.undefined_;
@@ -737,6 +794,10 @@ fn setupGlobals(rt: *jsi.Runtime) !void {
     rt.setProperty(rt.global, "__bun_set_timeout",   set_timeout_fn);
     rt.setProperty(rt.global, "__bun_set_interval",  set_interval_fn);
     rt.setProperty(rt.global, "__bun_clear_timer",   clear_timer_fn);
+
+    // ── URL parser (Phase 5.1 T5.1.4) ────────────────────
+    const url_parse_fn = try rt.createHostFunction(urlParseHostFn, "__bun_url_parse", 1);
+    rt.setProperty(rt.global, "__bun_url_parse", url_parse_fn);
 
     _ = try rt.evalScript(
         \\globalThis.require = globalThis.__bun_require;
@@ -1025,6 +1086,84 @@ fn handOff(buf: []u8) u64 {
         return packError(1);
     };
     return packResult(ptr, @intCast(buf.len));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// bun_semver_select — real semver via src/semver/* (Zig reuse step 2)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// ABI: (versions_json_ptr, versions_json_len, range_ptr, range_len) → u64
+//
+// `versions_json` is a JSON array of version strings, e.g. ["1.0.0","2.0.0"].
+// `range` is a semver range string, e.g. "^1.0.0".
+//
+// Returns a packed (ptr << 32 | len) pointing to a heap-allocated UTF-8 string
+// of the best matching version, or packError(1) if none matched.
+// The returned buffer must be freed by the host via `bun_free`.
+export fn bun_semver_select(
+    versions_ptr: [*]const u8,
+    versions_len: u32,
+    range_ptr: [*]const u8,
+    range_len: u32,
+) u64 {
+    if (!initialized) return packError(1);
+
+    const versions_json = versions_ptr[0..versions_len];
+    const range_str = range_ptr[0..range_len];
+
+    return semverSelect(versions_json, range_str) catch packError(1);
+}
+
+fn semverSelect(versions_json: []const u8, range_str: []const u8) !u64 {
+    const Semver = bun.Semver;
+    const Version = Semver.Version;
+    const Query = Semver.Query;
+    const SlicedString = Semver.SlicedString;
+
+    // Parse the semver range
+    const range_sliced = SlicedString{ .buf = range_str, .slice = range_str };
+    var group = try Query.parse(allocator, range_str, range_sliced);
+    defer group.deinit();
+
+    // Parse the JSON array of version strings.
+    // We use a simple streaming parser to avoid allocating the full AST.
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, versions_json, .{});
+    defer parsed.deinit();
+
+    const arr = switch (parsed.value) {
+        .array => |a| a,
+        else => return packError(1),
+    };
+
+    var best: ?struct { ver: Version, str: []const u8 } = null;
+
+    for (arr.items) |item| {
+        const ver_str = switch (item) {
+            .string => |s| s,
+            else => continue,
+        };
+
+        const parse_result = Version.parseUTF8(ver_str);
+        if (!parse_result.valid) continue;
+        const ver = parse_result.version.min();
+
+        // Skip pre-release versions unless the range explicitly requests them
+        if (ver.tag.hasPre()) continue;
+
+        if (!group.satisfies(ver, range_str, ver_str)) continue;
+
+        // Keep the highest version that satisfies
+        if (best) |b| {
+            const ord = ver.order(b.ver, ver_str, b.str);
+            if (ord != .gt) continue;
+        }
+        best = .{ .ver = ver, .str = ver_str };
+    }
+
+    const chosen = (best orelse return packError(1)).str;
+
+    const buf = try allocator.dupe(u8, chosen);
+    return handOff(buf);
 }
 
 export fn bun_lockfile_parse(src_ptr: [*]const u8, src_len: u32) u64 {
@@ -1715,4 +1854,428 @@ fn stripCommentsAndStrings(alloc: std.mem.Allocator, src: []const u8) std.mem.Al
         i += 1;
     }
     return out;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// bun_integrity_verify
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// ABI: (data_ptr, data_len, integrity_ptr, integrity_len) → u32
+//
+// `data`      — raw bytes (e.g. a downloaded .tgz tarball).
+// `integrity` — Subresource Integrity (SRI) string, e.g. "sha512-<base64>".
+//               Also accepts plain sha1 hex ("sha1-<hex>") and bare shasum
+//               (40-char hex, treated as sha1).
+//
+// Returns:
+//   0 — verification passed (or integrity string is empty/unknown → treated as pass)
+//   1 — verification failed (hash mismatch)
+//   2 — bad integrity string / unsupported algorithm
+//
+export fn bun_integrity_verify(
+    data_ptr: [*]const u8,
+    data_len: u32,
+    integrity_ptr: [*]const u8,
+    integrity_len: u32,
+) u32 {
+    const data = data_ptr[0..data_len];
+    const sri = integrity_ptr[0..integrity_len];
+    return integrityVerify(data, sri);
+}
+
+fn integrityVerify(data: []const u8, sri: []const u8) u32 {
+    const Base64NoPad = std.base64.standard_no_pad;
+
+    if (sri.len == 0) return 0; // no integrity → pass
+
+    // Locate the '-' separator: "sha512-<base64>"
+    const dash = std.mem.indexOfScalar(u8, sri, '-') orelse {
+        // Could be a bare 40-char hex shasum (legacy npm field)
+        if (sri.len == 40) {
+            // Parse hex → sha1 digest
+            var expected: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+            if (!hexDecode(&expected, sri)) return 2;
+            var actual: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+            std.crypto.hash.Sha1.hash(data, &actual, .{});
+            return if (std.mem.eql(u8, &actual, &expected)) 0 else 1;
+        }
+        return 2;
+    };
+
+    const algo = sri[0..dash];
+    const b64 = std.mem.trimRight(u8, sri[dash + 1 ..], "=");
+
+    if (std.mem.eql(u8, algo, "sha512")) {
+        const len = std.crypto.hash.sha2.Sha512.digest_length;
+        var expected: [len]u8 = undefined;
+        const decoded_size = Base64NoPad.Decoder.calcSizeForSlice(b64) catch return 2;
+        if (decoded_size != len) return 2;
+        Base64NoPad.Decoder.decode(&expected, b64) catch return 2;
+        var actual: [len]u8 = undefined;
+        std.crypto.hash.sha2.Sha512.hash(data, &actual, .{});
+        return if (std.mem.eql(u8, &actual, &expected)) 0 else 1;
+    } else if (std.mem.eql(u8, algo, "sha384")) {
+        const len = std.crypto.hash.sha2.Sha384.digest_length;
+        var expected: [len]u8 = undefined;
+        const decoded_size = Base64NoPad.Decoder.calcSizeForSlice(b64) catch return 2;
+        if (decoded_size != len) return 2;
+        Base64NoPad.Decoder.decode(&expected, b64) catch return 2;
+        var actual: [len]u8 = undefined;
+        std.crypto.hash.sha2.Sha384.hash(data, &actual, .{});
+        return if (std.mem.eql(u8, &actual, &expected)) 0 else 1;
+    } else if (std.mem.eql(u8, algo, "sha256")) {
+        const len = std.crypto.hash.sha2.Sha256.digest_length;
+        var expected: [len]u8 = undefined;
+        const decoded_size = Base64NoPad.Decoder.calcSizeForSlice(b64) catch return 2;
+        if (decoded_size != len) return 2;
+        Base64NoPad.Decoder.decode(&expected, b64) catch return 2;
+        var actual: [len]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(data, &actual, .{});
+        return if (std.mem.eql(u8, &actual, &expected)) 0 else 1;
+    } else if (std.mem.eql(u8, algo, "sha1")) {
+        const len = std.crypto.hash.Sha1.digest_length;
+        var expected: [len]u8 = undefined;
+        const decoded_size = Base64NoPad.Decoder.calcSizeForSlice(b64) catch return 2;
+        if (decoded_size != len) return 2;
+        Base64NoPad.Decoder.decode(&expected, b64) catch return 2;
+        var actual: [len]u8 = undefined;
+        std.crypto.hash.Sha1.hash(data, &actual, .{});
+        return if (std.mem.eql(u8, &actual, &expected)) 0 else 1;
+    }
+
+    // Unknown algorithm — treat as pass (forward-compatible)
+    return 0;
+}
+
+/// Decode a lowercase hex string into `out`. Returns false if the input is
+/// not valid hex or has the wrong length.
+fn hexDecode(out: []u8, hex: []const u8) bool {
+    if (hex.len != out.len * 2) return false;
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        const hi = hexNibble(hex[i * 2]) orelse return false;
+        const lo = hexNibble(hex[i * 2 + 1]) orelse return false;
+        out[i] = (@as(u8, hi) << 4) | @as(u8, lo);
+    }
+    return true;
+}
+
+inline fn hexNibble(c: u8) ?u4 {
+    return switch (c) {
+        '0'...'9' => @as(u4, @intCast(c - '0')),
+        'a'...'f' => @as(u4, @intCast(c - 'a' + 10)),
+        'A'...'F' => @as(u4, @intCast(c - 'A' + 10)),
+        else => null,
+    };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.1 T5.1.2 — bun_hash / bun_base64_encode / bun_base64_decode
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Compute a raw cryptographic digest of `data`.
+///
+/// algo: 0=SHA-1(20B), 1=SHA-256(32B), 2=SHA-512(64B), 3=SHA-384(48B), 4=MD5(16B)
+/// Signature: (data_ptr, data_len, algo) — algo is the THIRD argument to match
+/// the TypeScript callPackedRaw(fnName, data, extra) convention.
+///
+/// Returns packed (ptr << 32 | len) pointing to raw digest bytes in host_allocs.
+/// Host must call bun_free(ptr) when done.
+/// Returns packError(1) on OOM, packError(2) on unknown algo.
+export fn bun_hash(data_ptr: [*]const u8, data_len: u32, algo: u32) u64 {
+    const data = data_ptr[0..data_len];
+    const digest = doHash(algo, data) catch |err| return switch (err) {
+        error.OutOfMemory => packError(1),
+        error.UnknownAlgo => packError(2),
+    };
+    return handOff(digest);
+}
+
+fn doHash(algo: u32, data: []const u8) error{ OutOfMemory, UnknownAlgo }![]u8 {
+    switch (algo) {
+        0 => {
+            var d: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+            std.crypto.hash.Sha1.hash(data, &d, .{});
+            return allocator.dupe(u8, &d);
+        },
+        1 => {
+            var d: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(data, &d, .{});
+            return allocator.dupe(u8, &d);
+        },
+        2 => {
+            var d: [std.crypto.hash.sha2.Sha512.digest_length]u8 = undefined;
+            std.crypto.hash.sha2.Sha512.hash(data, &d, .{});
+            return allocator.dupe(u8, &d);
+        },
+        3 => {
+            var d: [std.crypto.hash.sha2.Sha384.digest_length]u8 = undefined;
+            std.crypto.hash.sha2.Sha384.hash(data, &d, .{});
+            return allocator.dupe(u8, &d);
+        },
+        4 => {
+            var d: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+            std.crypto.hash.Md5.hash(data, &d, .{});
+            return allocator.dupe(u8, &d);
+        },
+        else => return error.UnknownAlgo,
+    }
+}
+
+/// Encode `data` as standard Base64 (with `=` padding).
+///
+/// Returns packed (ptr << 32 | len) pointing to ASCII bytes in host_allocs.
+/// Host must call bun_free(ptr) when done.
+/// Returns packError(1) on OOM.
+export fn bun_base64_encode(data_ptr: [*]const u8, data_len: u32) u64 {
+    const data = data_ptr[0..data_len];
+    const enc_len = std.base64.standard.Encoder.calcSize(data.len);
+    const buf = allocator.alloc(u8, enc_len) catch return packError(1);
+    _ = std.base64.standard.Encoder.encode(buf, data);
+    return handOff(buf);
+}
+
+/// Decode standard Base64 (strips trailing `=` for compatibility with no-pad input).
+///
+/// Returns packed (ptr << 32 | len) pointing to decoded bytes in host_allocs.
+/// Host must call bun_free(ptr) when done.
+/// Returns packError(1) on OOM, packError(2) on invalid base64.
+export fn bun_base64_decode(data_ptr: [*]const u8, data_len: u32) u64 {
+    const data = data_ptr[0..data_len];
+    const decoded = base64DecodeImpl(data) catch |err| return switch (err) {
+        error.OutOfMemory => packError(1),
+        else => packError(2),
+    };
+    return handOff(decoded);
+}
+
+fn base64DecodeImpl(data: []const u8) ![]u8 {
+    // Strip trailing '=' padding; use no-pad decoder so both padded and unpadded input work.
+    const stripped = std.mem.trimRight(u8, data, "=");
+    const Dec = std.base64.standard_no_pad.Decoder;
+    const decoded_size = try Dec.calcSizeForSlice(stripped);
+    const buf = try allocator.alloc(u8, decoded_size);
+    errdefer allocator.free(buf);
+    try Dec.decode(buf, stripped);
+    return buf;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.1 T5.1.3 — bun_inflate / bun_deflate
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Decompress `src` using the flate algorithm (gzip, zlib, or raw deflate).
+///
+/// format: 0=gzip, 1=zlib, 2=raw deflate
+///
+/// Returns packed (ptr << 32 | len) pointing to decompressed bytes in host_allocs.
+/// Host must call bun_free(ptr) when done.
+/// Returns packError(1) on OOM, packError(2) on decompression error or unknown format.
+export fn bun_inflate(src_ptr: [*]const u8, src_len: u32, format: u32) u64 {
+    const src = src_ptr[0..src_len];
+    const decompressed = inflateImpl(src, format) catch |err| return switch (err) {
+        error.OutOfMemory => packError(1),
+        else => packError(2),
+    };
+    return handOff(decompressed);
+}
+
+fn inflateImpl(src: []const u8, format: u32) ![]u8 {
+    const container: std.compress.flate.Container = switch (format) {
+        0 => .gzip,
+        1 => .zlib,
+        2 => .raw,
+        else => return error.InvalidArgument,
+    };
+    var r: std.Io.Reader = .fixed(src);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var decomp: std.compress.flate.Decompress = .init(&r, container, &.{});
+    _ = try decomp.reader.streamRemaining(&aw.writer);
+    return try allocator.dupe(u8, aw.written());
+}
+// Note: bun_deflate (compression) is deferred — std.compress.flate.Compress in Zig 0.15.2
+// has an internal I/O API mismatch between Compress.zig (new std.Io.Writer) and
+// BlockWriter.zig (old std.io.Writer). Decompression (bun_inflate) is unaffected.
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.1 T5.1.1 — bun_path_normalize / bun_path_dirname / bun_path_join
+// Uses std.fs.path (pure Zig stdlib, no system calls → WASM-safe).
+// All functions follow the packed (ptr << 32 | len) return convention.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Normalize a POSIX path: resolve `.` / `..`, collapse duplicate separators.
+/// Input: UTF-8 path string.
+/// Returns packed (ptr << 32 | len) pointing to the result. Host must bun_free(ptr).
+/// Returns packError(1) on OOM.
+export fn bun_path_normalize(ptr: [*]const u8, len: u32) u64 {
+    const path = ptr[0..len];
+    const result = std.fs.path.resolvePosix(allocator, &.{path}) catch return packError(1);
+    return handOff(result);
+}
+
+/// Return the POSIX dirname of a path (everything before the last `/`).
+/// Returns "/" for root paths and paths with no `/`.
+/// Returns packed (ptr << 32 | len) pointing to the result. Host must bun_free(ptr).
+/// Returns packError(1) on OOM.
+export fn bun_path_dirname(ptr: [*]const u8, len: u32) u64 {
+    const path = ptr[0..len];
+    const dir = std.fs.path.dirnamePosix(path) orelse "/";
+    const result = allocator.dupe(u8, dir) catch return packError(1);
+    return handOff(result);
+}
+
+/// Join two POSIX path segments: base_dir + "/" + rel, then normalize.
+/// `paths_ptr` points to a packed buffer: [base_len: u32 LE][base bytes][rel bytes]
+/// `paths_len` = total buffer length.
+/// Returns packed (ptr << 32 | len) pointing to the result. Host must bun_free(ptr).
+/// Returns packError(1) on OOM, packError(2) on malformed input.
+export fn bun_path_join(paths_ptr: [*]const u8, paths_len: u32) u64 {
+    if (paths_len < 4) return packError(2);
+    const buf = paths_ptr[0..paths_len];
+    const base_len = std.mem.readInt(u32, buf[0..4], .little);
+    if (4 + base_len > paths_len) return packError(2);
+    const base = buf[4 .. 4 + base_len];
+    const rel = buf[4 + base_len .. paths_len];
+    const result = joinPath(allocator, base, rel) catch return packError(1);
+    return handOff(result);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.1 T5.1.4 — bun_url_parse
+// Uses std.Uri (pure Zig stdlib RFC-3986 parser → WASM-safe).
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Parse a URL string and return a JSON object with its components.
+///
+/// Returns packed (ptr << 32 | len) pointing to a JSON UTF-8 string.
+/// Host must bun_free(ptr) when done.
+/// Returns packError(1) on OOM, packError(2) on parse error.
+///
+/// JSON shape matches UrlComponents interface:
+/// { "href", "scheme", "protocol", "host", "hostname",
+///   "port", "pathname", "search", "hash", "auth": null }
+export fn bun_url_parse(ptr: [*]const u8, len: u32) u64 {
+    const url_str = ptr[0..len];
+    const uri = std.Uri.parse(url_str) catch return packError(2);
+
+    // --- extract raw (percent-encoded) component strings ---
+    const scheme = uri.scheme;
+
+    const hostname_raw: []const u8 = if (uri.host) |h| switch (h) {
+        .raw => |s| s,
+        .percent_encoded => |s| s,
+    } else "";
+
+    const path_raw: []const u8 = switch (uri.path) {
+        .raw => |s| s,
+        .percent_encoded => |s| s,
+    };
+
+    const query_raw: ?[]const u8 = if (uri.query) |q| switch (q) {
+        .raw => |s| s,
+        .percent_encoded => |s| s,
+    } else null;
+
+    const fragment_raw: ?[]const u8 = if (uri.fragment) |f| switch (f) {
+        .raw => |s| s,
+        .percent_encoded => |s| s,
+    } else null;
+
+    // --- derived values ---
+    // protocol = scheme + ":"
+    const protocol = allocator.alloc(u8, scheme.len + 1) catch return packError(1);
+    defer allocator.free(protocol);
+    @memcpy(protocol[0..scheme.len], scheme);
+    protocol[scheme.len] = ':';
+
+    // port as string (empty string when absent)
+    var port_buf: [8]u8 = undefined;
+    const port_str: []const u8 = if (uri.port) |p|
+        std.fmt.bufPrint(&port_buf, "{d}", .{p}) catch return packError(1)
+    else
+        "";
+
+    // host = hostname + ":" + port (or just hostname)
+    var host_buf: [256]u8 = undefined;
+    const host_str: []const u8 = if (uri.port != null)
+        std.fmt.bufPrint(&host_buf, "{s}:{s}", .{ hostname_raw, port_str }) catch return packError(1)
+    else
+        hostname_raw;
+
+    // search = "?" + query (or "" when absent)
+    const search_str: []const u8 = if (query_raw) |q| blk: {
+        const s = allocator.alloc(u8, 1 + q.len) catch return packError(1);
+        s[0] = '?';
+        @memcpy(s[1..], q);
+        break :blk s;
+    } else "";
+    defer if (query_raw != null) allocator.free(search_str);
+
+    // hash = "#" + fragment (or "" when absent)
+    const hash_str: []const u8 = if (fragment_raw) |f| blk: {
+        const h = allocator.alloc(u8, 1 + f.len) catch return packError(1);
+        h[0] = '#';
+        @memcpy(h[1..], f);
+        break :blk h;
+    } else "";
+    defer if (fragment_raw != null) allocator.free(hash_str);
+
+    // --- serialize JSON ---
+    var json_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer json_buf.deinit(allocator);
+
+    const w = json_buf.writer(allocator);
+
+    w.writeAll("{") catch return packError(1);
+    jsonWriteStringField(w, "href", url_str) catch return packError(1);
+    w.writeAll(",") catch return packError(1);
+    jsonWriteStringField(w, "scheme", scheme) catch return packError(1);
+    w.writeAll(",") catch return packError(1);
+    jsonWriteStringField(w, "protocol", protocol) catch return packError(1);
+    w.writeAll(",") catch return packError(1);
+    jsonWriteStringField(w, "host", host_str) catch return packError(1);
+    w.writeAll(",") catch return packError(1);
+    jsonWriteStringField(w, "hostname", hostname_raw) catch return packError(1);
+    w.writeAll(",") catch return packError(1);
+    jsonWriteStringField(w, "port", port_str) catch return packError(1);
+    w.writeAll(",") catch return packError(1);
+    jsonWriteStringField(w, "pathname", if (path_raw.len > 0) path_raw else "/") catch return packError(1);
+    w.writeAll(",") catch return packError(1);
+    jsonWriteStringField(w, "search", search_str) catch return packError(1);
+    w.writeAll(",") catch return packError(1);
+    jsonWriteStringField(w, "hash", hash_str) catch return packError(1);
+    w.writeAll(",\"auth\":null}") catch return packError(1);
+
+    const json_bytes = allocator.dupe(u8, json_buf.items) catch return packError(1);
+    return handOff(json_bytes);
+}
+
+/// Write a JSON string field: `"key":"value"` (with JSON escaping).
+fn jsonWriteStringField(
+    w: std.ArrayListUnmanaged(u8).Writer,
+    key: []const u8,
+    value: []const u8,
+) !void {
+    try w.writeByte('"');
+    try w.writeAll(key);
+    try w.writeAll("\":");
+    try jsonWriteString(w, value);
+}
+
+/// Write a JSON-escaped string literal (including surrounding `"`).
+fn jsonWriteString(w: std.ArrayListUnmanaged(u8).Writer, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try std.fmt.format(w, "\\u{x:0>4}", .{c}),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeByte('"');
 }

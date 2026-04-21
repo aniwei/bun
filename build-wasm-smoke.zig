@@ -9,8 +9,10 @@
 //! Usage from repo root:
 //!   zig build --build-file build-wasm-smoke.zig test
 //!   zig build --build-file build-wasm-smoke.zig check-wasm
-//!   zig build --build-file build-wasm-smoke.zig build-wasm
-//!   zig build --build-file build-wasm-smoke.zig build-wasm -Doptimize=ReleaseFast
+//!   zig build --build-file build-wasm-smoke.zig build-wasm --prefix .
+//!   zig build --build-file build-wasm-smoke.zig build-wasm --prefix . -Doptimize=ReleaseFast
+//!
+//! Without --prefix . the output lands at zig-out/packages/bun-browser/bun-core.wasm.
 //!
 //! Disjoint from `build.zig`; no generated code, no vendor deps.
 
@@ -48,21 +50,22 @@ pub fn build(b: *std.Build) void {
         .os_tag = .freestanding,
     });
 
-    // ── Shared bun Environment shim (used by jsi/* under wasm) ──
-    const bun_env_shim = b.createModule(.{
-        .root_source_file = b.path("src/jsi/bun_env_shim.zig"),
-        .target = wasm_target,
-        .optimize = .Debug,
-    });
-    // bun shim wraps Environment fields; the "bun" module the jsi code sees
-    // is a struct that has a field `Environment` pointing at bun_env_shim.
-    // We create a tiny anonymous wrapper to satisfy `const bun = @import("bun"); bun.Environment`.
+    // ── Full `bun` shim for WASM (Environment + strings + semver + JSC stubs) ──
+    //
+    // Root at src/bun_wasm_shim.zig so relative imports can reach
+    // src/identity_context.zig, src/semver/*, src/jsi/strings_wasm.zig, etc.
+    //
+    // The shim is also injected as its OWN "bun" import (self-referential)
+    // so that src/semver/*.zig (which do `@import("bun")`) get this shim back
+    // when they are pulled in transitively via src/bun_wasm_semver.zig.
     const bun_shim = b.createModule(.{
-        .root_source_file = b.path("src/jsi/bun_env_shim.zig"),
+        .root_source_file = b.path("src/bun_wasm_shim.zig"),
         .target = wasm_target,
-        .optimize = .Debug,
+        .optimize = optimize,
+        .single_threaded = true,
     });
-    _ = bun_env_shim; // used via bun_shim directly
+    // Self-referential: files within bun_shim that do @import("bun") get bun_shim.
+    bun_shim.addImport("bun", bun_shim);
 
     // ── jsi module with bun shim injected ──
     const jsi_mod = b.createModule(.{
@@ -90,6 +93,9 @@ pub fn build(b: *std.Build) void {
     check_wasm.dependOn(&jsi_lib.step);
 
     // ── build-wasm: produce packages/bun-browser/bun-core.wasm ──
+    //
+    // Run with: zig build --build-file build-wasm-smoke.zig build-wasm --prefix .
+    // (--prefix . makes the output land at ./packages/bun-browser/bun-core.wasm)
     const wasm_out_dir = "packages/bun-browser";
 
     const wasm_exe = b.addExecutable(.{
@@ -108,6 +114,8 @@ pub fn build(b: *std.Build) void {
     // Inject module dependencies
     wasm_exe.root_module.addImport("jsi", jsi_mod);
     wasm_exe.root_module.addImport("sys_wasm", sys_wasm_mod);
+    // bun_shim gives bun_browser_standalone.zig access to bun.Semver.* etc.
+    wasm_exe.root_module.addImport("bun", bun_shim);
 
     const install_wasm = b.addInstallArtifact(wasm_exe, .{
         .dest_dir = .{ .override = .{ .custom = wasm_out_dir } },

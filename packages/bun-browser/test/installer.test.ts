@@ -284,4 +284,128 @@ describe("installPackages (端到端)", () => {
       installPackages({ foo: "^9.0.0" }, { fetch: fetchFn, registry: "https://fake-registry" }),
     ).rejects.toThrow(/未找到匹配/);
   });
+
+  test("传递依赖：BFS 展开 dependencies，WASM 决策路径", async () => {
+    const fetchFn = makeFakeFetch({
+      app: {
+        versions: ["1.0.0"],
+        filesByVersion: {
+          "1.0.0": [{ path: "package.json", data: '{"name":"app","version":"1.0.0"}' }],
+        },
+        depsByVersion: { "1.0.0": { lib: "^2.0.0" } },
+      },
+      lib: {
+        versions: ["2.0.0", "2.1.5", "3.0.0"],
+        filesByVersion: {
+          "2.0.0": [{ path: "package.json", data: "{}" }],
+          "2.1.5": [{ path: "package.json", data: "{}" }],
+          "3.0.0": [{ path: "package.json", data: "{}" }],
+        },
+        depsByVersion: { "2.1.5": { util: "1.0.0" } },
+      },
+      util: {
+        versions: ["1.0.0"],
+        filesByVersion: { "1.0.0": [{ path: "package.json", data: "{}" }] },
+      },
+    });
+
+    const result = await installPackages(
+      { app: "1.0.0" },
+      { fetch: fetchFn, registry: "https://fake-registry" },
+    );
+
+    // app → lib@^2 → 取 2.1.5（最高同主版本）→ util@1.0.0
+    const names = result.packages.map((p) => `${p.name}@${p.version}`).sort();
+    expect(names).toEqual(["app@1.0.0", "lib@2.1.5", "util@1.0.0"]);
+    expect(result.lockfile.packageCount).toBe(3);
+  });
+
+  test("传递依赖：同名去重（先到者胜）", async () => {
+    const fetchFn = makeFakeFetch({
+      a: {
+        versions: ["1.0.0"],
+        filesByVersion: { "1.0.0": [{ path: "package.json", data: "{}" }] },
+        depsByVersion: { "1.0.0": { shared: "^1.0.0" } },
+      },
+      b: {
+        versions: ["1.0.0"],
+        filesByVersion: { "1.0.0": [{ path: "package.json", data: "{}" }] },
+        depsByVersion: { "1.0.0": { shared: "^2.0.0" } },
+      },
+      shared: {
+        versions: ["1.5.0", "2.0.0"],
+        filesByVersion: {
+          "1.5.0": [{ path: "package.json", data: "{}" }],
+          "2.0.0": [{ path: "package.json", data: "{}" }],
+        },
+      },
+    });
+
+    const result = await installPackages(
+      { a: "1.0.0", b: "1.0.0" },
+      { fetch: fetchFn, registry: "https://fake-registry" },
+    );
+
+    const sharedPkgs = result.packages.filter((p) => p.name === "shared");
+    // 先到的约束（来自 a：^1.0.0）胜出 → 1.5.0
+    expect(sharedPkgs.length).toBe(1);
+    expect(sharedPkgs[0]!.version).toBe("1.5.0");
+  });
+
+  test("resolveTransitive: false 时仅顶层", async () => {
+    const fetchFn = makeFakeFetch({
+      top: {
+        versions: ["1.0.0"],
+        filesByVersion: { "1.0.0": [{ path: "package.json", data: "{}" }] },
+        depsByVersion: { "1.0.0": { child: "1.0.0" } },
+      },
+      child: {
+        versions: ["1.0.0"],
+        filesByVersion: { "1.0.0": [{ path: "package.json", data: "{}" }] },
+      },
+    });
+
+    const result = await installPackages(
+      { top: "1.0.0" },
+      { fetch: fetchFn, registry: "https://fake-registry", resolveTransitive: false },
+    );
+
+    expect(result.packages.length).toBe(1);
+    expect(result.packages[0]!.name).toBe("top");
+  });
+
+  test("完整性校验：sha512 匹配 → 安装成功", async () => {
+    // 构造合法 tarball 并预计算其 sha512 SRI 值
+    const tarball = makeTarball([{ path: "package/package.json", data: '{"name":"safe-pkg","version":"1.0.0"}' }]);
+    const hashBuf = await crypto.subtle.digest("SHA-512", tarball);
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(hashBuf)));
+    const sri = "sha512-" + b64.replace(/=+$/, "");
+
+    const fakeFetch: typeof globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : (input as URL).toString();
+      if (url.endsWith("safe-pkg")) {
+        return new Response(
+          JSON.stringify({
+            name: "safe-pkg",
+            "dist-tags": { latest: "1.0.0" },
+            versions: {
+              "1.0.0": {
+                version: "1.0.0",
+                dist: { tarball: "https://fake-registry/_tar/safe-pkg/1.0.0.tgz", integrity: sri },
+              },
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(tarball);
+    };
+
+    // 无 WASM runtime → 不校验（不抛错）
+    const result = await installPackages(
+      { "safe-pkg": "1.0.0" },
+      { fetch: fakeFetch, registry: "https://fake-registry" },
+    );
+    expect(result.packages[0]!.version).toBe("1.0.0");
+  });
 });

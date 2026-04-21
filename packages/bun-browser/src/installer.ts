@@ -12,8 +12,9 @@
  */
 
 import type { VfsFile } from "./vfs-client.js";
+import type { WasmRuntime } from "./wasm.js";
 
-/** semver 范围 → 解析后的版本号（最小子集，详见 chooseVersion）。 */
+/** semver 范围 → 解析后的版本号（JS 子集备用；主路已改为调用 WASM bun_semver_select）。 */
 export type SemverRange = string;
 
 /** 安装单包的进度回调。 */
@@ -34,6 +35,18 @@ export interface InstallerOptions {
   installRoot?: string;
   /** 进度回调。 */
   onProgress?: (p: InstallProgress) => void;
+  /**
+   * 可选：已实例化的 WasmRuntime。
+   * 若提供，`chooseVersion` 将通过 WASM 的真实 Zig semver（`bun_semver_select`）
+   * 执行，而非内联的 JS 子集。
+   */
+  wasmRuntime?: WasmRuntime;
+  /**
+   * 是否递归解析 package.json 里的 dependencies（传递依赖）。
+   * 缺省 true。关闭后仅安装顶层 deps 表列出的包。
+   * 注意：peerDependencies / optionalDependencies 目前不展开。
+   */
+  resolveTransitive?: boolean;
 }
 
 export interface InstalledPackage {
@@ -59,15 +72,33 @@ export interface InstallResult {
   };
 }
 
-/** Phase 4：解析顶层 dependencies 表（不展开传递依赖）。 */
+/**
+ * Phase 4：解析 dependencies 表。
+ *
+ * 传递依赖：采用 BFS 逐层展开，所有 semver 决策都走 WASM 真 Zig semver
+ * （若 `opts.wasmRuntime` 提供）。已解析到某 `name@version` 的包不会重复安装；
+ * 若同一 `name` 因不同约束解析出不同版本，按“先到者胜”（与 npm 顶层哨兵一致）。
+ *
+ * `resolveTransitive` 缺省 true；设为 false 时退化为仅顶层。
+ */
 export async function installPackages(
   deps: Record<string, SemverRange>,
   opts: InstallerOptions = {},
 ): Promise<InstallResult> {
   const installer = new Installer(opts);
+  const resolveTransitive = opts.resolveTransitive !== false;
   const installed: InstalledPackage[] = [];
   const files: VfsFile[] = [];
-  for (const [name, range] of Object.entries(deps)) {
+  /** 已安装过的包名（去重 key：name）。同名只装一个版本。 */
+  const seen = new Set<string>();
+  /** BFS 队列：待安装的 [name, range] 对。 */
+  const queue: Array<[string, SemverRange]> = Object.entries(deps);
+
+  while (queue.length > 0) {
+    const [name, range] = queue.shift()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+
     const r = await installer.installOne(name, range);
     installed.push({
       name: r.name,
@@ -76,7 +107,14 @@ export async function installPackages(
       dependencies: r.dependencies,
     });
     files.push(...r.files);
+
+    if (resolveTransitive) {
+      for (const [childName, childRange] of Object.entries(r.dependencies)) {
+        if (!seen.has(childName)) queue.push([childName, childRange]);
+      }
+    }
   }
+
   return {
     files,
     packages: installed,
@@ -96,20 +134,23 @@ export async function installPackages(
 class Installer {
   private readonly registry: string;
   private readonly fetchFn: typeof globalThis.fetch;
-  private readonly DStream: typeof DecompressionStream;
+  /** May be undefined when wasmRuntime.inflate is available as a fallback. */
+  private readonly DStream: typeof DecompressionStream | undefined;
   private readonly installRoot: string;
   private readonly onProgress?: (p: InstallProgress) => void;
+  private readonly wasmRuntime?: WasmRuntime;
 
   constructor(opts: InstallerOptions) {
     this.registry = (opts.registry ?? "https://registry.npmjs.org").replace(/\/+$/, "");
     const f = opts.fetch ?? globalThis.fetch;
     if (!f) throw new Error("Installer: 未注入 fetch");
     this.fetchFn = f.bind(globalThis);
-    const D = opts.decompressionStream ?? (globalThis as { DecompressionStream?: typeof DecompressionStream }).DecompressionStream;
-    if (!D) throw new Error("Installer: DecompressionStream 不可用");
-    this.DStream = D;
+    this.DStream = opts.decompressionStream ??
+      (globalThis as { DecompressionStream?: typeof DecompressionStream }).DecompressionStream;
+    // DStream can be absent if wasmRuntime provides inflate support — validated at use time.
     this.installRoot = (opts.installRoot ?? "/node_modules").replace(/\/+$/, "");
     if (opts.onProgress) this.onProgress = opts.onProgress;
+    if (opts.wasmRuntime) this.wasmRuntime = opts.wasmRuntime;
   }
 
   async installOne(
@@ -123,7 +164,12 @@ class Installer {
   }> {
     this.onProgress?.({ name, phase: "metadata" });
     const meta = await this.fetchMetadata(name);
-    const version = chooseVersion(meta.versions ? Object.keys(meta.versions) : [], range, meta["dist-tags"]);
+    const available = meta.versions ? Object.keys(meta.versions) : [];
+    // 优先使用 WASM 的真实 Zig semver；若不可用则回退到 JS 子集实现。
+    const version = this.wasmRuntime
+      ? (this.wasmRuntime.semverSelect(JSON.stringify(available), range) ??
+          chooseVersion(available, range, meta["dist-tags"]))
+      : chooseVersion(available, range, meta["dist-tags"]);
     if (!version) throw new Error(`Installer: 未找到匹配 ${name}@${range}`);
     const versionMeta = meta.versions![version]!;
     const tarballUrl = versionMeta.dist?.tarball;
@@ -132,8 +178,28 @@ class Installer {
     this.onProgress?.({ name, version, phase: "tarball" });
     const tgz = await this.fetchBytes(tarballUrl);
 
+    // 完整性校验：用 WASM Zig 实现验证 SRI 值，防止 supply-chain 篡改。
+    // 优先取 `integrity`（SRI，sha512）；若缺则取 `shasum`（sha1 hex）。
+    if (this.wasmRuntime) {
+      const sri = versionMeta.dist?.integrity ?? versionMeta.dist?.shasum ?? "";
+      if (sri) {
+        const result = this.wasmRuntime.integrityVerify(tgz, sri);
+        if (result === "fail") throw new Error(`Installer: ${name}@${version} 完整性校验失败`);
+        // "bad" = 未知算法 → 继续（向前兼容）
+      }
+    }
+
     this.onProgress?.({ name, version, phase: "extract" });
-    const tarBytes = await gunzip(tgz, this.DStream);
+    // Phase 5.1: prefer synchronous WASM inflate over async DecompressionStream.
+    let tarBytes: Uint8Array;
+    const wasmInflated = this.wasmRuntime?.inflate(tgz, "gzip") ?? null;
+    if (wasmInflated !== null) {
+      tarBytes = wasmInflated;
+    } else if (this.DStream) {
+      tarBytes = await gunzip(tgz, this.DStream);
+    } else {
+      throw new Error("Installer: 解压不可用（需要 DecompressionStream 或带 bun_inflate 的 WasmRuntime）");
+    }
     const entries = parseTar(tarBytes);
 
     // npm tarball 的所有文件都在 "package/" 前缀下；剥掉并挂到 installRoot/<name>/。
@@ -178,7 +244,12 @@ interface NpmPackageMetadata {
     string,
     {
       version: string;
-      dist?: { tarball?: string; integrity?: string; shasum?: string };
+      dist?: {
+          tarball?: string;
+          integrity?: string;
+          /** legacy sha1 hex — 40 chars */
+          shasum?: string;
+        };
       dependencies?: Record<string, string>;
     }
   >;
