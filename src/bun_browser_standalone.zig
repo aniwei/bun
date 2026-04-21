@@ -652,6 +652,11 @@ export fn bun_tick() u32 {
     return timer_g.tick(&dispatchTimerCallback);
 }
 
+/// Wakeup hook for host-driven loops.
+/// The current timer loop is polled by `bun_tick()`, so this is a no-op placeholder
+/// kept for ABI compatibility with the browser runtime protocol.
+export fn bun_wakeup() void {}
+
 export fn bun_vfs_load_snapshot(ptr: [*]const u8, len: u32) u32 {
     if (!initialized) return 0;
     const count = vfs_g.loadSnapshot(ptr[0..len]) catch return 0;

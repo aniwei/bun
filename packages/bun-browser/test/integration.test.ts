@@ -432,6 +432,11 @@ describe("setTimeout + bun_tick", () => {
     const rt = await makeRuntime();
     expect(rt.instance.exports.bun_tick).toBeInstanceOf(Function);
   });
+
+  test("bun_wakeup 导出存在", async () => {
+    const rt = await makeRuntime();
+    expect(rt.instance.exports.bun_wakeup).toBeInstanceOf(Function);
+  });
 });
 
 // ──────────────────────────────────────────────────────────
@@ -503,13 +508,13 @@ describe("kernel-worker integration", () => {
       workerUrl: WORKER_URL,
       initialFiles: [
         {
-          path: "/argv-env.js",
-          data: "console.log(process.argv.join('|')); console.log(process.env.TEST_FLAG || 'missing');",
+          path: "/app/argv-env.js",
+          data: "console.log(process.argv.join('|')); console.log(process.env.TEST_FLAG || 'missing'); console.log(process.cwd());",
         },
       ],
       onStdout(data) {
         output += data;
-        if (!done && output.includes("bun|foo|bar") && output.includes("ok")) {
+        if (!done && output.includes("bun|foo|bar") && output.includes("ok") && output.includes("/app")) {
           done = true;
           resolvePrinted();
         }
@@ -524,7 +529,7 @@ describe("kernel-worker integration", () => {
 
     try {
       await kernel.whenReady();
-      await kernel.run("/argv-env.js", ["foo", "bar"], { TEST_FLAG: "ok" });
+      await kernel.run("/app/argv-env.js", ["foo", "bar"], { TEST_FLAG: "ok" });
       await Promise.race([
         printed,
         Bun.sleep(1500).then(() => {
@@ -533,6 +538,7 @@ describe("kernel-worker integration", () => {
       ]);
       expect(output).toContain("bun|foo|bar");
       expect(output).toContain("ok");
+      expect(output).toContain("/app");
     } finally {
       kernel.terminate();
     }

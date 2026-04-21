@@ -82,14 +82,26 @@ function evalScript(runtime: WasmRuntime, source: string, filename: string): num
   return code;
 }
 
-function applyProcessState(runtime: WasmRuntime, argv?: string[], env?: Record<string, string>): void {
-  if (argv === undefined && env === undefined) return;
+function pathDirname(path: string): string {
+  const idx = path.lastIndexOf("/");
+  if (idx <= 0) return "/";
+  return path.slice(0, idx);
+}
+
+function applyProcessState(
+  runtime: WasmRuntime,
+  argv?: string[],
+  env?: Record<string, string>,
+  cwd?: string,
+): void {
+  if (argv === undefined && env === undefined && cwd === undefined) return;
 
   const nextArgv = ["bun", ...(argv ?? [])];
   const nextEnv = env ?? {};
+  const nextCwd = cwd ?? "/";
   const code = evalScript(
     runtime,
-    `if (globalThis.process && typeof globalThis.process === 'object') { globalThis.process.argv = ${JSON.stringify(nextArgv)}; globalThis.process.env = ${JSON.stringify(nextEnv)}; }`,
+    `if (globalThis.process && typeof globalThis.process === 'object') { globalThis.process.argv = ${JSON.stringify(nextArgv)}; globalThis.process.env = ${JSON.stringify(nextEnv)}; globalThis.__bun_cwd = ${JSON.stringify(nextCwd)}; }`,
     "<kernel:process-state>",
   );
   if (code !== 0) {
@@ -112,7 +124,8 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
         });
         post({ kind: "handshake:ack", protocolVersion: PROTOCOL_VERSION, engine: "browser" });
 
-        applyProcessState(rt, msg.argv, msg.env);
+        const initialCwd = msg.entry ? pathDirname(msg.entry) : undefined;
+        applyProcessState(rt, msg.argv, msg.env, initialCwd);
 
         if (msg.vfsSnapshot) {
           const loader = rt.instance.exports.bun_vfs_load_snapshot as
@@ -142,7 +155,7 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
 
       case "run": {
         if (!rt) throw new Error("not initialized");
-        applyProcessState(rt, msg.argv, msg.env);
+        applyProcessState(rt, msg.argv, msg.env, pathDirname(msg.entry));
 
         const runner = rt.instance.exports.bun_browser_run as
           | ((entryPtr: number, entryLen: number) => number)
