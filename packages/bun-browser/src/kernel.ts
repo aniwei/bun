@@ -7,6 +7,7 @@ import {
   type HostRequest,
   type KernelEvent,
   type VfsSnapshotRequest,
+  type SpawnRequest,
 } from "./protocol";
 import { buildSnapshot, type VfsFile } from "./vfs-client";
 
@@ -34,6 +35,7 @@ export interface KernelOptions {
 }
 
 type PendingEval = { resolve: () => void; reject: (e: Error) => void };
+type PendingSpawn = { resolve: (code: number) => void; reject: (e: Error) => void };
 
 export class Kernel {
   private worker: Worker;
@@ -41,6 +43,7 @@ export class Kernel {
   private resolveReady!: () => void;
   private rejectReady!: (e: unknown) => void;
   private pendingEvals = new Map<string, PendingEval>();
+  private pendingSpawns = new Map<string, PendingSpawn>();
 
   constructor(private readonly opts: KernelOptions) {
     this.worker = new Worker(opts.workerUrl, { type: "module" });
@@ -96,6 +99,14 @@ export class Kernel {
         }
         break;
       }
+      case "spawn:exit": {
+        const pending = this.pendingSpawns.get(msg.id);
+        if (pending) {
+          this.pendingSpawns.delete(msg.id);
+          pending.resolve(msg.code);
+        }
+        break;
+      }
       default:
         break;
     }
@@ -112,6 +123,33 @@ export class Kernel {
   async run(entry: string, argv: string[] = [], env: Record<string, string> = {}): Promise<void> {
     await this.ready;
     this.post({ kind: "run", entry, argv, env });
+  }
+
+  /**
+   * 在运行时中同步执行一条 `bun` 命令（Phase 2 in-process spawn）。
+   *
+   * - `argv[0]` 必须为 `"bun"`
+   * - 支持 `["bun", "-e", "<js>"]` 和 `["bun", "run", "<vfs-path>"]`
+   * - stdout/stderr 通过 `onStdout`/`onStderr` 回调流出
+   * - 返回退出码（0 = 正常）
+   */
+  async spawn(
+    argv: string[],
+    opts: { env?: Record<string, string>; cwd?: string } = {},
+  ): Promise<number> {
+    await this.ready;
+    const id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    return new Promise<number>((resolve, reject) => {
+      this.pendingSpawns.set(id, { resolve, reject });
+      const msg: SpawnRequest = {
+        kind: "spawn",
+        id,
+        argv,
+        ...(opts.env !== undefined ? { env: opts.env } : {}),
+        ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      };
+      this.post(msg);
+    });
   }
 
   /**

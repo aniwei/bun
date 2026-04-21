@@ -16,6 +16,7 @@ export type HostRequest =
   | RunRequest
   | StopRequest
   | EvalRequest
+  | SpawnRequest
   | FetchResponse; // host resolving a prior FetchRequest
 
 /** Kernel → UI 事件/响应。 */
@@ -27,6 +28,7 @@ export type KernelEvent =
   | ExitEvent
   | ErrorEvent
   | EvalResultEvent
+  | SpawnExitEvent
   | FetchRequest
   | VfsEvent;
 
@@ -132,4 +134,31 @@ export interface VfsEvent {
   /** 文件路径（watcher 通知）。 */
   path: string;
   type: "change" | "add" | "unlink";
+}
+
+/**
+ * UI → Kernel：在当前运行时中执行一条命令（同步 in-process spawn）。
+ *
+ * 对应 WASM 导出 `bun_spawn(cmd_json) → i32`（Phase 2 同步实现）。
+ * `argv[0]` 必须为 "bun"；支持 `["bun","-e","<code>"]` 和 `["bun","run","<path>"]`。
+ */
+export interface SpawnRequest {
+  kind: "spawn";
+  /** 唯一请求 id，用于将 spawn:exit 路由回对应的 Promise。 */
+  id: string;
+  /** 完整命令行参数，包含可执行文件名，例如 `["bun", "-e", "..."]`。 */
+  argv: string[];
+  /** 注入到 process.env 的环境变量（可选）。 */
+  env?: Record<string, string>;
+  /** 注入到 process.cwd() 的工作目录（可选）。 */
+  cwd?: string;
+}
+
+/** Kernel → UI：spawn 执行结束通知。 */
+export interface SpawnExitEvent {
+  kind: "spawn:exit";
+  /** 对应 SpawnRequest.id。 */
+  id: string;
+  /** 进程退出码（0 = 正常）。 */
+  code: number;
 }

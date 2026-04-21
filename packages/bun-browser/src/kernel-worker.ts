@@ -190,6 +190,25 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
         break;
       }
 
+      case "spawn": {
+        if (!rt) throw new Error("not initialized");
+        // Apply env/cwd overrides before running the spawned command.
+        if (msg.env !== undefined || msg.cwd !== undefined) {
+          applyProcessState(rt, msg.argv, msg.env, msg.cwd);
+        }
+        const spawnFn = rt.instance.exports.bun_spawn as
+          | ((cmdPtr: number, cmdLen: number) => number)
+          | undefined;
+        if (!spawnFn) throw new Error("bun_spawn export missing");
+        let exitCode = 0;
+        rt.withString(JSON.stringify(msg.argv), (ptr, len) => {
+          exitCode = spawnFn(ptr, len);
+        });
+        post({ kind: "spawn:exit", id: msg.id, code: exitCode });
+        wakeTickLoop();
+        break;
+      }
+
       case "stop": {
         clearTickTimer();
         post({ kind: "exit", code: msg.code ?? 130 });

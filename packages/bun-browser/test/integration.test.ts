@@ -696,3 +696,175 @@ describe("kernel-worker integration", () => {
     }
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// bun_spawn (T2.4)
+// ──────────────────────────────────────────────────────────
+
+describe("bun_spawn", () => {
+  test("bun_spawn 导出存在", async () => {
+    const rt = await makeRuntime();
+    expect(rt.instance.exports.bun_spawn).toBeInstanceOf(Function);
+  });
+
+  test("bun -e 'console.log(...)' → 退出码 0 且输出到 stdout", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const spawnFn = rt.instance.exports.bun_spawn as (ptr: number, len: number) => number;
+    let exitCode = -1;
+    rt.withString(JSON.stringify(["bun", "-e", "console.log('spawn hello');"]), (ptr, len) => {
+      exitCode = spawnFn(ptr, len);
+    });
+    expect(exitCode).toBe(0);
+    expect(printed.join("")).toContain("spawn hello");
+  });
+
+  test("bun run <vfs-path> → 退出码 0", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const loadFn = rt.instance.exports.bun_vfs_load_snapshot as (ptr: number, len: number) => number;
+    const spawnFn = rt.instance.exports.bun_spawn as (ptr: number, len: number) => number;
+
+    const snapshot = buildSnapshot([{ path: "/hello.js", data: "console.log('run ok');" }]);
+    rt.withBytes(new Uint8Array(snapshot), (ptr, len) => { loadFn(ptr, len); });
+
+    let exitCode = -1;
+    rt.withString(JSON.stringify(["bun", "run", "/hello.js"]), (ptr, len) => {
+      exitCode = spawnFn(ptr, len);
+    });
+    expect(exitCode).toBe(0);
+    expect(printed.join("")).toContain("run ok");
+  });
+
+  test("非 bun 可执行文件 → 返回 1", async () => {
+    const rt = await makeRuntime();
+    const spawnFn = rt.instance.exports.bun_spawn as (ptr: number, len: number) => number;
+    let exitCode = 0;
+    rt.withString(JSON.stringify(["node", "-e", "1"]), (ptr, len) => {
+      exitCode = spawnFn(ptr, len);
+    });
+    expect(exitCode).toBe(1);
+  });
+
+  test("bun_kill / bun_feed_stdin / bun_close_stdin 导出存在（stub）", async () => {
+    const rt = await makeRuntime();
+    expect(rt.instance.exports.bun_kill).toBeInstanceOf(Function);
+    expect(rt.instance.exports.bun_feed_stdin).toBeInstanceOf(Function);
+    expect(rt.instance.exports.bun_close_stdin).toBeInstanceOf(Function);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// fetch() 直通（T2.3 最后一项）
+// ──────────────────────────────────────────────────────────
+
+describe("fetch 直通", () => {
+  test("用户代码中 typeof fetch === 'function'", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    rt.withString("console.log(typeof fetch);", (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("function");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Kernel.spawn() via Worker（Phase 2 验收检查表）
+// ──────────────────────────────────────────────────────────
+
+describe("Kernel.spawn()", () => {
+  test("spawn bun -e 'console.log(...)' → stdout 输出且退出码 0", async () => {
+    let output = "";
+    let done = false;
+    let resolvePrinted!: () => void;
+    let rejectPrinted!: (e: Error) => void;
+    const printed = new Promise<void>((res, rej) => {
+      resolvePrinted = res;
+      rejectPrinted = rej;
+    });
+
+    const kernel = new Kernel({
+      wasmModule,
+      workerUrl: WORKER_URL,
+      onStdout(data) {
+        output += data;
+        if (!done && output.includes("spawn via kernel")) {
+          done = true;
+          resolvePrinted();
+        }
+      },
+      onError(err) {
+        if (!done) {
+          done = true;
+          rejectPrinted(new Error(err.message));
+        }
+      },
+    });
+
+    try {
+      await kernel.whenReady();
+      const exitCode = await Promise.race([
+        kernel.spawn(["bun", "-e", "console.log('spawn via kernel');"]),
+        Bun.sleep(1500).then(() => { throw new Error("timeout waiting for spawn:exit"); }),
+      ]);
+      await Promise.race([
+        printed,
+        Bun.sleep(500).then(() => { throw new Error("timeout waiting for stdout"); }),
+      ]);
+      expect(exitCode).toBe(0);
+      expect(output).toContain("spawn via kernel");
+    } finally {
+      kernel.terminate();
+    }
+  });
+
+  test("spawn bun run <file> via Kernel.spawn → 退出码 0", async () => {
+    let output = "";
+    let done = false;
+    let resolvePrinted!: () => void;
+    let rejectPrinted!: (e: Error) => void;
+    const printed = new Promise<void>((res, rej) => {
+      resolvePrinted = res;
+      rejectPrinted = rej;
+    });
+
+    const kernel = new Kernel({
+      wasmModule,
+      workerUrl: WORKER_URL,
+      initialFiles: [{ path: "/greet.js", data: "console.log('hello from run');" }],
+      onStdout(data) {
+        output += data;
+        if (!done && output.includes("hello from run")) {
+          done = true;
+          resolvePrinted();
+        }
+      },
+      onError(err) {
+        if (!done) {
+          done = true;
+          rejectPrinted(new Error(err.message));
+        }
+      },
+    });
+
+    try {
+      await kernel.whenReady();
+      const exitCode = await Promise.race([
+        kernel.spawn(["bun", "run", "/greet.js"]),
+        Bun.sleep(1500).then(() => { throw new Error("timeout waiting for spawn:exit"); }),
+      ]);
+      await Promise.race([
+        printed,
+        Bun.sleep(500).then(() => { throw new Error("timeout waiting for stdout"); }),
+      ]);
+      expect(exitCode).toBe(0);
+      expect(output).toContain("hello from run");
+    } finally {
+      kernel.terminate();
+    }
+  });
+});

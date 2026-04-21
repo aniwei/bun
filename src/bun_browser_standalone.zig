@@ -781,6 +781,106 @@ export fn bun_browser_eval(src_ptr: [*]const u8, src_len: u32, file_ptr: [*]cons
     return 0;
 }
 
+/// Synchronously spawn a "bun" sub-process in-process.
+///
+/// `cmd_ptr/cmd_len` points to a JSON array string, e.g. `["bun","-e","code"]`.
+///
+/// Supported forms:
+///   ["bun", "-e", "<js code>"]      — eval JS inline
+///   ["bun", "run", "<vfs path>"]    — load + run from VFS
+///
+/// Returns the exit code (0 = success).  In Phase 2 this is synchronous;
+/// true process isolation is a Phase 4 concern.
+export fn bun_spawn(cmd_ptr: [*]const u8, cmd_len: u32) i32 {
+    if (!initialized) return 1;
+
+    const cmd_json = cmd_ptr[0..cmd_len];
+
+    // Stash the JSON in a temp global so JS-side JSON.parse can reach it.
+    const json_val = runtime_g.makeString(cmd_json);
+    defer jsi.imports.jsi_release(json_val.handle);
+    runtime_g.setProperty(runtime_g.global, "__spawn_cmd", json_val);
+
+    const parse_src = "var __r=JSON.parse(globalThis.__spawn_cmd);delete globalThis.__spawn_cmd;return __r;";
+    const arr = runtime_g.evalScript(parse_src, "<spawn:parse>") catch return 2;
+    defer jsi.imports.jsi_release(arr.handle);
+
+    // argv length
+    const len_val = runtime_g.getProperty(arr, "length");
+    defer jsi.imports.jsi_release(len_val.handle);
+    const argc: u32 = @intFromFloat(jsi.imports.jsi_to_number(len_val.handle));
+
+    if (argc == 0) return 1;
+
+    // argv[0] must be "bun"
+    const cmd0 = runtime_g.getIndex(arr, 0);
+    defer jsi.imports.jsi_release(cmd0.handle);
+    if (jsi.imports.jsi_typeof(cmd0.handle) != @intFromEnum(jsi.TypeTag.string)) return 1;
+    const exe = runtime_g.dupeString(cmd0) catch return 2;
+    defer allocator.free(exe);
+    if (!std.mem.eql(u8, exe, "bun")) return 1;
+
+    if (argc < 2) return 0; // bare "bun" — nothing to do
+
+    // argv[1] = subcommand / flag
+    const cmd1 = runtime_g.getIndex(arr, 1);
+    defer jsi.imports.jsi_release(cmd1.handle);
+    const subcmd = runtime_g.dupeString(cmd1) catch return 2;
+    defer allocator.free(subcmd);
+
+    g_exit_code = 0;
+    g_explicit_exit = false;
+
+    if (std.mem.eql(u8, subcmd, "-e")) {
+        // bun -e "<js code>"
+        if (argc < 3) return 0;
+        const code_val = runtime_g.getIndex(arr, 2);
+        defer jsi.imports.jsi_release(code_val.handle);
+        const code_src = runtime_g.dupeString(code_val) catch return 2;
+        defer allocator.free(code_src);
+
+        const url_lit = "<bun:-e>";
+        const result = jsi.imports.jsi_eval(
+            @intFromPtr(code_src.ptr),
+            code_src.len,
+            @intFromPtr(url_lit.ptr),
+            url_lit.len,
+        );
+        if (result != jsi.Value.exception_sentinel) {
+            jsi.imports.jsi_release(result);
+        }
+        return if (g_explicit_exit) g_exit_code else 0;
+    }
+
+    if (std.mem.eql(u8, subcmd, "run")) {
+        // bun run <vfs-path>
+        if (argc < 3) return 1;
+        const file_val = runtime_g.getIndex(arr, 2);
+        defer jsi.imports.jsi_release(file_val.handle);
+        const file = runtime_g.dupeString(file_val) catch return 2;
+        defer allocator.free(file);
+
+        loader_g.current_dir = pathDirname(file);
+        const handle = loader_g.load(file) catch {
+            return if (g_explicit_exit) g_exit_code else 2;
+        };
+        jsi.imports.jsi_release(handle);
+        return if (g_explicit_exit) g_exit_code else 0;
+    }
+
+    return 0; // unknown subcommand — no-op, treat as success
+}
+
+/// Stub: signal a spawned process. Currently all spawns are synchronous and
+/// inline, so this is a no-op kept for ABI completeness.
+export fn bun_kill(_: u32, _: u32) void {}
+
+/// Stub: write to a spawned process's stdin.
+export fn bun_feed_stdin(_: u32, _: [*]const u8, _: u32) void {}
+
+/// Stub: close a spawned process's stdin.
+export fn bun_close_stdin(_: u32) void {}
+
 export fn jsi_host_invoke(fn_id: u32, this_handle: u32, argv_ptr: [*]const u32, argc: u32) u32 {
     if (!initialized) return jsi.Value.exception_sentinel;
 
