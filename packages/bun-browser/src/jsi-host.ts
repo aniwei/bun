@@ -142,8 +142,12 @@ export class JsiHost {
 
     return {
       // ── lifecycle ────────────────────────────────────
-      // Zig 侧 retain 语义是"复制句柄"；本实现以 GC 托管对象为准，直接返回同一句柄。
-      jsi_retain: (handle: number): number => handle,
+      // Zig 侧 retain 语义：在 handles 表中为同一值分配新槽，使其生命周期独立于原句柄。
+      // 保留句柄 (0..Global) 和哨兵不需要计数，直接返回。
+      jsi_retain: (handle: number): number => {
+        if (handle <= ReservedHandle.Global || handle === EXCEPTION_SENTINEL) return handle;
+        return self.retain(self.handles[handle]);
+      },
       jsi_release: (handle: number): void => self.release(handle),
 
       // ── construction ─────────────────────────────────

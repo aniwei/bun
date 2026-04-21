@@ -208,3 +208,226 @@ describe("process polyfill", () => {
     expect(code).toBe(0);
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// console polyfill
+// ──────────────────────────────────────────────────────────
+
+describe("console polyfill", () => {
+  test("console.log 路由到 onPrint stdout", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data, kind) => {
+      if (kind === "stdout") printed.push(data);
+    });
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    let code = -1;
+    rt.withString("console.log('hello world');", (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { code = evalFn(sp, sl, fp, fl); });
+    });
+    expect(code).toBe(0);
+    expect(printed.join("")).toContain("hello world");
+  });
+
+  test("console.error 路由到 onPrint stderr", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data, kind) => {
+      if (kind === "stderr") printed.push(data);
+    });
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    rt.withString("console.error('oops');", (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("oops");
+  });
+
+  test("console.log 多参数空格分隔", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data, kind) => {
+      if (kind === "stdout") printed.push(data);
+    });
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    rt.withString("console.log(1, 'two', true);", (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    const out = printed.join("");
+    expect(out).toContain("1");
+    expect(out).toContain("two");
+    expect(out).toContain("true");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// require("path")
+// ──────────────────────────────────────────────────────────
+
+describe("require('path')", () => {
+  test("path.join('/a', 'b', 'c') → '/a/b/c'", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `
+      var path = require('path');
+      console.log(path.join('/a', 'b', 'c'));
+    `;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("/a/b/c");
+  });
+
+  test("path.dirname('/foo/bar/baz.js') → '/foo/bar'", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `
+      var path = require('node:path');
+      console.log(path.dirname('/foo/bar/baz.js'));
+    `;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("/foo/bar");
+  });
+
+  test("path.extname('file.ts') → '.ts'", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `
+      var path = require('path');
+      console.log(path.extname('file.ts'));
+    `;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain(".ts");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// require("fs")
+// ──────────────────────────────────────────────────────────
+
+describe("require('fs')", () => {
+  test("readFileSync 读取 VFS 文件", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const loadFn = rt.instance.exports.bun_vfs_load_snapshot as (ptr: number, len: number) => number;
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+
+    const snapshot = buildSnapshot([{ path: "/data.txt", data: "hello from fs" }]);
+    rt.withBytes(new Uint8Array(snapshot), (ptr, len) => { loadFn(ptr, len); });
+
+    const code = `
+      var fs = require('fs');
+      console.log(fs.readFileSync('/data.txt', 'utf8'));
+    `;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("hello from fs");
+  });
+
+  test("existsSync 存在的文件 → true", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const loadFn = rt.instance.exports.bun_vfs_load_snapshot as (ptr: number, len: number) => number;
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+
+    const snapshot = buildSnapshot([{ path: "/exists.txt", data: "yes" }]);
+    rt.withBytes(new Uint8Array(snapshot), (ptr, len) => { loadFn(ptr, len); });
+
+    const code = `
+      var fs = require('fs');
+      console.log(fs.existsSync('/exists.txt'));
+      console.log(fs.existsSync('/nope.txt'));
+    `;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    const out = printed.join("");
+    expect(out).toContain("true");
+    expect(out).toContain("false");
+  });
+
+  test("writeFileSync + readFileSync 往返", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+
+    const code = `
+      var fs = require('fs');
+      fs.writeFileSync('/out.txt', 'written content');
+      console.log(fs.readFileSync('/out.txt', 'utf8'));
+    `;
+    let exitCode = -1;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { exitCode = evalFn(sp, sl, fp, fl); });
+    });
+    expect(exitCode).toBe(0);
+    expect(printed.join("")).toContain("written content");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// setTimeout / bun_tick
+// ──────────────────────────────────────────────────────────
+
+describe("setTimeout + bun_tick", () => {
+  test("setTimeout 延迟 0ms → bun_tick 后回调执行", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const tickFn = rt.instance.exports.bun_tick as () => number;
+
+    // Step 1: confirm console.log works through the runtime first
+    let codeCheck = -1;
+    rt.withString("console.log('setup ok');", (sp, sl) => {
+      rt.withString("<check>", (fp, fl) => { codeCheck = evalFn(sp, sl, fp, fl); });
+    });
+    expect(codeCheck).toBe(0);
+    expect(printed.join("")).toContain("setup ok");
+
+    printed.length = 0; // reset
+
+    // Step 2: register a timer
+    let evalCode = -1;
+    rt.withString("setTimeout(function() { console.log('timer fired'); }, 0);", (sp, sl) => {
+      rt.withString("<test-sto>", (fp, fl) => { evalCode = evalFn(sp, sl, fp, fl); });
+    });
+    expect(evalCode).toBe(0);
+
+    // Before tick, callback should not have fired
+    expect(printed).toHaveLength(0);
+
+    // Tick the event loop — delay=0 so it should fire immediately
+    tickFn();
+
+    expect(printed.join("")).toContain("timer fired");
+  });
+
+  test("bun_tick 导出存在", async () => {
+    const rt = await makeRuntime();
+    expect(rt.instance.exports.bun_tick).toBeInstanceOf(Function);
+  });
+});
