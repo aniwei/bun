@@ -11,3 +11,14 @@ export {
   type ParsedPreviewUrl,
 } from "./preview-router";
 export * from "./protocol";
+export {
+  installPackages,
+  chooseVersion,
+  parseTar,
+  gunzip,
+  type InstallerOptions,
+  type InstallResult,
+  type InstalledPackage,
+  type InstallProgress,
+  type TarEntry,
+} from "./installer";

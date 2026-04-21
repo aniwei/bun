@@ -257,6 +257,30 @@ export class Kernel {
     return this.previewPorts.remove(port);
   }
 
+  /**
+   * Phase 4 T4.1 / T4.2：在浏览器中执行最小 `bun install`。
+   *
+   * 流程：拉取每个顶层依赖的 metadata → 解析版本 → 下载 tarball →
+   * gunzip + ustar 解析 → 把所有文件写入 VFS（`/node_modules/<name>/...`）。
+   *
+   * 仅展开顶层 dependencies 表，不展开传递依赖；用于 RFC Phase 4 验收
+   * 的最小可验证切片。完整的 lockfile 解析与依赖图扁平化是 Phase 5 的工作。
+   */
+  async installPackages(
+    deps: Record<string, string>,
+    opts: import("./installer").InstallerOptions = {},
+  ): Promise<import("./installer").InstallResult> {
+    const { installPackages } = await import("./installer");
+    const result = await installPackages(deps, opts);
+    if (result.files.length > 0) {
+      await this.ready;
+      const snapshot = buildSnapshot(result.files);
+      const msg: VfsSnapshotRequest = { kind: "vfs:snapshot", snapshot };
+      this.post(msg, [snapshot]);
+    }
+    return result;
+  }
+
   terminate(): void {
     this.worker.terminate();
   }
