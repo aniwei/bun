@@ -17,9 +17,12 @@
 //!   bun_free(ptr)                                 — linear-memory free
 //!   bun_semver_select(vp,vl,rp,rl) u64           — pick best version from JSON array
 //!   bun_integrity_verify(dp,dl,ip,il) u32        — verify tarball integrity (SRI)
+//!   bun_transform(opts_ptr, opts_len) u64         — Phase 5.2: TS/JSX → JS (内置转译器)
 
 const std = @import("std");
 const Timer = @import("timer.zig").Timer;
+// ── Phase 5.2: 内置 TS/JSX strip 转译器 ──
+const bun_transform = @import("bun_wasm_transform.zig");
 
 // ── External JSI / sys_wasm imports (injected via build module map) ──
 const jsi = @import("jsi");
@@ -1358,6 +1361,15 @@ export fn bun_resolve(
     // 裸包（例如 "react"）：不以 / . 开头
     const is_bare = !(spec[0] == '/' or spec[0] == '.');
     if (is_bare) {
+        // Phase 5.3: tsconfig paths first (aliases like "@/foo" usually look like bare).
+        if (resolveViaTsconfigPaths(allocator, base_dir, spec)) |r| {
+            defer allocator.free(r.path);
+            return emitResolveResult(r.path, r.loader);
+        } else |err| switch (err) {
+            error.OutOfMemory => return packError(1),
+            error.ModuleNotFound => {},
+        }
+
         // 在 VFS 中可能仍有 /node_modules/<spec>/package.json —— 尝试作为最小支持
         const resolved = resolveBareInVfs(allocator, base_dir, spec) catch |err| switch (err) {
             error.OutOfMemory => return packError(1),
@@ -1445,18 +1457,348 @@ fn resolveRelative(alloc: std.mem.Allocator, base_dir: []const u8, spec: []const
 }
 
 fn resolveBareInVfs(alloc: std.mem.Allocator, base_dir: []const u8, name: []const u8) !ResolveResult {
-    // 自下而上查找 /node_modules/<name>
+    // split "scoped/name/sub/path" → pkg="scoped/name", subpath="./sub/path" or "."
+    var pkg_name: []const u8 = name;
+    var subpath: []const u8 = ".";
+    var sub_buf: ?[]u8 = null;
+    defer if (sub_buf) |b| alloc.free(b);
+
+    // skip first '/' for scoped packages "@scope/pkg/..."
+    const scan_start: usize = if (name.len > 0 and name[0] == '@')
+        (std.mem.indexOfScalar(u8, name, '/') orelse name.len) + 1
+    else
+        0;
+    if (std.mem.indexOfScalarPos(u8, name, scan_start, '/')) |slash| {
+        pkg_name = name[0..slash];
+        const rest = name[slash + 1 ..];
+        if (rest.len > 0) {
+            const joined = try std.fmt.allocPrint(alloc, "./{s}", .{rest});
+            sub_buf = joined;
+            subpath = joined;
+        }
+    }
+
+    // 自下而上查找 /node_modules/<pkg_name>
     var cur: []const u8 = base_dir;
     while (true) {
-        const nm_root = try std.fmt.allocPrint(alloc, "{s}/node_modules/{s}", .{ cur, name });
+        const nm_root = try std.fmt.allocPrint(alloc, "{s}/node_modules/{s}", .{ cur, pkg_name });
         defer alloc.free(nm_root);
         if (isDir(nm_root)) {
-            return resolveRelative(alloc, nm_root, ".");
+            return resolvePackageEntry(alloc, nm_root, subpath) catch |err| switch (err) {
+                // fall back to plain index.* / main-less behavior
+                error.ModuleNotFound => return resolveRelative(alloc, nm_root, subpath),
+                else => return err,
+            };
         }
         if (std.mem.eql(u8, cur, "/")) break;
         cur = pathDirname(cur);
     }
     return error.ModuleNotFound;
+}
+
+/// Phase 5.3: honor package.json `exports["."]` (string), `module`, `main`.
+/// For subpath requests other than "." we also try `exports[subpath]` as a string;
+/// otherwise fall through to `resolveRelative(pkg_dir, subpath)`.
+fn resolvePackageEntry(alloc: std.mem.Allocator, pkg_dir: []const u8, subpath: []const u8) !ResolveResult {
+    if (!std.mem.eql(u8, subpath, ".")) {
+        // Subpath request: first try exports["./<subpath>"] exact, then "*" patterns.
+        if (readPackageJson(alloc, pkg_dir)) |parsed_val| {
+            defer parsed_val.deinit();
+            if (parsed_val.value == .object) {
+                if (parsed_val.value.object.get("exports")) |exports_node| {
+                    if (exports_node == .object) {
+                        // 1) exact key match, e.g. "./foo/bar"
+                        if (exports_node.object.get(subpath)) |v| {
+                            if (pickExportsString(v)) |s| {
+                                return resolveRelative(alloc, pkg_dir, s);
+                            }
+                        }
+                        // 2) wildcard key match, e.g. "./features/*" -> "./dist/features/*.js"
+                        if (resolveExportsWildcard(alloc, exports_node.object, subpath)) |rendered| {
+                            defer alloc.free(rendered);
+                            return resolveRelative(alloc, pkg_dir, rendered);
+                        }
+                    }
+                }
+            }
+        } else |_| {}
+        return resolveRelative(alloc, pkg_dir, subpath);
+    }
+
+    // "." — prefer exports["."], then module, then main.
+    const parsed_or_err = readPackageJson(alloc, pkg_dir);
+    if (parsed_or_err) |parsed_val| {
+        defer parsed_val.deinit();
+        if (parsed_val.value == .object) {
+            const obj = parsed_val.value.object;
+            if (obj.get("exports")) |exports_node| {
+                const entry_spec = resolveExportsDot(exports_node);
+                if (entry_spec) |s| return resolveRelative(alloc, pkg_dir, s);
+            }
+            if (obj.get("module")) |m| if (m == .string) return resolveRelative(alloc, pkg_dir, m.string);
+            if (obj.get("main")) |m| if (m == .string) return resolveRelative(alloc, pkg_dir, m.string);
+        }
+    } else |_| {}
+    // fallback: resolveRelative treats "." as pkg_dir → tries index.*
+    return resolveRelative(alloc, pkg_dir, ".");
+}
+
+/// Walk `exports` object entries whose key contains a single `*` wildcard.
+/// Returns a newly-allocated rendered target spec, or null if none match.
+fn resolveExportsWildcard(
+    alloc: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    subpath: []const u8,
+) ?[]u8 {
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const star = std.mem.indexOfScalar(u8, key, '*') orelse continue;
+        const prefix = key[0..star];
+        const suffix = key[star + 1 ..];
+        if (!std.mem.startsWith(u8, subpath, prefix)) continue;
+        if (!std.mem.endsWith(u8, subpath, suffix)) continue;
+        if (subpath.len < prefix.len + suffix.len) continue;
+        const matched = subpath[prefix.len .. subpath.len - suffix.len];
+        const target = pickExportsString(entry.value_ptr.*) orelse continue;
+        const t_star = std.mem.indexOfScalar(u8, target, '*') orelse {
+            return alloc.dupe(u8, target) catch null;
+        };
+        return std.fmt.allocPrint(alloc, "{s}{s}{s}", .{
+            target[0..t_star],
+            matched,
+            target[t_star + 1 ..],
+        }) catch null;
+    }
+    return null;
+}
+
+fn readPackageJson(alloc: std.mem.Allocator, pkg_dir: []const u8) !std.json.Parsed(std.json.Value) {
+    const pj_path = try std.fmt.allocPrint(alloc, "{s}/package.json", .{pkg_dir});
+    defer alloc.free(pj_path);
+    const raw = vfs_g.readFile(pj_path) catch return error.ModuleNotFound;
+    defer alloc.free(raw);
+    return std.json.parseFromSlice(std.json.Value, alloc, raw, .{
+        .duplicate_field_behavior = .use_last,
+    }) catch return error.ModuleNotFound;
+}
+
+fn pickExportsString(v: std.json.Value) ?[]const u8 {
+    return switch (v) {
+        .string => |s| s,
+        .object => |o| blk: {
+            // prefer "import" → "default" for ESM priority; "browser" if present
+            if (o.get("browser")) |x| if (x == .string) break :blk x.string;
+            if (o.get("import")) |x| if (x == .string) break :blk x.string;
+            if (o.get("default")) |x| if (x == .string) break :blk x.string;
+            if (o.get("require")) |x| if (x == .string) break :blk x.string;
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
+/// Resolve the package-level `exports` field to the "." entry string.
+/// Forms handled:
+///   "exports": "./index.js"                         → "./index.js"
+///   "exports": { ".": "./index.js" }                → "./index.js"
+///   "exports": { ".": { "import": "./esm.js" } }    → "./esm.js"
+fn resolveExportsDot(exports_node: std.json.Value) ?[]const u8 {
+    return switch (exports_node) {
+        .string => |s| s,
+        .object => |o| blk: {
+            if (o.get(".")) |v| break :blk pickExportsString(v);
+            break :blk pickExportsString(.{ .object = o });
+        },
+        else => null,
+    };
+}
+
+/// Phase 5.3: tsconfig.json `compilerOptions.paths` matching.
+/// Walks upward from `base_dir` searching for a tsconfig.json with `compilerOptions.paths`.
+/// Returns the resolved absolute path, or error.ModuleNotFound if no pattern matched.
+///
+/// Supports the Node-style subset: literal keys and single-`*` wildcard patterns.
+///   "paths": { "@/*": ["./src/*"], "utils": ["./src/utils/index.ts"] }
+fn resolveViaTsconfigPaths(alloc: std.mem.Allocator, base_dir: []const u8, spec: []const u8) !ResolveResult {
+    var cur: []const u8 = base_dir;
+    while (true) {
+        const tsc_path = try std.fmt.allocPrint(alloc, "{s}/tsconfig.json", .{cur});
+        defer alloc.free(tsc_path);
+        if (isFile(tsc_path)) {
+            // Collect (baseUrl, paths) with extends-chain resolution.
+            var merged = loadTsconfigMerged(alloc, tsc_path, 0) catch null;
+            defer if (merged) |*m| m.deinit(alloc);
+            if (merged) |m| {
+                if (m.paths) |paths_obj| {
+                    const base_url = m.base_url orelse cur;
+                    var it = paths_obj.iterator();
+                    while (it.next()) |e| {
+                        const pattern = e.key_ptr.*;
+                        const targets = e.value_ptr.*;
+                        if (targets != .array) continue;
+                        if (matchTsconfigPath(alloc, pattern, spec)) |matched| {
+                            defer alloc.free(matched);
+                            for (targets.array.items) |t| {
+                                if (t != .string) continue;
+                                const rendered = renderTsconfigTarget(alloc, t.string, matched) catch continue;
+                                defer alloc.free(rendered);
+                                const r = resolveRelative(alloc, base_url, rendered) catch continue;
+                                return r;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (std.mem.eql(u8, cur, "/")) break;
+        cur = pathDirname(cur);
+    }
+    return error.ModuleNotFound;
+}
+
+/// Aggregated view of a tsconfig with `extends` chain applied.
+/// Holds ownership of the parsed JSON (first one in the chain) and a resolved baseUrl string.
+const MergedTsconfig = struct {
+    /// Root parsed value (kept alive so `paths_obj` entries remain valid).
+    /// Additional parsed values from the `extends` chain are stashed in `extras`.
+    root: std.json.Parsed(std.json.Value),
+    extras: std.array_list.Managed(std.json.Parsed(std.json.Value)),
+    /// Absolute baseUrl (duped). null ⇒ use the enclosing dir at query time.
+    base_url: ?[]u8,
+    /// Reference to the first `compilerOptions.paths` object in the chain.
+    paths: ?std.json.ObjectMap,
+
+    fn deinit(self: *MergedTsconfig, alloc: std.mem.Allocator) void {
+        self.root.deinit();
+        for (self.extras.items) |*p| p.deinit();
+        self.extras.deinit();
+        if (self.base_url) |b| alloc.free(b);
+    }
+};
+
+/// Load a tsconfig.json and follow `extends` recursively (up to 8 levels).
+/// Nearest-wins semantics: the first ancestor that defines `paths` / `baseUrl`
+/// supplies them. We do NOT deep-merge `paths` objects (keeping semantics simple).
+fn loadTsconfigMerged(
+    alloc: std.mem.Allocator,
+    path: []const u8,
+    depth: u32,
+) !MergedTsconfig {
+    if (depth > 8) return error.TooDeep;
+    const raw = vfs_g.readFile(path) catch return error.ModuleNotFound;
+    defer alloc.free(raw);
+    const stripped = stripTrailingCommas(alloc, raw) catch return error.OutOfMemory;
+    defer alloc.free(stripped);
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, stripped, .{
+        .duplicate_field_behavior = .use_last,
+    }) catch return error.ModuleNotFound;
+    errdefer parsed.deinit();
+
+    const parent_dir = pathDirname(path);
+
+    var merged: MergedTsconfig = .{
+        .root = parsed,
+        .extras = std.array_list.Managed(std.json.Parsed(std.json.Value)).init(alloc),
+        .base_url = null,
+        .paths = null,
+    };
+    errdefer merged.extras.deinit();
+
+    var base_url_raw: ?[]const u8 = null;
+
+    if (parsed.value == .object) {
+        if (parsed.value.object.get("compilerOptions")) |co| {
+            if (co == .object) {
+                if (co.object.get("baseUrl")) |bu| if (bu == .string) {
+                    base_url_raw = bu.string;
+                };
+                if (co.object.get("paths")) |p| if (p == .object) {
+                    merged.paths = p.object;
+                };
+            }
+        }
+    }
+
+    // Follow `extends` until we find what's missing.
+    const needs_extend = (merged.paths == null or base_url_raw == null) and
+        (parsed.value == .object and parsed.value.object.get("extends") != null);
+    if (needs_extend) {
+        const ext_node = parsed.value.object.get("extends").?;
+        if (ext_node == .string) {
+            const ext_spec = ext_node.string;
+            const ext_path_opt: ?[]u8 = if (ext_spec.len > 0 and (ext_spec[0] == '.' or ext_spec[0] == '/'))
+                blk: {
+                    // Normalize and auto-append .json if missing
+                    var joined = try joinPath(alloc, parent_dir, ext_spec);
+                    if (!std.mem.endsWith(u8, joined, ".json")) {
+                        const extended = try std.fmt.allocPrint(alloc, "{s}.json", .{joined});
+                        alloc.free(joined);
+                        joined = extended;
+                    }
+                    break :blk joined;
+                }
+            else
+                null; // bare-package extends not supported in Phase 5.3a
+            if (ext_path_opt) |ext_path| {
+                defer alloc.free(ext_path);
+                if (loadTsconfigMerged(alloc, ext_path, depth + 1)) |child| {
+                    var c = child;
+                    if (merged.paths == null and c.paths != null) {
+                        merged.paths = c.paths;
+                        // Keep the parsed JSON alive by moving it into `extras`.
+                        try merged.extras.append(c.root);
+                        // Swallow child's extras too (transitive extends).
+                        try merged.extras.appendSlice(c.extras.items);
+                        c.extras.items.len = 0; // prevent double-free
+                        c.extras.deinit();
+                        if (c.base_url) |cbase| {
+                            if (merged.base_url == null) merged.base_url = cbase else alloc.free(cbase);
+                        }
+                        // Do NOT deinit c.root here — ownership moved.
+                        base_url_raw = null; // already absolutized by child
+                    } else {
+                        c.deinit(alloc);
+                    }
+                } else |_| {}
+            }
+        }
+    }
+
+    if (merged.base_url == null) {
+        const br = base_url_raw orelse ".";
+        merged.base_url = try joinPath(alloc, parent_dir, br);
+    }
+    return merged;
+}
+
+
+/// Returns the portion matched by `*` (newly-allocated, or empty string for literal match),
+/// or null when pattern doesn't match spec.
+fn matchTsconfigPath(alloc: std.mem.Allocator, pattern: []const u8, spec: []const u8) ?[]u8 {
+    if (std.mem.indexOfScalar(u8, pattern, '*')) |star| {
+        const prefix = pattern[0..star];
+        const suffix = pattern[star + 1 ..];
+        if (!std.mem.startsWith(u8, spec, prefix)) return null;
+        if (!std.mem.endsWith(u8, spec, suffix)) return null;
+        if (spec.len < prefix.len + suffix.len) return null;
+        const mid = spec[prefix.len .. spec.len - suffix.len];
+        return alloc.dupe(u8, mid) catch null;
+    }
+    // literal match
+    if (std.mem.eql(u8, pattern, spec)) return alloc.dupe(u8, "") catch null;
+    return null;
+}
+
+fn renderTsconfigTarget(alloc: std.mem.Allocator, target: []const u8, matched: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, target, '*')) |star| {
+        return std.fmt.allocPrint(alloc, "{s}{s}{s}", .{
+            target[0..star],
+            matched,
+            target[star + 1 ..],
+        });
+    }
+    return alloc.dupe(u8, target);
 }
 
 fn isFile(path: []const u8) bool {
@@ -1546,10 +1888,25 @@ const Bundler = struct {
         self.entry_id = try self.addFile(entry_path, "/", 0);
     }
 
+    /// Phase 5.3: union resolver — relative/abs → resolveRelative,
+    /// bare → tsconfig paths → node_modules (package.json main/exports).
+    fn resolveModule(self: *Bundler, specifier: []const u8, base_dir: []const u8) !ResolveResult {
+        if (specifier.len == 0) return error.ModuleNotFound;
+        const is_bare = !(specifier[0] == '/' or specifier[0] == '.');
+        if (is_bare) {
+            if (resolveViaTsconfigPaths(self.alloc, base_dir, specifier)) |r| return r else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.ModuleNotFound => {},
+            }
+            return resolveBareInVfs(self.alloc, base_dir, specifier);
+        }
+        return resolveRelative(self.alloc, base_dir, specifier);
+    }
+
     fn addFile(self: *Bundler, specifier: []const u8, base_dir: []const u8, depth: u32) BundlerError!u32 {
         if (depth > 256) return error.TooDeep;
 
-        const resolved = resolveRelative(self.alloc, base_dir, specifier) catch |err| switch (err) {
+        const resolved = self.resolveModule(specifier, base_dir) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ModuleNotFound => return error.ModuleNotFound,
         };
@@ -1667,6 +2024,23 @@ fn transpileIfNeeded(alloc: std.mem.Allocator, path: []const u8, src: []const u8
     }
     if (!is_ts) return alloc.dupe(u8, src) catch error.OutOfMemory;
 
+    // ── Phase 5.2：优先使用内置 WASM 转译器 ──────────────────────────
+    const opts = bun_transform.TransformOptions{
+        .source = src,
+        .filename = path,
+        .jsx = if (std.mem.endsWith(u8, path, ".tsx") or std.mem.endsWith(u8, path, ".jsx"))
+            .react
+        else
+            .none,
+    };
+    var result = bun_transform.transform(alloc, opts) catch return error.OutOfMemory;
+    defer result.deinit();
+
+    if (result.code) |code| {
+        return alloc.dupe(u8, code) catch error.OutOfMemory;
+    }
+
+    // 内置转译器报错 → 回退 Host jsi_transpile（如果可用）
     const h = jsi.imports.jsi_transpile(
         @intFromPtr(src.ptr),
         src.len,
@@ -2141,10 +2515,64 @@ export fn bun_path_join(paths_ptr: [*]const u8, paths_len: u32) u64 {
     return handOff(result);
 }
 
+
 // ──────────────────────────────────────────────────────────────────────────────
-// Phase 5.1 T5.1.4 — bun_url_parse
-// Uses std.Uri (pure Zig stdlib RFC-3986 parser → WASM-safe).
+// Phase 5.2 — bun_transform (TS/JSX → JS 内置转译器)
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Transform TypeScript/JSX source to plain JS using the built-in WASM transformer.
+///
+/// opts_ptr: pointer to JSON string: { "code": <TS source>, "filename": <file.ts>, "jsx": "react"|... }
+/// opts_len: length of JSON string
+/// Returns packed (ptr << 32 | len) pointing to JSON string: { "code": <JS>, "errors": [] } or { "code": null, "errors": ["..."] }
+/// Returns 0 on OOM (low 32 bits = error code)
+export fn bun_transform(opts_ptr: [*]const u8, opts_len: u32) u64 {
+    if (!initialized) return packError(1);
+    const opts_json = opts_ptr[0..opts_len];
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, opts_json, .{}) catch return packError(2);
+    defer parsed.deinit();
+    const root = parsed.value;
+    if (root != .object) return packError(2);
+    const code_val = root.object.get("code") orelse return packError(2);
+    const filename_val = root.object.get("filename") orelse return packError(2);
+    const jsx_val = root.object.get("jsx");
+    const code = switch (code_val) { .string => |s| s, else => return packError(2), };
+    const filename = switch (filename_val) { .string => |s| s, else => return packError(2), };
+    var jsx_mode: bun_transform.TransformOptions.JsxMode = .react;
+    if (jsx_val) |jv| if (jv == .string) {
+        if (std.mem.eql(u8, jv.string, "react")) jsx_mode = .react;
+        else if (std.mem.eql(u8, jv.string, "react-jsx")) jsx_mode = .react_jsx;
+        else if (std.mem.eql(u8, jv.string, "preserve")) jsx_mode = .preserve;
+        else jsx_mode = .none;
+    }
+    const opts = bun_transform.TransformOptions{
+        .source = code,
+        .filename = filename,
+        .jsx = jsx_mode,
+    };
+    var result = bun_transform.transform(allocator, opts) catch {
+        const err_json = "{\"code\":null,\"errors\":[\"transform failed\"]}";
+        const buf = allocator.dupe(u8, err_json) catch return packError(1);
+        return handOff(buf);
+    };
+    defer result.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (result.code) |js| {
+        out.appendSlice(allocator, "{\"code\":") catch return packError(1);
+        jsonEscapeTo(&out, js) catch return packError(1);
+        out.appendSlice(allocator, ",\"errors\":[]}") catch return packError(1);
+    } else {
+        out.appendSlice(allocator, "{\"code\":null,\"errors\":[") catch return packError(1);
+        for (result.errors, 0..) |e, i| {
+            if (i != 0) out.append(allocator, ',') catch return packError(1);
+            jsonEscapeTo(&out, e) catch return packError(1);
+        }
+        out.appendSlice(allocator, "]}") catch return packError(1);
+    }
+    const owned = out.toOwnedSlice(allocator) catch return packError(1);
+    return handOff(owned);
+}
 
 /// Parse a URL string and return a JSON object with its components.
 ///

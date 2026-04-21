@@ -139,12 +139,39 @@ export interface WasmRuntime {
    * 若 WASM 不导出 bun_url_parse，返回 null。
    */
   urlParse(url: string): UrlComponents | null;
+  /**
+   * Phase 5.2：TS/JSX → JS 内置转译（`bun_transform`）。
+   *
+   * 输入：原始源码 + 文件名（用于推断 ts/tsx/jsx）+ 可选 JSX 模式。
+   * 输出：`{ code, errors }`。`code` 为 null 时 `errors` 非空。
+   * 若 WASM 不导出 `bun_transform`，返回 null。
+   */
+  transform(source: string, filename: string, opts?: TransformOptions): TransformResult | null;
 }
 
 /** Phase 1 T1.1：bun_resolve 返回结构。 */
 export interface ResolveResult {
   path: string;
   loader: "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "json";
+}
+
+/**
+ * Phase 5.2：`transform` 的可选参数。
+ *
+ * `jsx`:
+ *   - `"react"` (默认)：`<div/>` → `React.createElement('div')`
+ *   - `"react-jsx"`：React 17+ automatic runtime，顶部自动 `import { jsx, jsxs, Fragment } from 'react/jsx-runtime'`
+ *   - `"preserve"`：保留 JSX 原样
+ *   - `"none"`：.ts 文件禁用 JSX 处理
+ */
+export interface TransformOptions {
+  jsx?: "react" | "react-jsx" | "preserve" | "none";
+}
+
+/** Phase 5.2：`transform` 返回结构。 */
+export interface TransformResult {
+  code: string | null;
+  errors: string[];
 }
 
 /** Phase 5.1 T5.1.4：bun_url_parse 返回结构（与 node:url.parse 对齐）。 */
@@ -581,6 +608,30 @@ export async function createWasmRuntime(
       try {
         const json = dec.decode(new Uint8Array(mem, r.ptr, r.len));
         return JSON.parse(json) as import("./wasm").UrlComponents;
+      } finally {
+        r.free_(r.ptr);
+      }
+    },
+
+    // ── Phase 5.2 — TS/JSX transform via WASM export ───────────────────────
+
+    transform(source: string, filename: string, opts?: TransformOptions): TransformResult | null {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      if (!exports_.bun_transform) return null;
+      const payload = enc.encode(
+        JSON.stringify({
+          code: source,
+          filename,
+          jsx: opts?.jsx ?? "react",
+        }),
+      );
+      const r = callPackedRaw("bun_transform", payload, undefined, false);
+      if (!r) return { code: null, errors: ["bun_transform returned error"] };
+      const mem = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      try {
+        const json = dec.decode(new Uint8Array(mem, r.ptr, r.len));
+        const parsed = JSON.parse(json) as TransformResult;
+        return parsed;
       } finally {
         r.free_(r.ptr);
       }

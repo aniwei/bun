@@ -214,3 +214,241 @@ describe("bun_bundle", () => {
     expect(() => rt.bundle("/does/not/exist.ts")).toThrow(/entry not found/);
   });
 });
+
+// Phase 5.3: package.json main/module/exports + tsconfig paths
+describe("Phase 5.3 · package.json resolution", () => {
+  test("裸包：package.json main 字段优先", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/src/main.ts", data: "" },
+      {
+        path: "/app/node_modules/leftpad/package.json",
+        data: JSON.stringify({ name: "leftpad", main: "./dist/cjs.js" }),
+      },
+      { path: "/app/node_modules/leftpad/dist/cjs.js", data: "module.exports=function(){};" },
+      // also present but should be ignored
+      { path: "/app/node_modules/leftpad/index.js", data: "throw new Error('should not pick index');" },
+    ]);
+    const result = rt.resolve("leftpad", "/app/src/main.ts");
+    expect(result.path).toBe("/app/node_modules/leftpad/dist/cjs.js");
+  });
+
+  test("裸包：exports['.'] 字符串优先级高于 main", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/src/main.ts", data: "" },
+      {
+        path: "/app/node_modules/mylib/package.json",
+        data: JSON.stringify({
+          name: "mylib",
+          main: "./main.js",
+          exports: { ".": "./esm.js" },
+        }),
+      },
+      { path: "/app/node_modules/mylib/main.js", data: "throw new Error('main picked');" },
+      { path: "/app/node_modules/mylib/esm.js", data: "module.exports=1;" },
+    ]);
+    const result = rt.resolve("mylib", "/app/src/main.ts");
+    expect(result.path).toBe("/app/node_modules/mylib/esm.js");
+  });
+
+  test("裸包：exports['.'] 条件对象 → 选 import", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/main.ts", data: "" },
+      {
+        path: "/app/node_modules/cond/package.json",
+        data: JSON.stringify({
+          name: "cond",
+          exports: { ".": { require: "./cjs.js", import: "./esm.js", default: "./def.js" } },
+        }),
+      },
+      { path: "/app/node_modules/cond/esm.js", data: "module.exports=2;" },
+      { path: "/app/node_modules/cond/cjs.js", data: "throw new Error('cjs picked');" },
+    ]);
+    const result = rt.resolve("cond", "/app/main.ts");
+    expect(result.path).toBe("/app/node_modules/cond/esm.js");
+  });
+
+  test("裸包：module 字段退化回退", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/main.ts", data: "" },
+      {
+        path: "/app/node_modules/modpkg/package.json",
+        data: JSON.stringify({ name: "modpkg", module: "./m.js" }),
+      },
+      { path: "/app/node_modules/modpkg/m.js", data: "module.exports=3;" },
+    ]);
+    const result = rt.resolve("modpkg", "/app/main.ts");
+    expect(result.path).toBe("/app/node_modules/modpkg/m.js");
+  });
+
+  test("裸包子路径：pkg/sub → node_modules/pkg/sub.ts 探测", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/main.ts", data: "" },
+      {
+        path: "/app/node_modules/leftpad/package.json",
+        data: JSON.stringify({ name: "leftpad", main: "./index.js" }),
+      },
+      { path: "/app/node_modules/leftpad/index.js", data: "" },
+      { path: "/app/node_modules/leftpad/utils.js", data: "module.exports=42;" },
+    ]);
+    const result = rt.resolve("leftpad/utils", "/app/main.ts");
+    expect(result.path).toBe("/app/node_modules/leftpad/utils.js");
+  });
+
+  test("Scoped 包: @scope/name 正确解析", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/main.ts", data: "" },
+      {
+        path: "/app/node_modules/@scope/pkg/package.json",
+        data: JSON.stringify({ name: "@scope/pkg", main: "./lib.js" }),
+      },
+      { path: "/app/node_modules/@scope/pkg/lib.js", data: "module.exports=7;" },
+    ]);
+    const result = rt.resolve("@scope/pkg", "/app/main.ts");
+    expect(result.path).toBe("/app/node_modules/@scope/pkg/lib.js");
+  });
+});
+
+describe("Phase 5.3 · tsconfig paths", () => {
+  test("通配符别名 @/* → ./src/*", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/proj/tsconfig.json",
+        data: JSON.stringify({
+          compilerOptions: {
+            baseUrl: ".",
+            paths: { "@/*": ["./src/*"] },
+          },
+        }),
+      },
+      { path: "/proj/src/main.ts", data: "" },
+      { path: "/proj/src/utils/helpers.ts", data: "export const v = 10;" },
+    ]);
+    const result = rt.resolve("@/utils/helpers", "/proj/src/main.ts");
+    expect(result.path).toBe("/proj/src/utils/helpers.ts");
+    expect(result.loader).toBe("ts");
+  });
+
+  test("字面别名: utils → ./src/utils/index.ts", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/proj/tsconfig.json",
+        data: JSON.stringify({
+          compilerOptions: {
+            paths: { "utils": ["./src/utils/index.ts"] },
+          },
+        }),
+      },
+      { path: "/proj/src/main.ts", data: "" },
+      { path: "/proj/src/utils/index.ts", data: "export const v = 5;" },
+    ]);
+    const result = rt.resolve("utils", "/proj/src/main.ts");
+    expect(result.path).toBe("/proj/src/utils/index.ts");
+  });
+
+  test("tsconfig.json 向上查找（src/main.ts 使用项目根 tsconfig）", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/workspace/proj/tsconfig.json",
+        data: JSON.stringify({
+          compilerOptions: { paths: { "#lib/*": ["./packages/lib/src/*"] } },
+        }),
+      },
+      { path: "/workspace/proj/apps/web/main.ts", data: "" },
+      { path: "/workspace/proj/packages/lib/src/a.ts", data: "export const v=1;" },
+    ]);
+    const result = rt.resolve("#lib/a", "/workspace/proj/apps/web/main.ts");
+    expect(result.path).toBe("/workspace/proj/packages/lib/src/a.ts");
+  });
+
+  test("Bundler 集成：@/* 别名在打包时生效", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/proj/tsconfig.json",
+        data: JSON.stringify({
+          compilerOptions: { paths: { "@/*": ["./src/*"] } },
+        }),
+      },
+      {
+        path: "/proj/src/entry.ts",
+        data: `import { v } from "@/math";\nmodule.exports = v * 2;`,
+      },
+      { path: "/proj/src/math.ts", data: `export const v = 21;` },
+    ]);
+    const js = rt.bundle("/proj/src/entry.ts");
+    const out = runInContext(js, createContext({}), { filename: "/bundle.js" });
+    expect(out).toBe(42);
+  });
+
+  test("tsconfig paths 未匹配 → fallback 到 node_modules", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/proj/tsconfig.json",
+        data: JSON.stringify({
+          compilerOptions: { paths: { "@/*": ["./src/*"] } },
+        }),
+      },
+      { path: "/proj/src/main.ts", data: "" },
+      {
+        path: "/proj/node_modules/lodash/package.json",
+        data: JSON.stringify({ name: "lodash", main: "./index.js" }),
+      },
+      { path: "/proj/node_modules/lodash/index.js", data: "module.exports={};" },
+    ]);
+    const result = rt.resolve("lodash", "/proj/src/main.ts");
+    expect(result.path).toBe("/proj/node_modules/lodash/index.js");
+  });
+
+  test("exports 子路径通配符: ./features/* → ./dist/features/*.js", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/main.ts", data: "" },
+      {
+        path: "/app/node_modules/wlib/package.json",
+        data: JSON.stringify({
+          name: "wlib",
+          exports: { "./features/*": "./dist/features/*.js" },
+        }),
+      },
+      { path: "/app/node_modules/wlib/dist/features/alpha.js", data: "module.exports='alpha';" },
+    ]);
+    const result = rt.resolve("wlib/features/alpha", "/app/main.ts");
+    expect(result.path).toBe("/app/node_modules/wlib/dist/features/alpha.js");
+  });
+
+  test("tsconfig extends: 子配置继承父 paths", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/repo/tsconfig.base.json",
+        data: JSON.stringify({
+          compilerOptions: {
+            baseUrl: ".",
+            paths: { "@shared/*": ["./packages/shared/src/*"] },
+          },
+        }),
+      },
+      {
+        path: "/repo/apps/web/tsconfig.json",
+        data: JSON.stringify({
+          extends: "../../tsconfig.base.json",
+          compilerOptions: {},
+        }),
+      },
+      { path: "/repo/apps/web/main.ts", data: "" },
+      { path: "/repo/packages/shared/src/util.ts", data: "export const v=1;" },
+    ]);
+    const result = rt.resolve("@shared/util", "/repo/apps/web/main.ts");
+    expect(result.path).toBe("/repo/packages/shared/src/util.ts");
+  });
+});

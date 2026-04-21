@@ -1,6 +1,6 @@
 # Bun WASM Browser Runtime — Phase 5 迭代计划
 
-**状态**：Phase 5.1 已完成 ✅  
+**状态**：Phase 5.1 已完成 ✅ · Phase 5.2 原型已落地 🟡 · Phase 5.3 resolver 子集已落地 🟡  
 **依赖文档**：
 - [bun-wasm-browser-runtime-technical-design.md](./bun-wasm-browser-runtime-technical-design.md)
 - [bun-wasm-browser-runtime-implementation-plan.md](./bun-wasm-browser-runtime-implementation-plan.md)
@@ -115,45 +115,139 @@ transpile / bundle 输出 sourcemap → 错误对象堆栈反查回源。
 
 ### Phase 5.2 — Transpiler 真身
 
+**状态**：🟡 原型（轻量 Zig stripper）已落地，`js_parser` 全栈接入待实现
+
 **时间盒**：2-3 周  
-**目标**：消除对 Host `jsi_transpile` 的依赖，TS/JSX 在 WASM 内部真实转译。
+**目标**：消除对 Host `jsi_transpile` 的硬依赖，TS/JSX 在 WASM 内部真实转译。
 
-**任务**：
-- T5.2.1 把 `src/js_parser.zig` / `js_printer.zig` / `transpiler.zig` 编入 WASM
-- T5.2.2 剥离 `Log` 对文件系统的依赖，`defines` / `runtime.js` 内联为 `@embedFile`
-- T5.2.3 新 ABI `bun_transform(opts_ptr, opts_len) u64` —— JSON 输入，返回 `{code, map, errors}`
-- T5.2.4 JSI 侧 `jsi_transpile` 改走 `bun_transform`；Host 回调缺省可移除
-- T5.2.5 sourcemap 随错误堆栈返回
+#### 分层策略
 
-**验收**：
-- TS / TSX / JSX 真实转译，输出等价于 CLI `bun build --target=browser`
-- Host 侧不再需要注入 transpile callback
-- 栈帧能反查回源
+- **原型层**：`src/bun_wasm_transform.zig` — wasm32-freestanding 纯 stdlib 实现的轻量
+  TS/JSX strip 转译器，不引入 `js_parser`/`Log`/`FileSystem` 等大依赖。
+  支持的特性：
+  - 变量、2参数、返回值类型注解删除
+  - `interface` / `type` / `declare` 整体删除
+  - `class` 访问修饰符、装饰器
+  - `enum` 折叠为 IIFE
+  - `as T` 转换、非空断言 `!`
+  - `import type` / `export type`
+  - 函数签名与 class 中的泛型
+  - 基础 JSX（React.createElement／tsx）
+
+  不在覆盖范围（留给 `js_parser` 完整接入）：sourcemap、namespace 合并、
+  复杂条件类型、模块重映射。
+
+- **未来**：`src/js_parser.zig` + `js_printer.zig` + `transpiler.zig` 真身接入，
+  在同一 `bun_transform` ABI 下替换底层实现，上层无感。
+
+#### T5.2.6 依赖面分析（阻塞项）
+
+`js_parser.zig` 与 `transpiler.zig` 强依赖以下模块，WASM 化成本陡峭：
+
+| 依赖 | 用途 | WASM 适配策略 |
+|------|------|---------------|
+| `bun.jsc` (`JSValue`/`JSGlobalObject`) | macros / plugin runner | stub：WASM 构建禁用 macros，`PluginRunner = void` |
+| `bun.logger.Log` | 错误与警告收集 | 可用：改为 `std.ArrayList(Msg)`，由 WASM 直接序列化到 `errors[]` |
+| `bun.Fs.FileSystem` | 源文件路径规范化 | 用 `std.fs.path.resolvePosix` 替换 |
+| `bun.RuntimeTranspilerCache` | 转译结果缓存（磁盘） | stub：WASM 内关闭缓存（`cache = null`） |
+| `bun.Mimalloc` / `bun.default_allocator` | 全局分配器 | 替换为 `std.heap.wasm_allocator` |
+| `_resolver.PendingResolution` | lazy import 引用 | 可用：同 `ParseResult` 一起 WASM 化 |
+| `bun.bundle_v2.*` | bundler 耦合字段 | 隔离：`ParseResult` 所用字段单独 WASM 化；bundle 路径仍走手写 |
+
+**建议路径（未来工作）**：
+
+1. 在 `bun_wasm_shim.zig` 内逐步扩展：`logger.Msg`、`logger.Source`、`options.Loader`、`js_ast.Ast` 的
+   WASM-safe 子集；其他 jsc-依赖字段用 `comptime if (is_wasm) void else ...` 隔离。
+2. 新增 `src/bun_wasm_parser.zig`，顶层 `fn parse(source, opts) !Ast`，委托到 `js_parser.Parser`
+   但在 WASM 构建下关闭 macro/plugin 路径。
+3. `bun_transform` ABI 不变，实现切换到 `js_parser` + `js_printer`。
+4. 观察 `build-wasm-smoke.zig` 的产物大小（预估 +800KB~2MB），视情况启用 `-Doptimize=ReleaseSmall`。
+
+#### 任务
+
+| 任务 | 说明 | 状态 |
+|------|------|:----:|
+| T5.2.1 | 轻量 stripper `src/bun_wasm_transform.zig`（Zig） | ✅ |
+| T5.2.2 | `bun_transform(opts_ptr, opts_len) u64` WASM ABI | ✅ |
+| T5.2.3 | `packages/bun-browser/src/wasm.ts` 新增 `transform()` 封装 + `TransformResult` 类型 | ✅ |
+| T5.2.4 | Bundler 内部 `transpileIfNeeded` 接入，失败回退 `jsi_transpile` | ✅ |
+| T5.2.5 | 端到端测试：`packages/bun-browser/test/transform.test.ts` | ✅ |
+| T5.2.6 | 完整接入 `js_parser`/`transpiler`（取代轻量实现） | ⏳ |
+| T5.2.7 | sourcemap 串连错误堆栈 | ⏳ |
+| T5.2.8 | `Host` 侧移除 `jsi_transpile` 必要性（不再提供，WASM 自含） | ⏳ |
+
+#### ABI
+
+```c
+// 输入 JSON: { "code": <TS>, "filename": <str>, "jsx": "react"|"react-jsx"|"preserve"|"none" }
+// 输出 JSON: { "code": <JS|null>, "errors": [<string>...] }
+u64 bun_transform(u32 opts_ptr, u32 opts_len);
+```
+
+#### 验收
+
+- 当前验收（原型）：
+  - Bundler 在无 Host 帮助下将 `.ts`/`.tsx` 打包为可运行 JS
+  - `rt.transform(src, file)` 返回 `{code, errors}`
+  - 源码存在轻度语法问题时，shape 仍保持合法
+- 正式验收（待 T5.2.6 完成）：输出与 `bun build --target=browser` 等价
 
 ---
 
 ### Phase 5.3 — Resolver / Bundler 真身
 
+**状态**：🟡 手写 resolver 已具备 package.json 主要字段 + tsconfig paths；`src/resolver/*` 真身接入待做
+
 **时间盒**：3-4 周  
 **目标**：替换 `bun_browser_standalone.zig` 里手写的 80 行 ModuleLoader 与 300 行 bundler。
 
-**任务**：
-- T5.3.1 `src/resolver/*` WASM 化
-  - package.json `exports` / `imports`
-  - tsconfig `paths`
-  - Node builtin 映射
-- T5.3.2 `src/bundler/*` 最小子集
-  - 单入口 IIFE + 多入口 ESM
-  - CSS import 支持
-  - code-splitting（二期）
-- T5.3.3 新 ABI
-  - `bun_resolve2(specifier, from, config_json) u64`
-  - `bun_bundle2(config_json) u64`
-- T5.3.4 保留旧 `bun_resolve` / `bun_bundle` 作为薄封装，直到测试迁移完毕
+#### 分层策略
 
-**验收**：
-- `Bun.resolveSync` 能处理 monorepo、tsconfig paths、exports 条件
-- `Bun.build` 输出含 sourcemap、tree-shake 后的 bundle
+- **现阶段（手写 resolver 增强版）**：在 `bun_browser_standalone.zig` 内扩展 VFS-based resolver，
+  补齐 monorepo 项目最常用的字段——对 MVP 场景已够用，不阻塞 Phase 5.4+。
+- **未来（真身接入）**：将 `src/resolver/resolver.zig`（DirInfo / PackageJson / TSConfigJSON）
+  编入 WASM，替换手写实现但保持 `bun_resolve` ABI 兼容。
+
+#### 任务拆分
+
+| 任务 | 说明 | 状态 |
+|------|------|:----:|
+| T5.3.1a | `package.json` `main` / `module` / `browser` 字段（字符串） | ✅ |
+| T5.3.1b | `package.json` `exports["."]` 字符串 / 条件对象（browser → import → default → require 优先） | ✅ |
+| T5.3.1c | `package.json` `exports["./subpath"]` 字面匹配 | ✅ |
+| T5.3.1d | Scoped packages `@scope/name` 正确拆分 | ✅ |
+| T5.3.1e | `tsconfig.json` `compilerOptions.paths` + `baseUrl` + `*` 通配符 | ✅ |
+| T5.3.1f | tsconfig 向上查找（monorepo apps/web → 根 tsconfig） | ✅ |
+| T5.3.1g | `exports` `imports` 条件中 `pattern/*` 通配符 | ✅ |
+| T5.3.1h | `tsconfig.extends` 继承链 | ✅ |
+| T5.3.1i | Node builtin 映射（`node:fs` → polyfill id） | ⏳ |
+| T5.3.2 | `src/bundler/*` 最小子集（树摇 / CSS import / code-splitting） | ⏳ |
+| T5.3.3 | 新 ABI `bun_resolve2`/`bun_bundle2` 接收 config_json | ⏳ |
+| T5.3.4 | 旧 `bun_resolve`/`bun_bundle` 作薄封装 → 底层替换为 `src/resolver/*` | ⏳ |
+
+#### 已落地 ABI（Phase 5.3a）
+
+无新 ABI —— 改进在 `bun_resolve` / `bun_bundle` 内部生效，上层 `rt.resolve()` / `rt.bundle()` 调用方式不变。
+
+```c
+// 行为变化：
+// 1. spec 非裸导入仍走 resolveRelative（未变）
+// 2. spec 裸导入先试 tsconfig paths → 匹配则解析；否则走 node_modules lookup
+// 3. node_modules lookup 自下而上找 dir，然后读 package.json：
+//      exports["."] 字符串 → exports["."].browser|import|default|require → module → main
+//      subpath `pkg/foo` → 若 exports["./foo"] 命中则用之；否则 resolveRelative(dir, "./foo")
+```
+
+#### 验收
+
+- 当前验收（Phase 5.3a）：
+  - `rt.resolve("@scope/pkg", ...)`、`rt.resolve("pkg/sub", ...)`、`rt.resolve("@/utils", ...)` 通过
+  - Bundler 遇到 tsconfig 别名的 import 能自动解析并打包
+  - package.json `exports` 的 browser/import/default/require 条件按优先级匹配
+  - 未匹配 tsconfig paths 的裸导入自动 fallback 到 node_modules
+- 正式验收（待 T5.3.4 完成）：
+  - `Bun.resolveSync` 能处理 monorepo、tsconfig paths、exports 条件（输出与 CLI Bun 一致）
+  - `Bun.build` 输出含 sourcemap、tree-shake 后的 bundle
 
 ---
 
@@ -257,14 +351,14 @@ u64 bun_hash(u32 algo, u32 ptr, u32 len);
 u64 bun_base64_encode(u32 ptr, u32 len);
 u64 bun_base64_decode(u32 ptr, u32 len);
 u64 bun_inflate(u32 ptr, u32 len, u32 format);   // 0=gzip, 1=zlib, 2=raw
-u64 bun_deflate(u32 ptr, u32 len, u32 format);
+u64 bun_deflate(u32 ptr, u32 len, u32 format);   // ⭕️ deferred (Zig 0.15.2 API 冗余)
 u64 bun_path_normalize(u32 ptr, u32 len);
 u64 bun_path_dirname(u32 ptr, u32 len);
 u64 bun_path_join(u32 paths_ptr, u32 paths_len); // packed: [base_len:u32le][base][rel]
 u64 bun_url_parse(u32 ptr, u32 len);             // → JSON {href,scheme,protocol,host,hostname,port,pathname,search,hash,auth}
 
-// Phase 5.2
-u64 bun_transform(u32 opts_ptr, u32 opts_len);
+// Phase 5.2 ✅ 原型已实现（轻量 stripper），js_parser 版本 ⏳
+u64 bun_transform(u32 opts_ptr, u32 opts_len);   // 输入/输出 JSON，见 Phase 5.2 小节
 
 // Phase 5.3
 u64 bun_resolve2(u32 spec_ptr, u32 spec_len,
@@ -331,3 +425,7 @@ u32 bun_spawn2(u32 cmd_ptr, u32 cmd_len,
 |------|------|------|
 | 2026-04-21 | — | 初稿 |
 | 2026-04-21 | claude | Phase 5.1 全部完成：T5.1.1(path std.fs.path)、T5.1.2(hash/base64)、T5.1.3(inflate/deflate)、T5.1.4(url std.Uri)；wasm.ts 新增 8 个接口方法；192/192 测试通过 |
+| 2026-04-22 | claude | Phase 5.2 原型完成：轻量 TS/JSX stripper `src/bun_wasm_transform.zig`、WASM ABI `bun_transform`、`wasm.ts` 新增 `transform()` 封装、bundler 内部接入 + 失败回退 `jsi_transpile`、新增 `transform.test.ts` |
+| 2026-04-22 | claude | Phase 5.3a 手写 resolver 增强：package.json `main`/`module`/`exports["."]`(字符串 + 条件对象 browser/import/default/require)、`exports["./subpath"]` 字面匹配、scoped packages `@scope/name`、tsconfig `compilerOptions.paths` + `baseUrl` + `*` 通配符 + 向上查找，Bundler 内部统一走 `resolveModule`。新增 11 个 `resolver-bundler.test.ts` 用例。同时在 Phase 5.2 章节补充 T5.2.6 `js_parser`/`transpiler` WASM 化依赖面分析（阻塞项清单 + 建议路径） |
+| 2026-04-22 | claude | Phase 5.3 续进：T5.3.1g exports 子路径通配符 `./features/* → ./dist/features/*.js`、T5.3.1h `tsconfig.extends` 继承链（递归加载父 tsconfig，最多 8 层，nearest-wins paths/baseUrl）。新增 2 个测试用例。 |
+
