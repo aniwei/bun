@@ -172,11 +172,19 @@ describe("jsi_set_index / jsi_get_index", () => {
 // ──────────────────────────────────────────────────────────
 
 describe("jsi_retain / jsi_release", () => {
-  test("retain 返回同一 handle", () => {
+  test("retain 为同一值分配新的独立 handle", () => {
     const host = new JsiHost({ memory: makeMemory() });
     const imp = getImports(host);
     const h = imp.jsi_make_number(1);
-    expect(imp.jsi_retain(h)).toBe(h);
+    const retained = imp.jsi_retain(h);
+
+    expect(retained).not.toBe(h);
+    expect(imp.jsi_to_number(h)).toBe(1);
+    expect(imp.jsi_to_number(retained)).toBe(1);
+
+    // 原 handle 释放后，retain 的副本仍应可用
+    imp.jsi_release(h);
+    expect(imp.jsi_to_number(retained)).toBe(1);
   });
 
   test("release 后 handle 回收, 下次 make 可复用", () => {

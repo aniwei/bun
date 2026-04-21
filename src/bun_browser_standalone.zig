@@ -40,6 +40,7 @@ var host_arg_scratch: std.ArrayListUnmanaged(u32) = .{};
 var initialized: bool = false;
 var g_exit_code: i32 = 0;
 var g_explicit_exit: bool = false;
+var host_allocs: std.AutoHashMapUnmanaged(u32, usize) = .{};
 
 
 /// Host clock — provided by `env.jsi_now_ms`.
@@ -480,22 +481,49 @@ fn consoleDebugFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror
 
 /// High bit distinguishes timer callback tags from host_function tags.
 const TIMER_TAG_BASE: u32 = 0x8000_0000;
+const TIMER_TAG_REPEATING: u32 = 0x4000_0000;
+const TIMER_TAG_INDEX_MASK: u32 = 0x3fff_ffff;
 var timer_cb_table: std.ArrayListUnmanaged(u32) = .{};
 
 /// Stores a JS fn handle in timer_cb_table; returns its tag.
-fn callbackTagForHandle(handle: u32) !u32 {
+fn callbackTagForHandle(handle: u32, repeating: bool) !u32 {
     const idx: u32 = @intCast(timer_cb_table.items.len);
+    if (idx > TIMER_TAG_INDEX_MASK) return error.OutOfMemory;
     try timer_cb_table.append(allocator, handle);
-    return TIMER_TAG_BASE | idx;
+    return TIMER_TAG_BASE |
+        (if (repeating) TIMER_TAG_REPEATING else 0) |
+        idx;
+}
+
+fn releaseTimerTag(tag: u32) void {
+    if ((tag & TIMER_TAG_BASE) == 0) return;
+    const idx = tag & TIMER_TAG_INDEX_MASK;
+    if (idx >= timer_cb_table.items.len) return;
+
+    const cb_handle = timer_cb_table.items[idx];
+    if (cb_handle <= jsi.Value.global.handle) return;
+
+    jsi.imports.jsi_release(cb_handle);
+    timer_cb_table.items[idx] = jsi.Value.undefined_.handle;
 }
 
 /// Called by timer_g.tick() for each expired timer.
 fn dispatchTimerCallback(tag: u32) void {
     if ((tag & TIMER_TAG_BASE) == 0) return;
-    const idx = tag & ~TIMER_TAG_BASE;
+    const is_repeating = (tag & TIMER_TAG_REPEATING) != 0;
+    const idx = tag & TIMER_TAG_INDEX_MASK;
     if (idx >= timer_cb_table.items.len) return;
     const cb_handle = timer_cb_table.items[idx];
-    _ = jsi.imports.jsi_call(cb_handle, jsi.Value.undefined_.handle, 0, 0);
+    if (cb_handle <= jsi.Value.global.handle) return;
+
+    const result = jsi.imports.jsi_call(cb_handle, jsi.Value.undefined_.handle, 0, 0);
+    if (result != jsi.Value.exception_sentinel and result > jsi.Value.global.handle) {
+        jsi.imports.jsi_release(result);
+    }
+
+    if (!is_repeating) {
+        releaseTimerTag(tag);
+    }
 }
 
 fn setTimeoutFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
@@ -503,7 +531,7 @@ fn setTimeoutFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!j
     // jsi_retain returns a NEW independent handle that won't be released by the HostFn wrapper.
     const cb_handle = jsi.imports.jsi_retain(args[0].handle);
     const delay_ms: u64 = if (args.len >= 2) @intFromFloat(@max(0, jsi.imports.jsi_to_number(args[1].handle))) else 0;
-    const tag = try callbackTagForHandle(cb_handle);
+    const tag = try callbackTagForHandle(cb_handle, false);
     const id = try timer_g.set(delay_ms, tag);
     return runtime_g.makeNumber(@floatFromInt(id));
 }
@@ -513,7 +541,7 @@ fn setIntervalFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!
     // jsi_retain returns a NEW independent handle that won't be released by the HostFn wrapper.
     const cb_handle = jsi.imports.jsi_retain(args[0].handle);
     const period_ms: u64 = if (args.len >= 2) @intFromFloat(@max(0, jsi.imports.jsi_to_number(args[1].handle))) else 0;
-    const tag = try callbackTagForHandle(cb_handle);
+    const tag = try callbackTagForHandle(cb_handle, true);
     const id = try timer_g.setInterval(period_ms, tag);
     return runtime_g.makeNumber(@floatFromInt(id));
 }
@@ -521,6 +549,9 @@ fn setIntervalFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!
 fn clearTimeoutFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
     if (args.len >= 1) {
         const id: u32 = @intFromFloat(jsi.imports.jsi_to_number(args[0].handle));
+        if (timer_g.callbackTagForId(id)) |tag| {
+            releaseTimerTag(tag);
+        }
         timer_g.clear(id);
     }
     return jsi.Value.undefined_;
@@ -684,13 +715,21 @@ export fn jsi_host_arg_scratch(argc: u32) [*]u32 {
 
 /// Simple malloc/free for host-side read/write of WASM linear memory.
 export fn bun_malloc(n: u32) u32 {
-    const buf = allocator.alloc(u8, n) catch return 0;
-    return @intCast(@intFromPtr(buf.ptr));
+    const alloc_len: usize = if (n == 0) 1 else n;
+    const buf = allocator.alloc(u8, alloc_len) catch return 0;
+    const ptr: u32 = @intCast(@intFromPtr(buf.ptr));
+
+    host_allocs.put(allocator, ptr, alloc_len) catch {
+        allocator.free(buf);
+        return 0;
+    };
+
+    return ptr;
 }
 
 export fn bun_free(ptr: u32) void {
-    // wasm_allocator doesn't support free of individual slices without length;
-    // use page_allocator semantic: noop here, relies on GC-like behavior.
-    // For a production build, pair with a proper slab allocator.
-    _ = ptr;
+    if (host_allocs.fetchRemove(ptr)) |entry| {
+        const p: [*]u8 = @ptrFromInt(entry.key);
+        allocator.free(p[0..entry.value]);
+    }
 }

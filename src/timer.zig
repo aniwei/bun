@@ -76,6 +76,14 @@ pub const Timer = struct {
         }
     }
 
+    /// 查找 timer 对应的 callback tag。
+    pub fn callbackTagForId(self: *const Timer, id: TimerId) ?u32 {
+        for (self.entries.items) |e| {
+            if (e.id == id and !e.cleared) return e.callback_tag;
+        }
+        return null;
+    }
+
     /// 触发所有到期 timer。
     /// `dispatch` 回调负责调用 HostFn（避免循环依赖 host_function 模块）。
     /// 返回距下一个 timer 的 ms 数；nil = 没有待触发 timer（返回 0）。

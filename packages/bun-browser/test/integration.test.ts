@@ -6,9 +6,11 @@
 
 import { describe, expect, test, beforeAll } from "bun:test";
 import { buildSnapshot } from "../src/vfs-client";
-import { createWasmRuntime, type WasmRuntime } from "../src/wasm-utils";
+import { Kernel } from "../src/kernel";
+import { createWasmRuntime, type WasmRuntime } from "../src/wasm";
 
 const WASM_PATH = import.meta.dir + "/../bun-core.wasm";
+const WORKER_URL = new URL("../src/kernel-worker.ts", import.meta.url);
 
 let wasmModule: WebAssembly.Module;
 
@@ -429,5 +431,110 @@ describe("setTimeout + bun_tick", () => {
   test("bun_tick 导出存在", async () => {
     const rt = await makeRuntime();
     expect(rt.instance.exports.bun_tick).toBeInstanceOf(Function);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Kernel worker 路径（自动 tick + argv/env）
+// ──────────────────────────────────────────────────────────
+
+describe("kernel-worker integration", () => {
+  test("worker 自动驱动 bun_tick：无需手动 tick 也能触发 setTimeout", async () => {
+    let output = "";
+    let done = false;
+    let resolvePrinted!: () => void;
+    let rejectPrinted!: (err: Error) => void;
+    const printed = new Promise<void>((resolve, reject) => {
+      resolvePrinted = resolve;
+      rejectPrinted = reject;
+    });
+
+    const kernel = new Kernel({
+      wasmModule,
+      workerUrl: WORKER_URL,
+      initialFiles: [
+        {
+          path: "/timer.js",
+          data: "setTimeout(function () { console.log('timer fired from worker'); }, 0);",
+        },
+      ],
+      onStdout(data) {
+        output += data;
+        if (!done && output.includes("timer fired from worker")) {
+          done = true;
+          resolvePrinted();
+        }
+      },
+      onError(err) {
+        if (!done) {
+          done = true;
+          rejectPrinted(new Error(err.message));
+        }
+      },
+    });
+
+    try {
+      await kernel.whenReady();
+      await kernel.run("/timer.js");
+      await Promise.race([
+        printed,
+        Bun.sleep(1500).then(() => {
+          throw new Error("timeout waiting for worker timer output");
+        }),
+      ]);
+      expect(output).toContain("timer fired from worker");
+    } finally {
+      kernel.terminate();
+    }
+  });
+
+  test("Kernel.run 的 argv/env 会写入 process", async () => {
+    let output = "";
+    let done = false;
+    let resolvePrinted!: () => void;
+    let rejectPrinted!: (err: Error) => void;
+    const printed = new Promise<void>((resolve, reject) => {
+      resolvePrinted = resolve;
+      rejectPrinted = reject;
+    });
+
+    const kernel = new Kernel({
+      wasmModule,
+      workerUrl: WORKER_URL,
+      initialFiles: [
+        {
+          path: "/argv-env.js",
+          data: "console.log(process.argv.join('|')); console.log(process.env.TEST_FLAG || 'missing');",
+        },
+      ],
+      onStdout(data) {
+        output += data;
+        if (!done && output.includes("bun|foo|bar") && output.includes("ok")) {
+          done = true;
+          resolvePrinted();
+        }
+      },
+      onError(err) {
+        if (!done) {
+          done = true;
+          rejectPrinted(new Error(err.message));
+        }
+      },
+    });
+
+    try {
+      await kernel.whenReady();
+      await kernel.run("/argv-env.js", ["foo", "bar"], { TEST_FLAG: "ok" });
+      await Promise.race([
+        printed,
+        Bun.sleep(1500).then(() => {
+          throw new Error("timeout waiting for argv/env output");
+        }),
+      ]);
+      expect(output).toContain("bun|foo|bar");
+      expect(output).toContain("ok");
+    } finally {
+      kernel.terminate();
+    }
   });
 });

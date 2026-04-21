@@ -6,7 +6,7 @@
  * This is fine for a demo; a production integration uses kernel-worker.ts.
  */
 
-import { createWasmRuntime, type WasmRuntime } from "../src/wasm-utils";
+import { createWasmRuntime, type WasmRuntime } from "../src/wasm";
 import { buildSnapshot } from "../src/vfs-client";
 
 // ── DOM references ─────────────────────────────────────────

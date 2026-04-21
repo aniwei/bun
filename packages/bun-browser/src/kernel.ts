@@ -17,6 +17,10 @@ export interface KernelOptions {
   workerUrl: string | URL;
   /** 初始 VFS 内容。 */
   initialFiles?: VfsFile[];
+  /** 握手后首次运行前设置到 process.argv（不含前置的 "bun"）。 */
+  argv?: string[];
+  /** 握手后首次运行前设置到 process.env。 */
+  env?: Record<string, string>;
   /**
    * 握手完成后自动运行的入口文件路径（VFS 内绝对路径）。
    * 仅在 Worker 已加载 VFS 内容后才有效，应与 `initialFiles` 配合使用。
@@ -56,6 +60,8 @@ export class Kernel {
         wasmModule: opts.wasmModule,
         vfsSnapshot,
         entry: opts.entry,
+        argv: opts.argv,
+        env: opts.env,
       },
       transfer,
     );

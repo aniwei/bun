@@ -6,7 +6,7 @@
  */
 
 import { PROTOCOL_VERSION, type HostRequest, type KernelEvent } from "./protocol";
-import { createWasmRuntime, type WasmRuntime } from "./wasm-utils";
+import { createWasmRuntime, type WasmRuntime } from "./wasm";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const self: any;
@@ -16,6 +16,86 @@ function post(event: KernelEvent, transfer: Transferable[] = []): void {
 }
 
 let rt: WasmRuntime | undefined;
+let tickTimer: number | undefined;
+let tickRunning = false;
+let tickRequested = false;
+
+function clearTickTimer(): void {
+  if (tickTimer !== undefined) {
+    clearTimeout(tickTimer);
+    tickTimer = undefined;
+  }
+}
+
+function scheduleTick(delayMs: number): void {
+  clearTickTimer();
+  tickTimer = self.setTimeout(() => {
+    tickTimer = undefined;
+    driveTickLoop();
+  }, Math.max(0, delayMs));
+}
+
+function driveTickLoop(): void {
+  if (!rt) return;
+  const tick = rt.instance.exports.bun_tick as (() => number) | undefined;
+  if (!tick) return;
+
+  if (tickRunning) {
+    tickRequested = true;
+    return;
+  }
+
+  tickRunning = true;
+  try {
+    while (rt) {
+      tickRequested = false;
+      const nextMs = tick();
+      if (nextMs > 0) {
+        scheduleTick(nextMs);
+        return;
+      }
+      if (!tickRequested) return;
+    }
+  } finally {
+    tickRunning = false;
+  }
+}
+
+function wakeTickLoop(): void {
+  tickRequested = true;
+  clearTickTimer();
+  queueMicrotask(driveTickLoop);
+}
+
+function evalScript(runtime: WasmRuntime, source: string, filename: string): number {
+  const evalFn = runtime.instance.exports.bun_browser_eval as
+    | ((srcPtr: number, srcLen: number, filePtr: number, fileLen: number) => number)
+    | undefined;
+  if (!evalFn) throw new Error("bun_browser_eval export missing");
+
+  let code = -1;
+  runtime.withString(source, (srcPtr, srcLen) => {
+    runtime.withString(filename, (filePtr, fileLen) => {
+      code = evalFn(srcPtr, srcLen, filePtr, fileLen);
+    });
+  });
+  return code;
+}
+
+function applyProcessState(runtime: WasmRuntime, argv?: string[], env?: Record<string, string>): void {
+  if (argv === undefined && env === undefined) return;
+
+  const nextArgv = ["bun", ...(argv ?? [])];
+  const nextEnv = env ?? {};
+  const code = evalScript(
+    runtime,
+    `if (globalThis.process && typeof globalThis.process === 'object') { globalThis.process.argv = ${JSON.stringify(nextArgv)}; globalThis.process.env = ${JSON.stringify(nextEnv)}; }`,
+    "<kernel:process-state>",
+  );
+  if (code !== 0) {
+    throw new Error(`failed to apply process state: ${code}`);
+  }
+}
 
 self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
   const msg = ev.data;
@@ -31,6 +111,8 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
           onPrint: (data, kind) => post({ kind, data }),
         });
         post({ kind: "handshake:ack", protocolVersion: PROTOCOL_VERSION, engine: "browser" });
+
+        applyProcessState(rt, msg.argv, msg.env);
 
         if (msg.vfsSnapshot) {
           const loader = rt.instance.exports.bun_vfs_load_snapshot as
@@ -52,6 +134,7 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
               const code = runner(ptr, len);
               post({ kind: "exit", code });
             });
+            wakeTickLoop();
           }
         }
         break;
@@ -59,6 +142,8 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
 
       case "run": {
         if (!rt) throw new Error("not initialized");
+        applyProcessState(rt, msg.argv, msg.env);
+
         const runner = rt.instance.exports.bun_browser_run as
           | ((entryPtr: number, entryLen: number) => number)
           | undefined;
@@ -67,6 +152,7 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
           const code = runner(ptr, len);
           post({ kind: "exit", code });
         });
+        wakeTickLoop();
         break;
       }
 
@@ -83,22 +169,16 @@ self.addEventListener("message", async (ev: MessageEvent<HostRequest>) => {
 
       case "eval": {
         if (!rt) throw new Error("not initialized");
-        const evalFn = rt.instance.exports.bun_browser_eval as
-          | ((srcPtr: number, srcLen: number, filePtr: number, fileLen: number) => number)
-          | undefined;
-        if (!evalFn) throw new Error("bun_browser_eval export missing");
         let evalErr: string | undefined;
-        rt.withString(msg.source, (srcPtr, srcLen) => {
-          rt!.withString(msg.filename ?? "<eval>", (filePtr, fileLen) => {
-            const code = evalFn(srcPtr, srcLen, filePtr, fileLen);
-            if (code !== 0) evalErr = `eval returned exit code ${code}`;
-          });
-        });
+        const code = evalScript(rt, msg.source, msg.filename ?? "<eval>");
+        if (code !== 0) evalErr = `eval returned exit code ${code}`;
         post({ kind: "eval:result", id: msg.id, error: evalErr });
+        wakeTickLoop();
         break;
       }
 
       case "stop": {
+        clearTickTimer();
         post({ kind: "exit", code: msg.code ?? 130 });
         break;
       }
