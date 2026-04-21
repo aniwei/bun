@@ -440,6 +440,158 @@ describe("setTimeout + bun_tick", () => {
 });
 
 // ──────────────────────────────────────────────────────────
+// require("url")
+// ──────────────────────────────────────────────────────────
+
+describe("require('url')", () => {
+  test("URL 构造函数解析 hostname", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var url = require('url'); var u = new url.URL('https://example.com/path?q=1'); console.log(u.hostname);`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("example.com");
+  });
+
+  test("fileURLToPath 提取路径", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var url = require('node:url'); console.log(url.fileURLToPath('file:///foo/bar/baz.js'));`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("/foo/bar/baz.js");
+  });
+
+  test("parse 返回解析对象", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var url = require('url'); var p = url.parse('https://host:8080/p?x=1'); console.log(p.hostname + ':' + p.port);`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("host:8080");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// require("util")
+// ──────────────────────────────────────────────────────────
+
+describe("require('util')", () => {
+  test("util.format 字符串插值", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var util = require('util'); console.log(util.format('hello %s, you are %d', 'world', 42));`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("hello world, you are 42");
+  });
+
+  test("util.inspect 序列化对象", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var util = require('node:util'); console.log(util.inspect({a:1,b:'two'}));`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    const out = printed.join("");
+    expect(out).toContain("a");
+    expect(out).toContain("b");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Buffer 全局
+// ──────────────────────────────────────────────────────────
+
+describe("Buffer global", () => {
+  test("Buffer.from(string).toString() utf8 往返", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var b = Buffer.from('hello'); console.log(b.toString('utf8'));`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("hello");
+  });
+
+  test("Buffer.from(string, 'hex') → toString('hex') 往返", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var b = Buffer.from('deadbeef', 'hex'); console.log(b.toString('hex'));`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("deadbeef");
+  });
+
+  test("Buffer.alloc 分配指定大小", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var b = Buffer.alloc(4, 0); console.log(b.byteLength);`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("4");
+  });
+
+  test("Buffer.isBuffer 检测", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var b = Buffer.from('x'); console.log(Buffer.isBuffer(b)); console.log(Buffer.isBuffer('x'));`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    const out = printed.join("");
+    expect(out).toContain("true");
+    expect(out).toContain("false");
+  });
+
+  test("Buffer.concat 合并多个 buffer", async () => {
+    const printed: string[] = [];
+    const rt = await makeRuntime((data) => printed.push(data));
+    const evalFn = rt.instance.exports.bun_browser_eval as (
+      sp: number, sl: number, fp: number, fl: number
+    ) => number;
+    const code = `var a = Buffer.from('foo'); var b = Buffer.from('bar'); var c = Buffer.concat([a, b]); console.log(c.toString());`;
+    rt.withString(code, (sp, sl) => {
+      rt.withString("<test>", (fp, fl) => { evalFn(sp, sl, fp, fl); });
+    });
+    expect(printed.join("")).toContain("foobar");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
 // Kernel worker 路径（自动 tick + argv/env）
 // ──────────────────────────────────────────────────────────
 

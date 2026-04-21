@@ -249,10 +249,93 @@ const PATH_MODULE_SRC: []const u8 =
     \\module.exports = { sep, normalize, join, resolve, dirname, basename, extname, isAbsolute, relative, posix: module.exports };
 ;
 
+const URL_MODULE_SRC: []const u8 =
+    \\var _URL=(typeof URL!=='undefined'?URL:(globalThis.URL||null));
+    \\function fileURLToPath(url){
+    \\  var href=typeof url==='string'?url:url.href;
+    \\  if(!_URL)return href.replace(/^file:\/\//,'');
+    \\  try{return new _URL(href).pathname;}catch(e){return href;}
+    \\}
+    \\function pathToFileURL(path){
+    \\  var p=path&&path[0]==='/'?path:'/'+path;
+    \\  if(_URL)return new _URL('file://'+p);
+    \\  return{href:'file://'+p,pathname:p};
+    \\}
+    \\function parse(urlStr){
+    \\  if(!_URL)return null;
+    \\  try{var u=new _URL(urlStr);return{href:u.href,protocol:u.protocol,hostname:u.hostname,port:u.port||null,pathname:u.pathname,search:u.search||null,hash:u.hash||null,host:u.host,auth:null};}
+    \\  catch(e){return null;}
+    \\}
+    \\function format(urlObj){
+    \\  if(typeof urlObj==='string')return urlObj;
+    \\  if(urlObj&&typeof urlObj.href==='string')return urlObj.href;
+    \\  return '';
+    \\}
+    \\module.exports={URL:_URL,fileURLToPath:fileURLToPath,pathToFileURL:pathToFileURL,parse:parse,format:format};
+;
+
+const UTIL_MODULE_SRC: []const u8 =
+    \\function format(fmt){
+    \\  if(typeof fmt!=='string'){var a=Array.prototype.slice.call(arguments);return a.map(function(x){try{return typeof x==='object'&&x!==null?JSON.stringify(x):String(x);}catch(e){return String(x);}}).join(' ');}
+    \\  var i=1,args=arguments;
+    \\  var s=fmt.replace(/%[sdifjoO%]/g,function(m){
+    \\    if(m==='%%')return'%';if(i>=args.length)return m;var v=args[i++];
+    \\    if(m==='%s')return String(v);if(m==='%d'||m==='%i')return Math.floor(Number(v));if(m==='%f')return Number(v);
+    \\    try{return JSON.stringify(v);}catch(e){return'[Circular]';}
+    \\  });
+    \\  if(i<args.length)s+=' '+Array.prototype.slice.call(args,i).join(' ');
+    \\  return s;
+    \\}
+    \\function inspect(v){try{return JSON.stringify(v,null,2);}catch(e){return String(v);}}
+    \\function promisify(fn){return function(){var a=Array.prototype.slice.call(arguments);return new Promise(function(res,rej){fn.apply(null,a.concat(function(e,v){e?rej(e):res(v);}));});};}
+    \\module.exports={format:format,inspect:inspect,promisify:promisify,debuglog:function(){return function(){};},deprecate:function(fn){return fn;},isDeepStrictEqual:function(a,b){return JSON.stringify(a)===JSON.stringify(b);}};
+;
+
+const BUFFER_POLYFILL_SRC: []const u8 =
+    \\(function(){
+    \\  if(globalThis.Buffer&&globalThis.Buffer.isBuffer)return;
+    \\  var Buf={
+    \\    from:function(src,enc){
+    \\      if(typeof src==='string'){
+    \\        enc=enc||'utf8';
+    \\        if(enc==='hex'){var h=new Uint8Array(src.length>>1);for(var i=0;i<h.length;i++)h[i]=parseInt(src.slice(i*2,i*2+2),16);return Buf._w(h);}
+    \\        if(enc==='base64'){var bin=atob(src),b=new Uint8Array(bin.length);for(var j=0;j<bin.length;j++)b[j]=bin.charCodeAt(j);return Buf._w(b);}
+    \\        return Buf._w(new TextEncoder().encode(src));
+    \\      }
+    \\      if(src instanceof ArrayBuffer)return Buf._w(new Uint8Array(src));
+    \\      if(ArrayBuffer.isView(src))return Buf._w(new Uint8Array(src.buffer,src.byteOffset,src.byteLength));
+    \\      if(Array.isArray(src))return Buf._w(new Uint8Array(src));
+    \\      return Buf._w(new Uint8Array(0));
+    \\    },
+    \\    alloc:function(n,fill){var b=new Uint8Array(n);if(fill!==undefined)b.fill(typeof fill==='number'?fill:fill.charCodeAt(0));return Buf._w(b);},
+    \\    allocUnsafe:function(n){return Buf._w(new Uint8Array(n));},
+    \\    isBuffer:function(v){return v!=null&&v._isBunBuf===true;},
+    \\    concat:function(list,len){
+    \\      if(len===undefined)len=list.reduce(function(a,b){return a+b.byteLength;},0);
+    \\      var r=new Uint8Array(len),off=0;
+    \\      for(var i=0;i<list.length;i++){r.set(list[i],off);off+=list[i].byteLength;}
+    \\      return Buf._w(r);
+    \\    },
+    \\    _w:function(u8){
+    \\      Object.defineProperty(u8,'_isBunBuf',{value:true,enumerable:false,configurable:true});
+    \\      u8.toString=function(enc){
+    \\        enc=enc||'utf8';
+    \\        if(enc==='utf8'||enc==='utf-8')return new TextDecoder().decode(this);
+    \\        if(enc==='base64')return btoa(String.fromCharCode.apply(null,Array.from(this)));
+    \\        if(enc==='hex')return Array.from(this).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+    \\        return String.fromCharCode.apply(null,Array.from(this));
+    \\      };
+    \\      return u8;
+    \\    }
+    \\  };
+    \\  globalThis.Buffer=Buf;
+    \\})();
+;
+
 fn evalBuiltinSrc(src: []const u8, url: []const u8) !jsi.Value {
     const wrapper = try std.fmt.allocPrint(
         allocator,
-        "var __m={{exports:{{}}}};(function(module,exports,require){{{s}\n}})(__m,__m.exports,globalThis.__bun_require);return __m.exports;",
+        "var __m={{exports:{{}}}};(function(module,exports,require){{{s}\n}})(__m,__m.exports,globalThis.require);return __m.exports;",
         .{src},
     );
     defer allocator.free(wrapper);
@@ -293,6 +376,12 @@ fn requireFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.
     }
     if (std.mem.eql(u8, specifier, "fs") or std.mem.eql(u8, specifier, "node:fs")) {
         return makeFsModule();
+    }
+    if (std.mem.eql(u8, specifier, "url") or std.mem.eql(u8, specifier, "node:url")) {
+        return evalBuiltinSrc(URL_MODULE_SRC, "<url>");
+    }
+    if (std.mem.eql(u8, specifier, "util") or std.mem.eql(u8, specifier, "node:util")) {
+        return evalBuiltinSrc(UTIL_MODULE_SRC, "<util>");
     }
 
     // ── VFS CJS loader ────────────────────────────────────
@@ -626,6 +715,7 @@ fn setupGlobals(rt: *jsi.Runtime) !void {
     ,
         "<bun-browser:polyfill>",
     );
+    _ = try rt.evalScript(BUFFER_POLYFILL_SRC, "<bun-browser:buffer>");
 }
 
 // ──────────────────────────────────────────────────────────
