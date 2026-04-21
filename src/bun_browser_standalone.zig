@@ -1189,3 +1189,530 @@ fn stripTrailingCommas(alloc: std.mem.Allocator, src: []const u8) std.mem.Alloca
     }
     return out.toOwnedSlice(alloc);
 }
+
+// ──────────────────────────────────────────────────────────
+// Phase 1 T1.1：bun_resolve / bun_bundle (最小可验证切片)
+//
+// 这两个导出与 bun_lockfile_parse 共用 packError / packResult / handOff 协议。
+// 设计原则与 lockfile 一致：standalone WASM 不链接 src/resolver/ 与 src/bundler/
+// （它们强依赖 JSC / AnyEventLoop），因此在 VFS 之上做一份满足 RFC Phase 1 验收
+// 的最小实现——足以支撑 "输入 TypeScript → 点击 Transform → Bundle 输出 JS"。
+// ──────────────────────────────────────────────────────────
+
+/// 将 `specifier` 解析为 VFS 绝对路径，使用 Node/bun 风格的扩展名探测与 index.*。
+/// 结果 JSON：`{ "path": "...", "loader": "ts|tsx|js|mjs|cjs|json" }`
+/// 错误码：1 = OOM，2 = 未找到模块，3 = 空 specifier，4 = 裸包（尚未支持）。
+export fn bun_resolve(
+    spec_ptr: [*]const u8,
+    spec_len: u32,
+    from_ptr: [*]const u8,
+    from_len: u32,
+) u64 {
+    if (!initialized) return packError(1);
+    const spec = spec_ptr[0..spec_len];
+    const from = from_ptr[0..from_len];
+    if (spec.len == 0) return packError(3);
+
+    // base_dir 优先使用 from 文件的 dirname；from 为空或非绝对路径时退化到 /
+    const base_dir: []const u8 = if (from.len > 0 and from[0] == '/') pathDirname(from) else "/";
+
+    // 裸包（例如 "react"）：不以 / . 开头
+    const is_bare = !(spec[0] == '/' or spec[0] == '.');
+    if (is_bare) {
+        // 在 VFS 中可能仍有 /node_modules/<spec>/package.json —— 尝试作为最小支持
+        const resolved = resolveBareInVfs(allocator, base_dir, spec) catch |err| switch (err) {
+            error.OutOfMemory => return packError(1),
+            error.ModuleNotFound => return packError(4),
+        };
+        defer allocator.free(resolved.path);
+        return emitResolveResult(resolved.path, resolved.loader);
+    }
+
+    const resolved = resolveRelative(allocator, base_dir, spec) catch |err| switch (err) {
+        error.OutOfMemory => return packError(1),
+        error.ModuleNotFound => return packError(2),
+    };
+    defer allocator.free(resolved.path);
+    return emitResolveResult(resolved.path, resolved.loader);
+}
+
+/// Phase 1 T1.1：单入口打包器。
+/// 输入：`entry` —— VFS 绝对路径。
+/// 输出：self-contained IIFE JS，安装一张 __modules__ 表并执行入口。
+///
+/// 错误码：1 = OOM / 2 = 入口找不到 / 3 = 循环依赖超出深度 / 4 = 转译失败。
+export fn bun_bundle(entry_ptr: [*]const u8, entry_len: u32) u64 {
+    if (!initialized) return packError(1);
+    const entry = entry_ptr[0..entry_len];
+
+    var bundler = Bundler.init(allocator) catch return packError(1);
+    defer bundler.deinit();
+
+    bundler.addEntry(entry) catch |err| switch (err) {
+        error.OutOfMemory => return packError(1),
+        error.ModuleNotFound => return packError(2),
+        error.TooDeep => return packError(3),
+        error.TranspileFailed => return packError(4),
+    };
+
+    const emitted = bundler.emit() catch return packError(1);
+    return handOff(emitted);
+}
+
+const ResolveResult = struct { path: []u8, loader: []const u8 };
+
+fn classifyLoader(path: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, path, ".tsx")) return "tsx";
+    if (std.mem.endsWith(u8, path, ".ts")) return "ts";
+    if (std.mem.endsWith(u8, path, ".mts")) return "ts";
+    if (std.mem.endsWith(u8, path, ".cts")) return "ts";
+    if (std.mem.endsWith(u8, path, ".jsx")) return "jsx";
+    if (std.mem.endsWith(u8, path, ".mjs")) return "mjs";
+    if (std.mem.endsWith(u8, path, ".cjs")) return "cjs";
+    if (std.mem.endsWith(u8, path, ".json")) return "json";
+    return "js";
+}
+
+/// 尝试以下次序：
+///   1. `base/spec` 原样（如果存在，且是文件）
+///   2. `base/spec{ext}` for ext in .ts .tsx .mts .cts .mjs .cjs .js .jsx .json
+///   3. `base/spec/index{ext}` for ext ...
+fn resolveRelative(alloc: std.mem.Allocator, base_dir: []const u8, spec: []const u8) !ResolveResult {
+    const abs = try joinPath(alloc, base_dir, spec);
+    if (isFile(abs)) {
+        return .{ .path = abs, .loader = classifyLoader(abs) };
+    }
+
+    const exts = [_][]const u8{ ".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx", ".json" };
+    for (exts) |ext| {
+        const p = try std.fmt.allocPrint(alloc, "{s}{s}", .{ abs, ext });
+        if (isFile(p)) {
+            alloc.free(abs);
+            return .{ .path = p, .loader = classifyLoader(p) };
+        }
+        alloc.free(p);
+    }
+    // index.* 探测
+    for (exts) |ext| {
+        const p = try std.fmt.allocPrint(alloc, "{s}/index{s}", .{ abs, ext });
+        if (isFile(p)) {
+            alloc.free(abs);
+            return .{ .path = p, .loader = classifyLoader(p) };
+        }
+        alloc.free(p);
+    }
+    alloc.free(abs);
+    return error.ModuleNotFound;
+}
+
+fn resolveBareInVfs(alloc: std.mem.Allocator, base_dir: []const u8, name: []const u8) !ResolveResult {
+    // 自下而上查找 /node_modules/<name>
+    var cur: []const u8 = base_dir;
+    while (true) {
+        const nm_root = try std.fmt.allocPrint(alloc, "{s}/node_modules/{s}", .{ cur, name });
+        defer alloc.free(nm_root);
+        if (isDir(nm_root)) {
+            return resolveRelative(alloc, nm_root, ".");
+        }
+        if (std.mem.eql(u8, cur, "/")) break;
+        cur = pathDirname(cur);
+    }
+    return error.ModuleNotFound;
+}
+
+fn isFile(path: []const u8) bool {
+    const st = vfs_g.stat(path) catch return false;
+    return st.kind == .file;
+}
+
+fn isDir(path: []const u8) bool {
+    const st = vfs_g.stat(path) catch return false;
+    return st.kind == .directory;
+}
+
+fn emitResolveResult(path: []const u8, loader: []const u8) u64 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    out.appendSlice(allocator, "{\"path\":") catch return packError(1);
+    jsonEscapeTo(&out, path) catch return packError(1);
+    out.appendSlice(allocator, ",\"loader\":") catch return packError(1);
+    jsonEscapeTo(&out, loader) catch return packError(1);
+    out.append(allocator, '}') catch return packError(1);
+    const owned = out.toOwnedSlice(allocator) catch return packError(1);
+    return handOff(owned);
+}
+
+// ──────────────────────────────────────────────────────────
+// Bundler (Phase 1 T1.1 最小可验证切片)
+//
+// 策略：
+//   1. 从 entry 开始 DFS，每个文件：读取 → 转译（.ts/.tsx）→ 扫描 require("...")
+//      与 import ... from "..."（静态形式）与 import("...")。
+//   2. 按解析顺序分配 numeric id，建 __modules__ 表。
+//   3. 输出一个 IIFE，包含所有模块的工厂函数 + __require() 实现。
+//
+// 限制（已在 commit message 明文标注）：
+//   - 仅支持静态字符串 specifier；`require(expr)` 不处理。
+//   - 不做 tree-shaking、代码压缩。
+//   - ES module 的 import 统一转为 CJS 语义（转译器已经把 import/export 降级为 CJS）。
+// ──────────────────────────────────────────────────────────
+
+const Bundler = struct {
+    alloc: std.mem.Allocator,
+    /// absPath → id
+    by_path: std.StringHashMap(u32),
+    /// 按顺序持有：每项为 { path, js_source, deps: []DepEdge }
+    entries: std.ArrayListUnmanaged(BundleEntry),
+    entry_id: u32 = 0,
+
+    const BundleEntry = struct {
+        path: []u8,
+        js_source: []u8,
+        deps: std.ArrayListUnmanaged(DepEdge) = .{},
+    };
+    const DepEdge = struct {
+        specifier: []u8,
+        target_id: u32,
+    };
+
+    const BundlerError = error{
+        OutOfMemory,
+        ModuleNotFound,
+        TooDeep,
+        TranspileFailed,
+    };
+
+    fn init(alloc: std.mem.Allocator) BundlerError!Bundler {
+        return .{
+            .alloc = alloc,
+            .by_path = std.StringHashMap(u32).init(alloc),
+            .entries = .{},
+        };
+    }
+
+    fn deinit(self: *Bundler) void {
+        var it = self.by_path.iterator();
+        while (it.next()) |e| self.alloc.free(e.key_ptr.*);
+        self.by_path.deinit();
+        for (self.entries.items) |*e| {
+            self.alloc.free(e.path);
+            self.alloc.free(e.js_source);
+            for (e.deps.items) |*d| self.alloc.free(d.specifier);
+            e.deps.deinit(self.alloc);
+        }
+        self.entries.deinit(self.alloc);
+    }
+
+    fn addEntry(self: *Bundler, entry_path: []const u8) BundlerError!void {
+        self.entry_id = try self.addFile(entry_path, "/", 0);
+    }
+
+    fn addFile(self: *Bundler, specifier: []const u8, base_dir: []const u8, depth: u32) BundlerError!u32 {
+        if (depth > 256) return error.TooDeep;
+
+        const resolved = resolveRelative(self.alloc, base_dir, specifier) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ModuleNotFound => return error.ModuleNotFound,
+        };
+
+        if (self.by_path.get(resolved.path)) |id| {
+            self.alloc.free(resolved.path);
+            return id;
+        }
+
+        // 读取 & 转译
+        const raw = vfs_g.readFile(resolved.path) catch {
+            self.alloc.free(resolved.path);
+            return error.ModuleNotFound;
+        };
+        defer self.alloc.free(raw);
+
+        const js = transpileIfNeeded(self.alloc, resolved.path, raw) catch |err| switch (err) {
+            error.OutOfMemory => {
+                self.alloc.free(resolved.path);
+                return error.OutOfMemory;
+            },
+            error.TranspileFailed => {
+                self.alloc.free(resolved.path);
+                return error.TranspileFailed;
+            },
+        };
+
+        const id: u32 = @intCast(self.entries.items.len);
+        try self.by_path.put(try self.alloc.dupe(u8, resolved.path), id);
+        try self.entries.append(self.alloc, .{
+            .path = resolved.path,
+            .js_source = js,
+            .deps = .{},
+        });
+
+        // 扫描依赖并递归加载（先占位再填充 deps，避免自递归时 id 未分配）
+        var deps = scanDependencies(self.alloc, js) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        errdefer {
+            for (deps.items) |*d| self.alloc.free(d.specifier);
+            deps.deinit(self.alloc);
+        }
+
+        const this_dir = pathDirname(self.entries.items[id].path);
+        var i: usize = 0;
+        while (i < deps.items.len) : (i += 1) {
+            // JSON 或裸包：跳过（作为缺失依赖保留 specifier，但不递归）
+            const child_id = self.addFile(deps.items[i].specifier, this_dir, depth + 1) catch |err| switch (err) {
+                error.ModuleNotFound => {
+                    // 将其标记为 -1 (0xffffffff) —— 运行时报错而非编译期失败，方便调试
+                    deps.items[i].target_id = std.math.maxInt(u32);
+                    continue;
+                },
+                else => return err,
+            };
+            deps.items[i].target_id = child_id;
+        }
+        self.entries.items[id].deps = deps;
+        return id;
+    }
+
+    fn emit(self: *Bundler) std.mem.Allocator.Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.alloc);
+        try out.appendSlice(self.alloc,
+            \\(function(){
+            \\var __modules__=[];
+            \\var __cache__={};
+            \\function __require(id){
+            \\  if(id<0||id>=__modules__.length)throw new Error("module id out of range: "+id);
+            \\  if(__cache__[id])return __cache__[id].exports;
+            \\  var m={exports:{}};__cache__[id]=m;
+            \\  __modules__[id].call(m.exports,m,m.exports,function(spec){
+            \\    var t=__modules__[id].__deps__[spec];
+            \\    if(t===undefined)throw new Error("unresolved dependency "+spec+" in module "+id);
+            \\    return __require(t);
+            \\  });
+            \\  return m.exports;
+            \\}
+            \\
+        );
+        // 每个模块：
+        //   __modules__[i]=function(module,exports,require){ ...js... };
+        //   __modules__[i].__deps__={ "<spec>": id, ... };
+        for (self.entries.items, 0..) |entry, i| {
+            try appendFmt(&out, "__modules__[{d}]=function(module,exports,require){{\n", .{i});
+            try out.appendSlice(self.alloc, entry.js_source);
+            try out.appendSlice(self.alloc, "\n};\n");
+            try appendFmt(&out, "__modules__[{d}].__deps__={{", .{i});
+            for (entry.deps.items, 0..) |dep, di| {
+                if (di != 0) try out.append(self.alloc, ',');
+                try jsonEscapeTo(&out, dep.specifier);
+                if (dep.target_id == std.math.maxInt(u32)) {
+                    try appendFmt(&out, ":-1", .{});
+                } else {
+                    try appendFmt(&out, ":{d}", .{dep.target_id});
+                }
+            }
+            try out.appendSlice(self.alloc, "};\n");
+        }
+        try appendFmt(&out, "return __require({d});\n}})();\n", .{self.entry_id});
+        return out.toOwnedSlice(self.alloc);
+    }
+};
+
+fn transpileIfNeeded(alloc: std.mem.Allocator, path: []const u8, src: []const u8) error{ OutOfMemory, TranspileFailed }![]u8 {
+    const is_ts = std.mem.endsWith(u8, path, ".ts") or
+        std.mem.endsWith(u8, path, ".tsx") or
+        std.mem.endsWith(u8, path, ".mts") or
+        std.mem.endsWith(u8, path, ".cts");
+    if (std.mem.endsWith(u8, path, ".json")) {
+        // JSON 作为模块：包装成 module.exports = <json>
+        return std.fmt.allocPrint(alloc, "module.exports={s};", .{src}) catch error.OutOfMemory;
+    }
+    if (!is_ts) return alloc.dupe(u8, src) catch error.OutOfMemory;
+
+    const h = jsi.imports.jsi_transpile(
+        @intFromPtr(src.ptr),
+        src.len,
+        @intFromPtr(path.ptr),
+        path.len,
+    );
+    if (h == jsi.Value.exception_sentinel) return error.TranspileFailed;
+    defer jsi.imports.jsi_release(h);
+    const js_len = jsi.imports.jsi_string_length(h);
+    const js_buf = alloc.alloc(u8, js_len) catch return error.OutOfMemory;
+    jsi.imports.jsi_string_read(h, @intFromPtr(js_buf.ptr), js_len);
+    return js_buf;
+}
+
+/// 扫描源码中的 `require("...")`, `require('...')`, `import ... from "..."`,
+/// `import "..."`, 和 `import("...")`。
+/// 仅处理静态字符串 specifier。忽略字符串/注释中的匹配（简单状态机）。
+fn scanDependencies(alloc: std.mem.Allocator, src: []const u8) error{OutOfMemory}!std.ArrayListUnmanaged(Bundler.DepEdge) {
+    var out: std.ArrayListUnmanaged(Bundler.DepEdge) = .{};
+    errdefer {
+        for (out.items) |*d| alloc.free(d.specifier);
+        out.deinit(alloc);
+    }
+
+    // 先剥离注释 + 字符串（替换为等长空格），再做简单 substring 扫描，
+    // 这样 scanner 逻辑简单且不会把 "require(" 在字符串里误匹配。
+    const sanitized = stripCommentsAndStrings(alloc, src) catch return error.OutOfMemory;
+    defer alloc.free(sanitized);
+
+    var i: usize = 0;
+    while (i < sanitized.len) {
+        const next = findNextImportSite(sanitized, i) orelse break;
+        // 从 next.after_paren_or_from 开始找字符串字面量
+        const spec = extractStringFromOriginal(src, next.quote_search_from) orelse {
+            i = next.advance_past;
+            continue;
+        };
+        const copy = alloc.dupe(u8, spec.value) catch return error.OutOfMemory;
+        try out.append(alloc, .{ .specifier = copy, .target_id = 0 });
+        i = spec.end_in_src;
+    }
+    return out;
+}
+
+const ImportSite = struct {
+    /// 原始源码里字符串字面量可能开始的位置（含前导空白）。
+    quote_search_from: usize,
+    /// sanitized 扫描指针下一步应跳到的位置。
+    advance_past: usize,
+};
+
+fn findNextImportSite(san: []const u8, from: usize) ?ImportSite {
+    var i: usize = from;
+    while (i < san.len) : (i += 1) {
+        // 形如 `require(` — 需 'e','q','u','i','r','e','(' 且前一个字符为 identifier-stop
+        if (san[i] == 'r' and san.len - i >= 8 and std.mem.startsWith(u8, san[i..], "require(")) {
+            if (isIdentBoundary(san, i)) {
+                return .{ .quote_search_from = i + 8, .advance_past = i + 8 };
+            }
+        }
+        // `import "x"` / `import('x')` / `import x from "x"` / `export ... from "x"`
+        if ((san[i] == 'i' and san.len - i >= 7 and std.mem.startsWith(u8, san[i..], "import ")) or
+            (san[i] == 'i' and san.len - i >= 7 and std.mem.startsWith(u8, san[i..], "import(")) or
+            (san[i] == 'e' and san.len - i >= 7 and std.mem.startsWith(u8, san[i..], "export ")))
+        {
+            if (!isIdentBoundary(san, i)) continue;
+            // 从此开始寻找第一个 "from " 或直接的字符串字面量
+            const fromIdx = findKeywordFromOrQuote(san, i + 6);
+            if (fromIdx) |p| return .{ .quote_search_from = p, .advance_past = p };
+        }
+    }
+    return null;
+}
+
+fn isIdentBoundary(san: []const u8, at: usize) bool {
+    if (at == 0) return true;
+    const p = san[at - 1];
+    if (p >= 'a' and p <= 'z') return false;
+    if (p >= 'A' and p <= 'Z') return false;
+    if (p >= '0' and p <= '9') return false;
+    if (p == '_' or p == '$') return false;
+    return true;
+}
+
+fn findKeywordFromOrQuote(san: []const u8, start: usize) ?usize {
+    var i: usize = start;
+    while (i < san.len) : (i += 1) {
+        const c = san[i];
+        if (c == '"' or c == '\'') return i;
+        if (c == ';' or c == '\n') {
+            // 结束 import 语句
+            // 但 export 可能跨多行；接受之
+            if (c == ';') return null;
+        }
+        if (c == 'f' and san.len - i >= 5 and std.mem.eql(u8, san[i .. i + 5], "from ") and isIdentBoundary(san, i)) {
+            // 跳过 "from "，继续寻找引号
+            return findQuote(san, i + 5);
+        }
+        if (c == 'f' and san.len - i >= 5 and std.mem.eql(u8, san[i .. i + 5], "from\t") and isIdentBoundary(san, i)) {
+            return findQuote(san, i + 5);
+        }
+    }
+    return null;
+}
+
+fn findQuote(san: []const u8, start: usize) ?usize {
+    var i: usize = start;
+    while (i < san.len) : (i += 1) {
+        const c = san[i];
+        if (c == '"' or c == '\'') return i;
+        if (c == ';' or c == '\n') return null;
+    }
+    return null;
+}
+
+const StringLiteral = struct { value: []const u8, end_in_src: usize };
+
+fn extractStringFromOriginal(src: []const u8, from: usize) ?StringLiteral {
+    var i: usize = from;
+    while (i < src.len and (src[i] == ' ' or src[i] == '\t')) : (i += 1) {}
+    if (i >= src.len) return null;
+    const q = src[i];
+    if (q != '"' and q != '\'') return null;
+    const start = i + 1;
+    var j: usize = start;
+    while (j < src.len) : (j += 1) {
+        const c = src[j];
+        if (c == '\\') {
+            j += 1;
+            continue;
+        }
+        if (c == q) break;
+    }
+    if (j >= src.len) return null;
+    return .{ .value = src[start..j], .end_in_src = j + 1 };
+}
+
+/// 将 src 中的字符串/模板/注释替换为等长空白（换行保留以保持行号）。
+fn stripCommentsAndStrings(alloc: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error![]u8 {
+    const out = try alloc.alloc(u8, src.len);
+    @memcpy(out, src);
+    var i: usize = 0;
+    while (i < out.len) {
+        const c = out[i];
+        if (c == '/' and i + 1 < out.len and out[i + 1] == '/') {
+            // 行注释
+            while (i < out.len and out[i] != '\n') : (i += 1) out[i] = ' ';
+            continue;
+        }
+        if (c == '/' and i + 1 < out.len and out[i + 1] == '*') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            i += 2;
+            while (i + 1 < out.len and !(out[i] == '*' and out[i + 1] == '/')) : (i += 1) {
+                if (out[i] != '\n') out[i] = ' ';
+            }
+            if (i + 1 < out.len) {
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                i += 2;
+            }
+            continue;
+        }
+        if (c == '"' or c == '\'' or c == '`') {
+            const quote = c;
+            out[i] = ' ';
+            i += 1;
+            while (i < out.len) {
+                if (out[i] == '\\' and i + 1 < out.len) {
+                    out[i] = ' ';
+                    if (out[i + 1] != '\n') out[i + 1] = ' ';
+                    i += 2;
+                    continue;
+                }
+                if (out[i] == quote) {
+                    out[i] = ' ';
+                    i += 1;
+                    break;
+                }
+                if (out[i] != '\n') out[i] = ' ';
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return out;
+}

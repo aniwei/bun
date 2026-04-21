@@ -36,6 +36,27 @@ export interface WasmRuntime {
    * 若 bun-core.wasm 未导出此函数则抛错。
    */
   parseLockfile(text: string): LockfileSummary;
+  /**
+   * Phase 1 T1.1：调用 `bun_resolve(specifier, from)`。
+   *
+   * 返回 `{ path, loader }`，遵循 Node/bun 风格的扩展名与 `index.*` 探测；
+   * 若 specifier 为裸包，会在 from 的祖先目录中搜索 `node_modules/<spec>`。
+   */
+  resolve(specifier: string, from: string): ResolveResult;
+  /**
+   * Phase 1 T1.1：调用 `bun_bundle(entry)`。
+   *
+   * 入口必须是 VFS 绝对路径。返回自包含的 IIFE JS 代码，安装 __modules__ 表
+   * 并执行入口。扫描的依赖形式：`require("...")` / `import ... from "..."` /
+   * `import("...")` / `export ... from "..."`（仅静态字符串 specifier）。
+   */
+  bundle(entry: string): string;
+}
+
+/** Phase 1 T1.1：bun_resolve 返回结构。 */
+export interface ResolveResult {
+  path: string;
+  loader: "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "json";
 }
 
 /** Phase 1 T1.1 返回结构。 */
@@ -173,6 +194,88 @@ export async function createWasmRuntime(
         const view = new Uint8Array(mem(), outPtr, outLen);
         const json = dec.decode(view);
         return JSON.parse(json) as LockfileSummary;
+      } finally {
+        free_(outPtr);
+      }
+    },
+
+    resolve(specifier: string, from: string): ResolveResult {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const resolveFn = exports_.bun_resolve as
+        | ((sp: number, sl: number, fp: number, fl: number) => bigint)
+        | undefined;
+      const alloc = exports_.bun_malloc as (n: number) => number;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      if (!resolveFn) throw new Error("bun-core.wasm does not export bun_resolve");
+      const mem = () => (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      const sbytes = enc.encode(specifier);
+      const fbytes = enc.encode(from);
+      const sPtr = alloc(Math.max(1, sbytes.byteLength));
+      const fPtr = alloc(Math.max(1, fbytes.byteLength));
+      if (sPtr === 0 || fPtr === 0) throw new Error("bun_malloc returned null");
+      if (sbytes.byteLength > 0)
+        new Uint8Array(mem(), sPtr, sbytes.byteLength).set(sbytes);
+      if (fbytes.byteLength > 0)
+        new Uint8Array(mem(), fPtr, fbytes.byteLength).set(fbytes);
+      let packed: bigint;
+      try {
+        packed = resolveFn(sPtr, sbytes.byteLength, fPtr, fbytes.byteLength);
+      } finally {
+        free_(sPtr);
+        free_(fPtr);
+      }
+      const outPtr = Number(packed >> 32n) >>> 0;
+      const outLen = Number(packed & 0xffffffffn) >>> 0;
+      if (outPtr === 0) {
+        const codes: Record<number, string> = {
+          1: "OOM",
+          2: "module not found",
+          3: "empty specifier",
+          4: "bare package not resolvable",
+        };
+        throw new Error(`bun_resolve(${specifier}) failed: ${codes[outLen] ?? `code=${outLen}`}`);
+      }
+      try {
+        const json = dec.decode(new Uint8Array(mem(), outPtr, outLen));
+        return JSON.parse(json) as ResolveResult;
+      } finally {
+        free_(outPtr);
+      }
+    },
+
+    bundle(entry: string): string {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const bundleFn = exports_.bun_bundle as
+        | ((p: number, l: number) => bigint)
+        | undefined;
+      const alloc = exports_.bun_malloc as (n: number) => number;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      if (!bundleFn) throw new Error("bun-core.wasm does not export bun_bundle");
+      const mem = () => (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      const bytes = enc.encode(entry);
+      const ptr = alloc(Math.max(1, bytes.byteLength));
+      if (ptr === 0) throw new Error("bun_malloc returned null");
+      if (bytes.byteLength > 0)
+        new Uint8Array(mem(), ptr, bytes.byteLength).set(bytes);
+      let packed: bigint;
+      try {
+        packed = bundleFn(ptr, bytes.byteLength);
+      } finally {
+        free_(ptr);
+      }
+      const outPtr = Number(packed >> 32n) >>> 0;
+      const outLen = Number(packed & 0xffffffffn) >>> 0;
+      if (outPtr === 0) {
+        const codes: Record<number, string> = {
+          1: "OOM",
+          2: "entry not found",
+          3: "module graph too deep",
+          4: "transpile failed",
+        };
+        throw new Error(`bun_bundle(${entry}) failed: ${codes[outLen] ?? `code=${outLen}`}`);
+      }
+      try {
+        return dec.decode(new Uint8Array(mem(), outPtr, outLen));
       } finally {
         free_(outPtr);
       }
