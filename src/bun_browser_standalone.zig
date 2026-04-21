@@ -990,3 +990,202 @@ export fn bun_free(ptr: u32) void {
         allocator.free(p[0..entry.value]);
     }
 }
+
+// ──────────────────────────────────────────────────────────
+// Phase 1 T1.1：bun_lockfile_parse（最小可验证切片）
+//
+// 输入：bun.lock 文本（v1 JSON 格式）的 UTF-8 字节流。
+// 输出：指向 host_allocs 登记的 JSON 摘要字符串的指针，编码为 u64：
+//         高 32 位 = ptr（需由 host 调用 bun_free 释放）
+//         低 32 位 = len
+//       若 ptr == 0 则解析失败；此时低 32 位是错误码（1 = OOM / 2 = JSON 语法 / 3 = 缺 lockfileVersion）。
+//
+// 摘要 JSON：{ "lockfileVersion": N, "workspaceCount": N, "packageCount": N,
+//              "packages": [{ "key": "...", "name": "...", "version": "..." }, ...] }
+//
+// 对应 RFC：docs/rfc/bun-wasm-browser-runtime-implementation-plan.md §4.3 T1.1
+// 当前实现不依赖 src/install/lockfile.zig（该模块强耦合 JSC/PackageManager），
+// 而是直接对 bun.lock 的 JSON 表示做轻量提取，满足 Phase 1 验收条件
+// "bun_lockfile_parse 能解析一个真实 bun.lock 文件"。
+// ──────────────────────────────────────────────────────────
+
+fn packResult(ptr: u32, len: u32) u64 {
+    return (@as(u64, ptr) << 32) | @as(u64, len);
+}
+
+fn packError(code: u32) u64 {
+    return @as(u64, code);
+}
+
+/// 将 buf 所有权转交给 host_allocs，返回打包后的 (ptr, len)。
+fn handOff(buf: []u8) u64 {
+    const ptr: u32 = @intCast(@intFromPtr(buf.ptr));
+    host_allocs.put(allocator, ptr, buf.len) catch {
+        allocator.free(buf);
+        return packError(1);
+    };
+    return packResult(ptr, @intCast(buf.len));
+}
+
+export fn bun_lockfile_parse(src_ptr: [*]const u8, src_len: u32) u64 {
+    if (!initialized) return packError(1);
+    const raw = src_ptr[0..src_len];
+
+    // bun.lock 是 JSON5-风味文本（允许尾随逗号），std.json 不支持；
+    // 用一个最小预处理：删除对象/数组闭合括号前的尾随逗号。
+    // 同时保留字符串内的逗号。
+    const preprocessed = stripTrailingCommas(allocator, raw) catch return packError(1);
+    defer allocator.free(preprocessed);
+
+    var parsed = std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        preprocessed,
+        .{ .duplicate_field_behavior = .use_last },
+    ) catch return packError(2);
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return packError(2);
+
+    const version_node = root.object.get("lockfileVersion") orelse return packError(3);
+    const version_num: i64 = switch (version_node) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => return packError(3),
+    };
+
+    // 组装摘要
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    appendFmt(&out, "{{\"lockfileVersion\":{d}", .{version_num}) catch return packError(1);
+
+    var workspace_count: usize = 0;
+    if (root.object.get("workspaces")) |ws| switch (ws) {
+        .object => |obj| workspace_count = obj.count(),
+        else => {},
+    };
+    appendFmt(&out, ",\"workspaceCount\":{d}", .{workspace_count}) catch return packError(1);
+
+    var package_count: usize = 0;
+    if (root.object.get("packages")) |pkgs| switch (pkgs) {
+        .object => |obj| package_count = obj.count(),
+        else => {},
+    };
+    appendFmt(&out, ",\"packageCount\":{d},\"packages\":[", .{package_count}) catch return packError(1);
+
+    // Enumerate packages when present. bun.lock 格式：
+    //   "packages": { "<key>": ["<name>@<spec>", ...], ... }
+    if (root.object.get("packages")) |pkgs| if (pkgs == .object) {
+        var it = pkgs.object.iterator();
+        var first = true;
+        while (it.next()) |entry| {
+            if (!first) out.append(allocator, ',') catch return packError(1);
+            first = false;
+            const key = entry.key_ptr.*;
+            var pkg_name: []const u8 = key;
+            var pkg_version: []const u8 = "";
+            if (entry.value_ptr.* == .array and entry.value_ptr.array.items.len >= 1 and entry.value_ptr.array.items[0] == .string) {
+                const spec = entry.value_ptr.array.items[0].string;
+                if (std.mem.lastIndexOfScalar(u8, spec, '@')) |at| {
+                    if (at > 0) {
+                        pkg_name = spec[0..at];
+                        pkg_version = spec[at + 1 ..];
+                    }
+                }
+            }
+            out.appendSlice(allocator, "{\"key\":") catch return packError(1);
+            jsonEscapeTo(&out, key) catch return packError(1);
+            out.appendSlice(allocator, ",\"name\":") catch return packError(1);
+            jsonEscapeTo(&out, pkg_name) catch return packError(1);
+            out.appendSlice(allocator, ",\"version\":") catch return packError(1);
+            jsonEscapeTo(&out, pkg_version) catch return packError(1);
+            out.append(allocator, '}') catch return packError(1);
+        }
+    };
+
+    out.appendSlice(allocator, "]}") catch return packError(1);
+    const owned = out.toOwnedSlice(allocator) catch return packError(1);
+    return handOff(owned);
+}
+
+fn appendFmt(out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
+    const needed = std.fmt.count(fmt, args);
+    try out.ensureUnusedCapacity(allocator, needed);
+    var buf: [128]u8 = undefined;
+    if (needed <= buf.len) {
+        const s = std.fmt.bufPrint(&buf, fmt, args) catch unreachable;
+        try out.appendSlice(allocator, s);
+    } else {
+        const heap = try allocator.alloc(u8, needed);
+        defer allocator.free(heap);
+        const s = std.fmt.bufPrint(heap, fmt, args) catch unreachable;
+        try out.appendSlice(allocator, s);
+    }
+}
+
+fn jsonEscapeTo(out: *std.ArrayList(u8), s: []const u8) std.mem.Allocator.Error!void {
+    try out.append(allocator, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try out.appendSlice(allocator, "\\\""),
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            0...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                var buf: [6]u8 = undefined;
+                const formatted = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                try out.appendSlice(allocator, formatted);
+            },
+            else => try out.append(allocator, c),
+        }
+    }
+    try out.append(allocator, '"');
+}
+
+/// 去除对象/数组闭合括号前的尾随逗号。字符串字面量内的逗号保持不变。
+/// 不支持 JSON5 注释（bun.lock 也不写注释）。
+fn stripTrailingCommas(alloc: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, src.len);
+
+    var i: usize = 0;
+    var in_string: bool = false;
+    var escape: bool = false;
+    while (i < src.len) : (i += 1) {
+        const c = src[i];
+        if (in_string) {
+            try out.append(alloc, c);
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            try out.append(alloc, c);
+            continue;
+        }
+        if (c == ',') {
+            // 向前看，跳过空白与换行；若首个非空白字符是 } 或 ]，丢弃逗号。
+            var j = i + 1;
+            while (j < src.len) : (j += 1) {
+                const cj = src[j];
+                if (cj == ' ' or cj == '\t' or cj == '\n' or cj == '\r') continue;
+                break;
+            }
+            if (j < src.len and (src[j] == '}' or src[j] == ']')) {
+                continue; // 丢弃这个逗号
+            }
+        }
+        try out.append(alloc, c);
+    }
+    return out.toOwnedSlice(alloc);
+}

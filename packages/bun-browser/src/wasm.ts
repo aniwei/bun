@@ -29,6 +29,21 @@ export interface WasmRuntime {
   withBytes(data: Uint8Array, fn: (ptr: number, len: number) => void): void;
   /** Write a UTF-8 string into WASM and call fn(ptr, len); frees after. */
   withString(str: string, fn: (ptr: number, len: number) => void): void;
+  /**
+   * Phase 1 T1.1：调用 WASM 导出的 `bun_lockfile_parse(text)` 并返回解析结果。
+   *
+   * 接受 bun.lock 文本内容，返回 `{ lockfileVersion, workspaceCount, packageCount, packages: [...] }`。
+   * 若 bun-core.wasm 未导出此函数则抛错。
+   */
+  parseLockfile(text: string): LockfileSummary;
+}
+
+/** Phase 1 T1.1 返回结构。 */
+export interface LockfileSummary {
+  lockfileVersion: number;
+  workspaceCount: number;
+  packageCount: number;
+  packages: Array<{ key: string; name: string; version: string }>;
 }
 
 /**
@@ -127,6 +142,40 @@ export async function createWasmRuntime(
 
     withString(str: string, fn: (ptr: number, len: number) => void): void {
       this.withBytes(enc.encode(str), fn);
+    },
+
+    parseLockfile(text: string): LockfileSummary {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const parseFn = exports_.bun_lockfile_parse as
+        | ((ptr: number, len: number) => bigint)
+        | undefined;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      if (!parseFn) throw new Error("bun-core.wasm does not export bun_lockfile_parse");
+      const mem = () => (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      const bytes = enc.encode(text);
+      const alloc = _instance!.exports.bun_malloc as (n: number) => number;
+      const inputPtr = alloc(bytes.byteLength);
+      if (inputPtr === 0) throw new Error("bun_malloc returned null");
+      new Uint8Array(mem(), inputPtr, bytes.byteLength).set(bytes);
+      let packed: bigint;
+      try {
+        packed = parseFn(inputPtr, bytes.byteLength);
+      } finally {
+        free_(inputPtr);
+      }
+      const outPtr = Number(packed >> 32n) >>> 0;
+      const outLen = Number(packed & 0xffffffffn) >>> 0;
+      if (outPtr === 0) {
+        const codes: Record<number, string> = { 1: "OOM", 2: "invalid JSON", 3: "missing lockfileVersion" };
+        throw new Error(`bun_lockfile_parse failed: ${codes[outLen] ?? `code=${outLen}`}`);
+      }
+      try {
+        const view = new Uint8Array(mem(), outPtr, outLen);
+        const json = dec.decode(view);
+        return JSON.parse(json) as LockfileSummary;
+      } finally {
+        free_(outPtr);
+      }
     },
   };
 
