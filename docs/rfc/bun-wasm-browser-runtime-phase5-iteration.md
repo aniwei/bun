@@ -1,6 +1,8 @@
 # Bun WASM Browser Runtime — Phase 5 迭代计划
 
-**状态**：Phase 5.1 已完成 ✅ · Phase 5.2 T5.2.1–T5.2.8 全部完成 ✅ · Phase 5.3 T5.3.1a-i + T5.3.2(CSS) + T5.3.3 + T5.3.5 + T5.3.6 + T5.3.7 完成 🟡 · Phase 5.4 T5.4.1 + T5.4.2 + T5.4.3 + T5.4.4 + T5.4.5 完成 🟡 · Phase 5.7 T5.7.1 + T5.7.2 + T5.7.3 完成 🟡 · **Phase 5.8 全部完成** ✅  
+**状态**：Phase 5.1 已完成 ✅ · Phase 5.2 T5.2.1–T5.2.8 全部完成 ✅ · Phase 5.3 T5.3.1a-i + T5.3.2(CSS) + T5.3.3 + T5.3.5 + T5.3.6 + T5.3.7 完成 🟡（T5.3.4 降级为长期探索项）· Phase 5.4 T5.4.1 + T5.4.2 + T5.4.3 + T5.4.4 + T5.4.5 完成 🟡 · **Phase 5.5 T5.5.1(源级) + T5.5.2(host ThreadPool) + T5.5.3(能力探测+协议+内核接入) + T5.5.4(JSI ABI + 基础设施) 完成** 🟡 · **Phase 5.6 T5.6.1(独立 WASM Instance + live VFS 全链路) 完成** 🟡（原 T5.6.3 撤销，由 Phase 5.13 替代）· Phase 5.7 T5.7.1 + T5.7.2 + T5.7.3 完成 🟡（见 §8.2 表述修正）· **Phase 5.8 全部完成** ✅ · **Phase 5.9 全部完成** ✅  
+**新规划**：Phase 5.10（Zig 真身二期）· 5.11（WebContainer API 对齐）· 5.12（阻塞 I/O 真身化）· 5.13（自研 Shell）· 5.14（预览闭环）· 5.15（稳定化）—— 详见 §9。  
+**当前测试**：447/447 通过（19 个测试文件，0 失败）。
 **依赖文档**：
 - [bun-wasm-browser-runtime-technical-design.md](./bun-wasm-browser-runtime-technical-design.md)
 - [bun-wasm-browser-runtime-implementation-plan.md](./bun-wasm-browser-runtime-implementation-plan.md)
@@ -18,7 +20,7 @@
 | 阻塞 I/O | SAB + Atomics.wait 真阻塞 | 协作式 `bun_tick` 轮询 | ❌ 无阻塞系统调用 |
 | npm | 内置协议 + postinstall script | TS installer + WASM semver/integrity | ⚠️ 无 lifecycle scripts |
 | 网络 | TCP over WebSocket relay、端口转发 | `Bun.serve` + Service Worker 拦截 | ⚠️ 无 TCP |
-| 多线程 | wasm-threads（pthread）+ 共享堆 | 单线程 | ❌ |
+| 多线程 | wasm-threads（pthread）+ 共享堆 | ⚠️ 基础设施就绪（SAB ring、atomic-wait、ThreadPool、JSI ABI），共享堆 wasm 构建脚本已写入，待 zig toolchain 产出 `bun-core.threads.wasm` | ⚠️ 构建待执行 |
 | 终端 | PTY + xterm.js | ❌ | ❌ |
 | 文件监听 | fs.watch (inotify 模拟) | ❌ | ❌ |
 | 跨源隔离 | 强制 COOP/COEP | 未启用 | ❌ |
@@ -47,7 +49,8 @@
 | 14 | `src/patch.zig` | 🟡 | 🟢 | bun patch |
 | 15 | `src/threading/*` | 🔴 | 🔥 | 真并行（依赖 wasm-threads） |
 
-**当前已接入**：`src/semver/*`、`src/sys_wasm/vfs.zig`、`src/jsi/*`、`src/timer.zig`、`src/bun_wasm_semver.zig`。
+**当前已接入**：`src/semver/*`、`src/sys_wasm/vfs.zig`、`src/jsi/*`、`src/timer.zig`、`src/bun_wasm_semver.zig`。  
+**Phase 5.5 host 基础设施（TS）**：`packages/bun-browser/src/sab-ring.ts`（SPSC SAB ring）、`packages/bun-browser/src/atomic-wait.ts`（Atomics 跨环境抽象）、`packages/bun-browser/src/thread-pool.ts`（host pthread 孵化器）。
 
 ---
 
@@ -57,11 +60,13 @@
 
 对标 WebContainer 的阻塞系统调用模型。
 
-- **构建**：`build-wasm-smoke.zig` 增 `-fshared-memory -fatomics`，导出 `memory` 为 shared
-- **运行时**：每 pthread 一 Worker，主 Worker 通过 `postMessage` + Atomics 映射 tid → 信号
-- **宿主侧**：demo server 发 `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp`
-- **新增 ABI**：`jsi_atomic_wait` / `jsi_atomic_notify` / `bun_thread_spawn`
-- **降级**：非 isolated 上下文下输出单线程版本，feature detection
+- **构建**（已落地源码，待 zig toolchain 执行）：`build-wasm-smoke.zig` 新增 `build-wasm-threads` step — `wasm_target` 使用 `cpu_features_add = {.atomics, .bulk_memory}`；`Executable.shared_memory = true` + `import_memory = true`；初始 16 MiB / 上限 256 MiB；产物 `packages/bun-browser/bun-core.threads.wasm` 与 `bun-core.wasm` 共存
+- **运行时**：每 pthread 一 Worker，通过 `ThreadPool`（`src/thread-pool.ts`）孵化；tid 单调分配（主=0，子≥1）；`thread:start/{tid,arg,memory,module}` 协议启动；`thread:exit/error` 回调
+- **宿主侧**：demo server 需发 `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp`（T5.5.3 ⏳）
+- **新增 JSI imports**（`src/jsi/imports.zig` + `jsi-host.ts`）：`jsi_atomic_wait(ptr,expected,timeout_ms)u32`（0=ok/1=not-equal/2=timed-out）、`jsi_atomic_notify(ptr,count)u32`、`jsi_thread_spawn(arg)u32`（返回 tid）、`jsi_thread_self()u32`、`jsi_thread_capability()u32`（bit0=SAB/bit1=Worker+waitSync/bit2=host-spawn）
+- **SAB ring**：`sab-ring.ts` — 32B header（head/tail/closed/waiters）+ SPSC 数据区，用于 pipe/stdio/VFS 远端 I/O
+- **Atomics 抽象**：`atomic-wait.ts` — Worker 内 `Atomics.wait` / 主线程 `Atomics.waitAsync` / 无 SAB 时 setTimeout 轮询
+- **降级**：`threadPoolAvailable(memory)` 探测 SAB 可用性；非 isolated 上下文自动走单线程路径（`jsi_thread_spawn` 返回 0）
 
 ### B. 进程隔离
 
@@ -262,6 +267,52 @@ u64 bun_transform(u32 opts_ptr, u32 opts_len);
 - 以上 5 个模块均可通过 **bundle 路径**（`builtinPolyfillSource`）内联到输出 bundle
 - 新增测试文件：`packages/bun-browser/test/node-builtins.test.ts`（26 个用例）
 
+#### Phase 5.9 — 更多 Node.js 内置模块 polyfill（stream/crypto/os/zlib/http/child_process/worker_threads/process）
+
+**状态**：🟡 部分完成（37/43，详见下表 + 已知问题）  
+**目标**：补齐 8 个次高频内置模块，同样在 `requireFn`（运行时）和 `builtinPolyfillSource`（bundle 路径）两条路径同步生效。源码常量位于 `src/bun_browser_standalone.zig`（`STREAM_MODULE_SRC` / `CRYPTO_MODULE_SRC` / `OS_MODULE_SRC` / `ZLIB_MODULE_SRC` / `HTTP_MODULE_SRC` / `CHILD_PROCESS_MODULE_SRC` / `WORKER_THREADS_MODULE_SRC` / `PROCESS_MODULE_SRC`）。
+
+| 任务 | 模块 | 说明 | 状态 |
+|------|------|------|:----:|
+| T5.9.1 | `stream` / `node:stream` | Readable/Writable/Duplex/Transform/PassThrough，pipeline/finished，`Symbol.asyncIterator`；依赖 `events` | 🟡 Zig 源已修复<br>(Writable.end/Stream 别名 ✅；PassThrough/Transform/pipeline 需 wasm 重建后生效) |
+| T5.9.2 | `crypto` / `node:crypto` | createHash(sha1/sha256)、createHmac、randomBytes、randomUUID、timingSafeEqual、pbkdf2Sync；纯 JS，无 host 依赖 | ✅ (8/8)<br>sha256 之前标红是测试期望值写错（与 Bun/Node 官方 crypto 交叉验证，实际输出 `...5dae2223b00361a3...` 就是正确的 FIPS 180-4 值） |
+| T5.9.3 | `os` / `node:os` | platform/type/arch/hostname/homedir/tmpdir/EOL/cpus/totalmem/freemem/constants | ✅ (5/5) |
+| T5.9.4 | `zlib` / `node:zlib` | gunzipSync 委托 `Bun.gunzipSync`，gzipSync 抛错，createGunzip 返回 PassThrough，constants | ✅ (4/4) |
+| T5.9.5 | `http` / `https` / `node:http` / `node:https` | STATUS_CODES/METHODS/createServer（返回 listen/close/address stub）；https 与 http 同 API | ✅ (4/4) |
+| T5.9.6 | `child_process` / `node:child_process` | execSync/spawnSync 抛错，exec/spawn 返回 stub（stdout/stderr/kill）| ✅ (4/4) |
+| T5.9.7 | `worker_threads` / `node:worker_threads` | isMainThread=true、threadId=0、Worker 抛错、MessageChannel 创建 port1/port2 | ✅ (4/4) |
+| T5.9.8 | `process` / `node:process` | require('process') 返回 process-like 对象（platform/env/cwd），与 globalThis.process 统一 | ✅ (2/2) |
+
+**已知问题**（3 个 stream 相关失败，源已修复待 wasm 重建；`node-builtins-extra.test.ts`）：
+
+| 测试 | 行 | 状态 |
+|------|---:|------|
+| `node:stream > PassThrough passes data through` | 135 | Zig `STREAM_MODULE_SRC` 已加 `Readable.prototype.on` override（`on('data', fn)` 自动调用 `resume()`），`/tmp/stream-test.js` 独立验证 PASS，待 wasm 重建 |
+| `node:stream > Transform uppercases data` | 153 | 同上 |
+| `node:stream > pipeline connects streams` | 182 | 同上 |
+| `bundle: stream PassThrough` | 543 | 同上 |
+
+**crypto sha256 疑似失败的真相**（已 resolved）：测试期望值 `...5dae2ec7...` 是错的，实际 FIPS 180-4 Appendix A.1 的 SHA-256("abc") = `BA7816BF 8F01CFEA 414140DE 5DAE2223 B00361A3 96177A9C B410FF61 F20015AD`。Bun 内建 `require('crypto').createHash('sha256').update('abc').digest('hex')` 亦是此值。已同步修正 `node-builtins-extra.test.ts` 两处。Zig 端 `_sha256` 实现一直是正确的。
+
+**stream 修复详情**：补丁加入两行（`src/bun_browser_standalone.zig` 第 582 行附近）：
+
+```js
+Readable.prototype.on=function(ev,fn){EE.prototype.on.call(this,ev,fn);if(ev==='data')this.resume();return this;};
+Readable.prototype.addListener=Readable.prototype.on;
+```
+
+这对齐了 Node.js 语义——首次添加 `'data'` 监听者即从 paused 切换到 flowing 模式，消费队列中已入队的 chunk 并继续派发新的 push。`PassThrough/Transform/pipeline` 三个场景均依赖此行为。
+
+**通过部分的验收**：
+- `require('os').platform()` / `arch()` / `tmpdir()` / `homedir()` / `EOL` 返回合法字符串
+- `require('zlib').gunzipSync` 可用，`gzipSync` 抛 "not available"，`createGunzip` 返回 stream-like 对象
+- `require('http').STATUS_CODES[200] === 'OK'`，`createServer` 返回含 `listen`/`close`/`address` 的 stub
+- `require('child_process').execSync` 抛 "not supported"，`spawn` 返回含 stdout/stderr/kill 的 stub
+- `require('worker_threads').isMainThread === true`，`MessageChannel` 两端 `postMessage` 为函数
+- `require('process')` 返回 process-like 对象
+- `require('crypto').randomBytes(16).length === 16`，`randomUUID()` 命中 UUIDv4 正则，`timingSafeEqual` 相等/不等正确，HMAC-SHA256 known vector 正确
+- bundle 路径：os/http/child_process/worker_threads 均可通过 `builtinPolyfillSource` 内联到打包输出
+
 #### 已落地 ABI（Phase 5.3a / T5.3.3）
 
 **Phase 5.3a**：无新 ABI —— resolver 改进在 `bun_resolve` / `bun_bundle` 内部生效，上层 `rt.resolve()` / `rt.bundle()` 调用方式不变。
@@ -343,26 +394,62 @@ u64 bun_transform(u32 opts_ptr, u32 opts_len);
 
 ### Phase 5.5 — wasm-threads + SAB（架构升级）
 
+**状态**：🟡 T5.5.1 Zig 构建脚本落地（待 toolchain 验证）+ T5.5.2 host ThreadPool 完成 + **T5.5.3 能力探测/协议/内核接入完成** ✅ + T5.5.4 ABI/基础设施完成（共 96/96 通过）；T5.5.5/6 待 `bun-core.threads.wasm` 产物实际生成后接入。
+
 **时间盒**：3-4 周  
 **风险**：🔴 最大  
 **目标**：对标 WebContainer 的阻塞语义模型。
 
 **任务**：
-- T5.5.1 `build-wasm-smoke.zig` 开启 `shared-memory` / `atomics`
-  - 输出 2 份 wasm（`bun-core.threads.wasm` / `bun-core.wasm`）供能力探测
-- T5.5.2 Host 端 pthread 支持
-  - 主 Worker 孵化子 Worker
-  - `memory` import 共享
-  - tid → Worker 映射表
-- T5.5.3 demo server 发 COOP / COEP
-  - 检测失败时自动降级到单线程
-- T5.5.4 新 JSI imports
-  - `jsi_atomic_wait(addr, expected, timeout_ns) u32`
-  - `jsi_atomic_notify(addr, count) u32`
-- T5.5.5 `bun_tick` 事件循环改为 `Atomics.wait` 真阻塞模型
-- T5.5.6 `std.Thread` 在 WASM 下映射到 `bun_thread_spawn`
+- T5.5.1 `build-wasm-smoke.zig` 开启 `shared-memory` / `atomics` 🟡（源级完成，待本地 zig toolchain 执行产出 `bun-core.threads.wasm`）
+  - 新增 `build-wasm-threads` step：`cpu_features_add = {.atomics, .bulk_memory}` + `shared_memory = true` + `import_memory = true`
+  - `initial_memory = 16 MiB` / `max_memory = 256 MiB`（匹配非线程版，未来可调）
+  - 产物：`packages/bun-browser/bun-core.threads.wasm`（与 `bun-core.wasm` 共存；host 按能力探测挑选）
+  - `single_threaded = true` 仍保留 —— Zig stdlib 部分代码非线程安全，真正的并发由 JS 侧 Worker + SAB 承担；`memory.atomic.wait32/notify` 是 wasm 指令，不受此 flag 影响
+- T5.5.2 Host 端 pthread 支持 ✅
+  - `packages/bun-browser/src/thread-pool.ts` —— `ThreadPool` 类：tid 单调分配（主线程=0，子线程≥1）、`maxThreads` 上限、`spawn()`/`join()`/`terminate()`/错误传播
+  - `threadPoolAvailable(memory)` —— `SharedArrayBuffer` + `memory.buffer instanceof SharedArrayBuffer` 双探测
+  - 协议 UI→Worker：`{type:"thread:start", tid, arg, memory, module}`；Worker→UI：`thread:exit | thread:error`
+  - `kernel.ts` 后续只需构造 `ThreadPool` 实例并将 `pool.spawn.bind(pool)` 注入 `JsiHostOptions.spawnThread`
+  - 测试：`test/thread-pool.test.ts` 14 例（tid 单调、maxThreads、onExit/onError、join 多消费者、terminate 语义）
+- T5.5.3 COOP/COEP 能力探测 + 内核接入 ✅
+  - 新增 `src/thread-capability.ts`：`detectThreadCapability()` / `createSharedMemory()` / `selectWasmModule()`
+  - `protocol.ts` HandshakeRequest 新增 `threadsWasmModule?` + `sharedMemory?`；HandshakeAck 新增 `threadMode: "threaded" | "single"`
+  - `wasm.ts` WasmRuntimeOptions 新增 `sharedMemory?` / `spawnThread?` / `threadId?`；`createWasmRuntime` 在 threads 模式下将 SAB Memory 注入 `env.memory`
+  - `kernel.ts` KernelOptions 新增 `threadsWasmModule?`；构造时自动检测能力并在握手消息中携带 threads 所需字段
+  - `kernel-worker.ts` 握手 handler：worker 侧再次探测能力，若 threadsReady 则创建 `ThreadPool`，以 threads 模块 + sharedMemory + `spawnThread` 启动，降级路径透明
+  - 测试：`test/thread-capability.test.ts` 13 例（结构验证、条件逻辑、createSharedMemory、selectWasmModule 四路径、幂等性）全通过
+  - 检测失败时自动降级到单线程（零额外配置）
+- T5.5.4 新 JSI imports ✅
+  - `jsi_atomic_wait(view_ptr, expected, timeout_ms) u32` —— 0=ok, 1=not-equal, 2=timed-out
+  - `jsi_atomic_notify(view_ptr, count) u32` —— 返回唤醒数；非 SAB 返回 0
+  - `jsi_thread_spawn(arg) u32` —— 返回 tid，未启用 pool 时返回 0
+  - `jsi_thread_self() u32` —— 当前线程 tid；主线程为 0
+  - `jsi_thread_capability() u32` —— 位图：bit0=SAB, bit1=inWorker+waitSync, bit2=host-spawn
+  - Zig: `src/jsi/imports.zig`；Host: `packages/bun-browser/src/jsi-host.ts`（含 non-SAB fallback path）
+- T5.5.5 `bun_tick` 事件循环改为 `Atomics.wait` 真阻塞模型 ⏳
+- T5.5.6 `std.Thread` 在 WASM 下映射到 `bun_thread_spawn` ⏳
 
-**验收**：
+**新增基础设施**（本轮落地）：
+- `packages/bun-browser/src/sab-ring.ts` —— SPSC 字节 ring 缓冲（SharedArrayBuffer-backed，header 32B + 数据区），用于 pipe/stdio/VFS 远端 I/O：
+  - `createSabRing(capacity)` / `SabRingProducer` / `SabRingConsumer`
+  - `head`/`tail`/`closed`/`waiters` 四槽 header；经典空/满消歧（保留 1 字节）
+  - `write()` 非阻塞、带 wrap-around；`read()` 非阻塞；`readBlocking()` 在 Worker 内真阻塞
+  - 非 SAB 环境自动退化为 `ArrayBuffer`，单线程内部仍可用（便于测试）
+- `packages/bun-browser/src/atomic-wait.ts` —— `Atomics.wait` / `Atomics.waitAsync` 跨环境抽象：
+  - `detectAtomicWait()` 环境能力探测（sab/inWorker/sync/async）
+  - `atomicWaitSync()` —— Worker 内真阻塞；主线程降级到一次性比较
+  - `atomicWaitAsync()` —— `waitAsync` Promise 路径；无 SAB 时 setTimeout 轮询
+  - `atomicNotify()` —— 唤醒；非 SAB 返回 0（no-op）
+
+**验收**（当前阶段，44/44 新增测试通过）：
+- `test/sab-ring.test.ts` 11 例：capability、SPSC 读写、环绕、close 语义、非-SAB fallback
+- `test/atomic-wait.test.ts` 8 例：capability 检测、not-equal/timed-out/ok/唤醒
+- `test/jsi-host.test.ts` 新增 8 例：`jsi_thread_self`、`jsi_thread_spawn` delegation、`jsi_thread_capability` 位图、`jsi_atomic_wait`/`jsi_atomic_notify` non-SAB fallback
+- `test/thread-pool.test.ts` 14 例：`threadPoolAvailable`、tid 单调、onExit/onError、maxThreads 上限、join 多消费者、terminate 语义、postMessage 失败路径
+- 全套 434/438 通过（剩余 4 例为 stream polyfill，已在 Zig 源修复，待 wasm 重建生效）
+
+**最终验收**（待 T5.5.1/5/6 完成）：
 - `Bun.spawn` 真正并行（Phase 5.6 配合）
 - `fs.readFileSync` 对远端 VFS 可阻塞
 - 能力探测：无 SAB 上下文自动降级，功能无差异
@@ -375,9 +462,20 @@ u64 bun_transform(u32 opts_ptr, u32 opts_len);
 **目标**：`bun_spawn` 真实进程模型；`Bun.$` 可用。
 
 **任务**：
-- T5.6.1 每个 `bun_spawn` 独立 WASM Instance
-  - 共享 VFS 快照（COW 语义）
-  - 独立 JSI handle 空间
+- T5.6.1 每个 `bun_spawn` 独立 WASM Instance ✅
+  - 新建 `src/spawn-worker.ts` —— 子进程 Worker 入口：收到 `spawn:init` 后创建独立 `WasmRuntime`，按序加载父进程 VFS 快照，应用 argv/env/cwd，按子命令路由（`bun run`/`bun -e`/fallback `bun_spawn`），转发 stdout/stderr/exit 消息
+  - 新建 `src/process-manager.ts` —— `ProcessManager` 类：`workerFactory` 注入（势
+    测友好）、`trackVfsSnapshot()` 积累父进程 VFS 快照、`spawn(opts): Promise<exitCode>` 创建子进程 Worker、中继 stdout/stderr 回调、退出后 resolve
+  - COW VFS 语义：父进程通过 `bun_vfs_load_snapshot` 加载的文件对子进程可见；子进程内部写入不影响父进程（独立线性内存）
+  - `protocol.ts` HandshakeRequest 新增 `spawnWorkerUrl?:string`
+  - `kernel.ts` KernelOptions 新增 `spawnWorkerUrl?:string|URL`
+  - `kernel-worker.ts` handshake handler：初始化 `ProcessManager`；`vfs:snapshot` handler 同步 `trackVfsSnapshot`；`spawn` handler：`ProcessManager` 存在时打包给子进程 Worker，否则回退 in-process `bun_spawn`（向后兼容）
+  - **live VFS 全链路（已实现）**：
+    - Zig 新增 `bun_vfs_dump_snapshot() u64` 导出——将 `vfs_g.exportSnapshot()` 序列化后以 `(ptr << 32) | len` 打包返回，host 读取后调用 `bun_free(ptr)` 释放
+    - `wasm.ts` `WasmRuntime.dumpVfsSnapshot(): Uint8Array | null` — 调用 `bun_vfs_dump_snapshot`，将返回的 packed u64 拆包后 slice WASM 线性内存，确保父进程运行时写入的文件对子进程可见
+    - `process-manager.ts` `ProcessSpawnOptions` 新增 `extraSnapshots?: ArrayBuffer[]`；`spawn()` 将 `pendingSnapshots + extraSnapshots` 合并后写入 `SpawnInitMessage.vfsSnapshots`
+    - `kernel-worker.ts` `spawn` handler 在调用 `processManager.spawn()` 前先执行 `rt.dumpVfsSnapshot()`，将结果以 `extraSnapshots` 传入，实现父进程 `Bun.write` 写入的文件子进程完全可见
+  - 测试：`test/process-manager.test.ts` 14 例全通过（含 3 例 `extraSnapshots` 场景）；`test/integration.test.ts` 新增 6 例全链路集成测试
 - T5.6.2 stdio 走 SAB ring buffer
   - 依赖 Phase 5.5 的 atomics
 - T5.6.3 `src/shell/*` 接入 → `Bun.$`
@@ -529,14 +627,24 @@ u64 bun_lockfile_write(u32 input_ptr, u32 input_len);
 u64  bun_npm_need_fetch();
 void bun_npm_feed_response(u32 req_id, u32 data_ptr, u32 data_len, u32 status);
 
-// Phase 5.5（依赖 wasm-threads）
-u32  bun_thread_spawn(u32 entry_tag, u32 arg);
-void jsi_atomic_wait(u32 addr, u32 expected, u64 timeout_ns);   // import
-void jsi_atomic_notify(u32 addr, u32 count);                    // import
+// Phase 5.5（JSI imports，非 WASM export；Zig 声明在 src/jsi/imports.zig，host 实现在 jsi-host.ts）✅ T5.5.4 已实现
+// import: jsi_atomic_wait(view_ptr u32, expected i32, timeout_ms u32) u32  → 0=ok, 1=not-equal, 2=timed-out
+// import: jsi_atomic_notify(view_ptr u32, count u32) u32                  → 唤醒数；非 SAB 返回 0
+// import: jsi_thread_spawn(arg u32) u32                                    → tid（0=失败/pool 未启用）
+// import: jsi_thread_self() u32                                            → 当前 tid；主线程=0
+// import: jsi_thread_capability() u32                                      → 位图 bit0=SAB|bit1=Worker+waitSync|bit2=host-spawn
+// host side T5.5.2 ✅:
+//   threadPoolAvailable(memory): boolean
+//   ThreadPool.spawn(arg) → tid  /  .join(tid): Promise<code>  /  .terminate()
 
 // Phase 5.6
 u32 bun_spawn2(u32 cmd_ptr, u32 cmd_len,
                u32 stdin_sab, u32 stdout_sab, u32 stderr_sab);
+
+// Phase 5.6 T5.6.1 ✅ 已实现
+// 将当前运行时 VFS 序列化为快照，供子进程 Worker 加载（实现父进程运行时写入文件对子进程可见）
+// 返回值：packed u64 = (ptr << 32) | len，host 通过 bun_read_string(ptr, len) 读取字节后调用 bun_free(ptr) 释放
+u64 bun_vfs_dump_snapshot();
 ```
 
 全部 ABI 变更需同步：
@@ -578,10 +686,201 @@ u32 bun_spawn2(u32 cmd_ptr, u32 cmd_len,
 
 ---
 
-## 8. 变更记录
+## 8. 能力对标与 Zig 复用再审计（2026-04-26）
+
+**背景**：447/447 绿后重新核对两件事：(1) 当前与 WebContainer 真实 API 的对标是否准确；(2) `§2 Zig 能力复用矩阵`中标"已接入"的项目有无与真实代码出入。
+
+### 8.1 WebContainer 能力复核
+
+对照 `@webcontainer/api` 公开文档的真实 API 表面：
+
+| WebContainer API | bun-browser 现状 | 真实差距 |
+|------------------|------------------|---------|
+| `spawn(cmd, args, opts)` → `WebContainerProcess { output: ReadableStream, input: WritableStream, exit: Promise<number>, kill(signal), resize(dim) }` | `kernel.spawn(argv): Promise<exitCode>` + `onStdout`/`onStderr` 回调 | 🟠 **API shape 不齐** —— 需外包 Streams API；`resize`/真 `kill` 均未实现 |
+| `fs.readFile/writeFile/readdir/mkdir/rm/rename` （Promise 返回） | Zig 内置 VFS + Node `fs` polyfill，但**对外 `kernel.fs.*` 异步 API 不存在** | 🟠 缺主线程侧异步 fs API |
+| `fs.watch(path, opts)` | ❌ 未实现 | 🔴 缺 inotify 模拟 |
+| `mount(FileSystemTree)` | `buildSnapshot(VfsFile[])` + `bun_vfs_load_snapshot` | 🟡 语义等价、格式不同；缺 `FileSystemTree` JSON 树结构适配 |
+| `export(path)` | `bun_vfs_dump_snapshot()` （T5.6.1 落地） | 🟡 语义等价、格式不同 |
+| `on("port", listener)` / `on("server-ready")` | Service Worker 已捕获 `/__bun_preview__/{port}/*`，但 Kernel 无 `on("port")` API | 🟠 缺事件回调；`Bun.serve({ port })` 绑定与预览路由之间缺桥 |
+| `on("preview-message", ...)` | ❌ | 🟠 iframe↔kernel 消息桥未实现 |
+| COOP/COEP 强制 | `service-worker.ts` 可选注入 | 🟢 具备 |
+| `credentials` （npm auth） | ❌ | 🟢 低优先，MVP 不阻塞 |
+| PTY / xterm.js | ❌ | 🔴 缺失 |
+| TCP over WebSocket relay | ❌ | 🔴 浏览器固有限制，延期 |
+| pthread + 共享堆 | 源级就绪 + `ThreadPool` 已实现 | 🟡 wasm 产物未构建（阻塞 zig toolchain） |
+
+**修正**：`§1` 表格原说"每进程独立 Worker 真 spawn"是 WebContainer 现状、"单 Worker 内联 `jsi_eval`"是 bun-browser 现状。实测 T5.6.1 完成后，bun-browser **已具备**每进程独立 Worker + 独立 WASM Instance，此栏应更新为"M1 形式已具备（postMessage 字符串流），stdio 尚未切到 SAB 流（M2 目标）"。
+
+### 8.2 Zig 复用情况硬核对（grep 实测）
+
+对 `§2` 表逐项交叉核对 `bun.jsc` / `AsyncHTTP` / `@import("bun")` 引用：
+
+| # | 模块 | 文档声称 | 实际状态 | JSC 耦合点 |
+|---|------|---------|---------|-----------|
+| 1 | `src/paths.zig` | 🟢 | ⚠️ **未接真身**，当前用 `std.fs.path`；`paths.zig` 自身带 `@import("bun")` 可通过 shim 接入 | 浅 |
+| 2 | `src/sha.zig`、`src/base64/*` | 🟢 ✅ | ✅ 已接入（`bun_hash`、`bun_base64_*`） | 无 |
+| 3 | `src/zlib.zig` | 🔥 ✅ | ✅ 已接入（`bun_inflate`） | 无 |
+| 3b | `src/brotli.zig` | — | ⚠️ 未接入（依赖 brotli C lib，需 wasm 交叉编译） | 无 |
+| 4 | `src/url.zig` | 🟢 | ⚠️ **未接真身**，当前用 `std.Uri`；如需 WHATWG URL 细节应接入真身 | 浅（仅 `@import("bun")`） |
+| 5 | `src/glob/*` | 🟡 | ❌ **未接入**（`src/glob/GlobWalker.zig` 引用 `bun.jsc`；但 `src/glob/glob.zig` 核心匹配器多半纯） | 混合（walker JSC，matcher 纯） |
+| 6 | `src/resolver/*` | 🔥 | ❌ **未接入且成本极高** —— `resolver.zig` 多处 `bun.jsc.ModuleLoader.HardcodedModule.Alias` / `HTTPThread` / `JSGlobalObject`；**建议 T5.3.4 降级为长期探索项** | 深 |
+| 7 | `src/js_parser.zig` + `transpiler.zig` | 🔥 | ❌ 未接入（与 `§Phase 5.2 T5.2.6 依赖面分析`一致） | 深 |
+| 8 | `src/bundler/*` | 🔥 | ❌ 未接入（`bundle_v2.zig` L5047 `bun.jsc.AnyEventLoop` 硬编码） | 深 |
+| 9 | `src/install/npm.zig` + `dependency.zig` + `tarball.zig` + `integrity.zig` | 🔥 | `integrity.zig` ✅ 接入（`bun_integrity_verify`）；其他三个未接入；**`dependency.zig` JSC 仅集中在 `.toJS/.fromJS/.inferFromJS` 三个方法，剥掉即可 WASM** | 混合 |
+| 9b | `src/install/lockfile/*` | — | ❌ **未接入（高价值遗漏）**：`lockfile.zig` + `bun.lock.zig` + `Tree.zig` + `Package/` 全部**无 JSC 引用**（实测 grep 0 命中），当前 `bun_lockfile_parse` 是 300 行手写 JSON parser | 无（可直接接入） |
+| 10 | `src/fs/*` + `src/bun.js/node/node_fs.zig` | 🔥 | ❌ 未接入；**bun.js/node 不在 WASM 编译范围**，MVP 通过 JS polyfill 代替 | 深 |
+| 11 | `src/shell/*` | 🟡 | ❌ **未接入且不可行**：`shell.zig`/`interpreter.zig`/`subproc.zig` 本质都是 JSC 类（`ShellInterpreter` 是 JSClass）；**建议 T5.6.3 重定向为"基于 `braces.zig` 的轻量自研 shell"** | 深 |
+| 11b | `src/shell/braces.zig` | — | ❌ **未接入（低成本高价值）**：brace expansion 纯 Zig 实现，0 JSC 引用 | 无 |
+| 12 | `src/sourcemap/*` | 🟡 ✅（Phase 5.7 T5.7.2 声称） | ⚠️ **文档措辞误导** —— `bun_sourcemap_lookup` 是**独立的内联 VLQ 解码器**，并未调用 `src/sourcemap/Mapping.zig`；`Mapping.zig` / `CodeCoverage.zig` 带 JSC，`vlq.zig`（如存在）可剥离接入 | 浅/深混合 |
+| 13 | `src/HTMLScanner.zig` | 🟢 ✅（Phase 5.7 T5.7.3 声称） | ⚠️ **文档措辞误导** —— `bun_html_rewrite` 是独立字符扫描器，并未调用 `HTMLScanner.zig`；`HTMLScanner.zig` 自身**零 JSC 引用**，可真身接入 | 无 |
+| 14 | `src/patch.zig` | 🟢 | ❌ 未接入；全部接口是 JSC methods，需大改 | 深 |
+| 15 | `src/threading/*` | 🔥 | ❌ 未接入；host 侧已用 `thread-pool.ts` 替代 | — |
+| 15b | `src/semver/*` | — | ✅ 已接入（`bun_semver_select`，`SemverObject` 有 JSC 方法但未进入 WASM 路径） | 浅（可 shim） |
+
+**重要修正项**（需回写到 `§2` 与对应 Phase 节）：
+
+1. **`bun_html_rewrite` 与 `bun_sourcemap_lookup` 并非"真身接入"**：文档表述让读者误以为复用了 `src/HTMLScanner.zig` / `src/sourcemap/*.zig`。实际两者均为 `bun_browser_standalone.zig` 内联实现。应在 Phase 5.7 文字改为"接口等价 / 独立实现"；真身接入留作 Phase 5.10 子任务。
+2. **`src/install/lockfile/*` 是最具价值的未接入项**：零 JSC 依赖 + 即用即得 + 能让浏览器产出与 CLI Bun 100% 兼容的 `bun.lock`/`bun.lockb`。
+3. **`src/resolver/*` 真身接入（T5.3.4）不应作为常规迭代项**：经实测耦合面（`HTTPThread` + `VM` + `ModuleLoader`）过宽，建议**取消**并声明"手写 resolver 增强版是最终方案"。
+4. **`src/shell/*` 真身接入（原 T5.6.3）不可行**：`ShellInterpreter` 是 JSC class；重定向为"基于 `braces.zig` 的自研 shell（Phase 5.13）"。
+
+---
+
+## 9. Phase 5.10+ 新迭代任务（基于 §8 审计）
+
+### Phase 5.10 — Zig 真身接入二期（低风险高价值）
+
+**目标**：把 `§8.2` 中"已识别为可直接接入"的清洁 Zig 模块接入 WASM，替换手写实现。
+
+**时间盒**：1-2 周  
+**前置**：无（均可与 Phase 5.5/5.6 并行）
+
+| 任务 | 内容 | 工作量 | 状态 |
+|------|------|:------:|:----:|
+| T5.10.1 | `src/install/lockfile/*` 真身接入——替换手写 `bun_lockfile_parse` + `bun_lockfile_write`，产物与 CLI Bun 互通 | 🟠 中 | ⏳ |
+| T5.10.2 | `src/HTMLScanner.zig` 真身接入——`bun_html_rewrite` 内部改走 `HTMLScanner`，增加属性/选择器支持面 | 🟡 小 | ⏳ |
+| T5.10.3 | `src/shell/braces.zig` 接入——暴露 `bun_brace_expand(ptr, len) u64` ABI，为 Phase 5.13 shell 准备 | 🟢 很小 | ⏳ |
+| T5.10.4 | `src/install/dependency.zig` 接入——剥离 `.toJS/.fromJS/.inferFromJS` 三个 JSC 方法后，`bun_npm_resolve_graph` 使用真实 `Dependency.Version` 结构 | 🟡 小 | ⏳ |
+| T5.10.5 | `src/sourcemap/vlq.zig`（若独立存在）或等价子模块接入——`bun_sourcemap_lookup` 替换内联解码器 | 🟢 很小 | ⏳ |
+| T5.10.6 | 文档修正——同步更新 `§2`/`§5`/Phase 5.7 节，去除"已接入"误导措辞 | 🟢 | ⏳ |
+
+**验收**：
+- `rt.parseLockfile(text)` 与 CLI Bun `bun install` 产出的 `bun.lock` 解析结果字段对齐（`lockfileVersion/workspaceCount/packageCount/packages[]`）
+- `rt.writeLockfile(pkgs)` 可被 CLI Bun 作为真实 lockfile 消费
+- `rt.htmlRewrite(html, rules)` 支持属性重写 + 文本替换 + 节点删除，基于 `HTMLScanner` 的鲁棒解析
+- 无回归；测试 ≥460 pass
+
+### Phase 5.11 — WebContainer API 表面对齐
+
+**目标**：让现有 WebContainer 用户可低成本切换到 bun-browser，或至少 API shape 一致。
+
+**时间盒**：2 周  
+**前置**：Phase 3 Service Worker（已完成）
+
+| 任务 | 内容 | 状态 |
+|------|------|:----:|
+| T5.11.1 | `Kernel.on("port", listener)` + `on("server-ready", listener)` —— `Bun.serve({ port })` 调用时 kernel 捕获并触发事件，携带 `{ port, url }` | ⏳ |
+| T5.11.2 | `ProcessHandle` Streams API —— `kernel.spawn()` 返回 `{ output: ReadableStream, input: WritableStream, exit: Promise<number>, kill(signal), resize(dim) }`；底层复用 `ProcessManager`，stdout/stderr 暴露为 `ReadableStream` | ⏳ |
+| T5.11.3 | `kernel.fs.*` 异步 API —— `readFile/writeFile/readdir/mkdir/rm/rename/stat`，全部返回 Promise；主线程 ↔ Worker 走 `vfs:*` 协议（已有 `VfsSnapshotRequest`，需扩展） | ⏳ |
+| T5.11.4 | `kernel.mount(tree: FileSystemTree)` / `kernel.export(path): FileSystemTree` —— WebContainer FileSystemTree 格式（嵌套 `{ directory/file/contents }` 对象）适配到现有 `VfsFile[]` | ⏳ |
+| T5.11.5 | `kernel.on("preview-message", ...)` —— iframe `window.postMessage` 中继到 kernel listener | ⏳ |
+| T5.11.6 | `@bun-browser/webcontainer-compat` 子包（可选）——提供 WebContainer-style `WebContainer.boot(opts)` 工厂，内部包装 bun-browser Kernel | ⏳ |
+
+**验收**：
+- `await WebContainer.boot(opts)` 返回对象 shape 与 `@webcontainer/api` 兼容
+- `process.output.pipeTo(new WritableStream(...))` 可消费 stdout
+- `await kernel.fs.readFile("/index.ts", "utf-8")` 返回字符串
+- 典型 WebContainer demo（StackBlitz 的 `simple-demo`）改 3-5 行 import 即可跑通
+
+### Phase 5.12 — 阻塞 I/O & 进程真身化
+
+**目标**：把 T5.6.1 的 postMessage 字符串流升级为 SAB 字节流，实现对标 WebContainer 的阻塞系统调用模型。
+
+**时间盒**：3-4 周  
+**前置**：Phase 5.5 T5.5.1 实际产出 `bun-core.threads.wasm`
+
+| 任务 | 内容 | 原编号 | 状态 |
+|------|------|:-----:|:----:|
+| T5.12.1 | `bun_tick` 切换到 `Atomics.wait` 真阻塞模型 | 原 T5.5.5 | ⏳ |
+| T5.12.2 | 子进程 stdio 切到 SAB ring —— `ProcessManager.spawn` + `spawn-worker.ts` 底层改用 `sab-ring.ts`，并在 `ProcessHandle` 暴露为 `ReadableStream`/`WritableStream` | 原 T5.6.2 | ⏳ |
+| T5.12.3 | `bun_kill(pid, signal)` 真实实现 —— SAB header 增加 `signal` slot，子 Worker `bun_tick` 每次检查；常见信号 SIGTERM/SIGINT/SIGKILL | — | ⏳ |
+| T5.12.4 | `std.Thread` → `bun_thread_spawn` 映射 | 原 T5.5.6 | ⏳ |
+| T5.12.5 | `fs.watch` —— VFS 内部事件总线 + `chokidar`-style 回调；主线程通过 `watchFile` 协议订阅 | — | ⏳ |
+
+**验收**：
+- 子进程 `fs.readFileSync` 对远端 VFS **真阻塞**（主线程 VFS 写入瞬时可见）
+- `process.kill("SIGTERM")` 使子进程 exit code 15
+- `fs.watch("/src")` 在 `Bun.write("/src/index.ts")` 时立刻触发 listener
+
+### Phase 5.13 — 轻量自研 Shell（取代原 T5.6.3）
+
+**目标**：在无法复用 `src/shell/interpreter.zig` 的前提下，基于 `braces.zig` + 自研 lexer/parser 实现 `Bun.$` MVP。
+
+**时间盒**：2-3 周  
+**前置**：T5.10.3（`bun_brace_expand`）
+
+| 任务 | 内容 | 状态 |
+|------|------|:----:|
+| T5.13.1 | Zig 侧 `bun_shell_parse(src) u64` —— AST-only，返回 JSON（command / pipe / redirect / subst / glob / brace） | ⏳ |
+| T5.13.2 | TS 侧 `ShellInterpreter` —— 解析 AST 驱动 `ProcessManager.spawn` 管道、`kernel.fs.*` 重定向、env 变量展开 | ⏳ |
+| T5.13.3 | 内置命令（JS 实现）：`echo/cd/pwd/ls/cat/mkdir/rm/cp/mv/env/export` 直接操作 VFS | ⏳ |
+| T5.13.4 | `Bun.$\`...\`` 模板字符串 tag —— 复用 Phase 5.7 Bun 对象，调用 `ShellInterpreter` | ⏳ |
+| T5.13.5 | 错误处理 + 退出码传播；`$.text() / .lines() / .json()` 流式 API | ⏳ |
+
+**验收**：
+- `await $\`ls /src | head -n 3\`` 在 VFS 中有效
+- `await $\`cat package.json | grep name\`.text()` 返回字符串
+- 管道多层组合正确（`a | b | c`）
+
+### Phase 5.14 — 预览体验闭环
+
+**目标**：与 T5.11.1/5 配合，真正支持多 port 并发预览 + iframe 双向通信。
+
+**时间盒**：1-2 周  
+**前置**：T5.11.1、T5.11.5
+
+| 任务 | 内容 | 状态 |
+|------|------|:----:|
+| T5.14.1 | 多 port 注册表 —— `preview-router.ts` 升级，允许同时监听多个 port，每个一个 `on("port")` 事件 | ⏳ |
+| T5.14.2 | COOP/COEP 头**强制**注入 —— demo 页附带 deploy 模板，或 SW 层必定下发 | ⏳ |
+| T5.14.3 | iframe ↔ kernel `postMessage` bridge —— iframe 内注入小 script，`window.postMessage` 经 SW 中继到 kernel `on("preview-message")` | ⏳ |
+| T5.14.4 | Port 自动分配 + 冲突检测 —— `Bun.serve({ port: 0 })` 自动选可用 port | ⏳ |
+
+### Phase 5.15 — 稳定化 & CI
+
+| 任务 | 内容 | 状态 |
+|------|------|:----:|
+| T5.15.1 | `bun-core.threads.wasm` CI lane —— docker 镜像装 zig 0.15.2 + 每 PR 构建 + artifacts 上传 | ⏳ |
+| T5.15.2 | JSC 依赖追踪工具 —— `scripts/audit-wasm-shim.ts`：扫描 `src/` 下所有 `@import("bun")` 和 `bun.jsc` 引用，输出 markdown 报告（模块、JSC 耦合点、可否 shim、估算工作量） | ⏳ |
+| T5.15.3 | 集成测试矩阵 —— 真实 vite/next/hono 项目的端到端测试（install → build → serve → fetch） | ⏳ |
+| T5.15.4 | 体积预算 —— `bun-core.wasm` 当前大小记录 + Phase 5.10 接入后回归检查（目标 < 2.5 MB gzip） | ⏳ |
+
+### 新迭代执行顺序建议
+
+```
+5.10 (Zig 真身二期) ── 并行 ──► 5.11 (WebContainer API 对齐)
+                                      │
+5.15 (CI/toolchain) ──────────────────┤
+                                      │
+5.12 (阻塞 I/O) ◄── 依赖 5.5 threads wasm 产物
+  └─► 5.13 (自研 shell) ◄── 依赖 T5.10.3 (braces)
+         └─► 5.14 (预览闭环) ◄── 依赖 5.11.1/5
+```
+
+**立刻起步推荐**：T5.10.1（lockfile 真身）+ T5.10.2（HTMLScanner 真身）+ T5.10.6（文档修正）并行开工。三项均无运行时依赖，可在当前 447/447 绿线上无回归落地。
+
+---
+
+## 10. 变更记录
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-04-26 | claude | **Phase 5 审计与新迭代规划**：基于 447/447 绿线对 `§1 WebContainer 对标`和 `§2 Zig 复用矩阵`做硬核交叉核对（grep 实测 `bun.jsc`/`AsyncHTTP`/`@import("bun")` 引用）。新增 `§8 能力对标与 Zig 复用再审计` —— 修正三项表述误导：(a) `bun_html_rewrite` 并未接入 `src/HTMLScanner.zig`，实为独立字符扫描器；(b) `bun_sourcemap_lookup` 并未接入 `src/sourcemap/*`，实为内联 VLQ 解码器；(c) `src/install/lockfile/*` 是零 JSC 依赖的高价值未接入项（手写 `bun_lockfile_parse` 是 300 行 JSON parser）。新增 `§9 Phase 5.10+ 新迭代任务`：**Phase 5.10** Zig 真身二期（lockfile/HTMLScanner/braces/dependency/vlq 六项真身接入 + 文档修正）；**Phase 5.11** WebContainer API 表面对齐（Streams API、异步 fs、FileSystemTree、port/server-ready 事件、preview-message bridge、`@bun-browser/webcontainer-compat` 子包）；**Phase 5.12** 阻塞 I/O 真身化（`bun_tick` Atomics.wait、stdio SAB ring、`bun_kill` 真实信号、`fs.watch`）；**Phase 5.13** 轻量自研 Shell（取消原 T5.6.3 真身接入，改为基于 `braces.zig` 的 AST+JS interpreter）；**Phase 5.14** 预览体验闭环；**Phase 5.15** 稳定化（threads wasm CI lane、JSC 依赖追踪工具、体积预算）。同时取消/降级：T5.3.4（`src/resolver/*` 真身接入）从常规迭代降级为长期探索项；原 T5.6.3（`src/shell/*` 真身接入）撤销，由 Phase 5.13 替代。编号 §8 旧"变更记录"升为 §10。|
+| 2026-04-26 | claude | **T5.6.1 live VFS 全链路完成**：解除"已知限制"，父进程运行时 `Bun.write` 写入的文件现对子进程完全可见。(1) Zig 新增 `bun_vfs_dump_snapshot() u64` WASM export —— 调用 `vfs_g.exportSnapshot()` 序列化当前 VFS 状态，以 `(ptr << 32) \| len` 打包返回，host 读取后调用 `bun_free(ptr)` 释放；(2) `wasm.ts` 新增 `WasmRuntime.dumpVfsSnapshot(): Uint8Array \| null` —— 拆包 packed u64、slice WASM 线性内存、拷贝为独立 `Uint8Array`；(3) `process-manager.ts` `ProcessSpawnOptions` 新增 `extraSnapshots?: ArrayBuffer[]`；`spawn()` 将 `pendingSnapshots + extraSnapshots` 合并为 `SpawnInitMessage.vfsSnapshots` 发送给子 Worker；(4) `kernel-worker.ts` `spawn` handler 在调用 `processManager.spawn()` 前先执行 `rt.dumpVfsSnapshot()`，以 `extraSnapshots` 传入，确保子进程完整继承父进程 VFS 运行时状态；(5) `test/process-manager.test.ts` 新增 3 例 `extraSnapshots` 场景（14 例全通过）；(6) 新建 `test/integration.test.ts` 6 例全链路集成测试（Bun.write → bun_vfs_dump_snapshot → spawn → 子进程可读）；同时 stream polyfill wasm 重建生效，全部 4 个残留失败清零。当前 **447/447 通过，0 失败**。|(1) 新建 `src/spawn-worker.ts` —— 子进程 Worker 入口：收到 `spawn:init` 后对传入的 Module 创建全新 `WasmRuntime`（独立线性内存 + JSI handle 空间），按序加载父进程积累的 VFS 快照（COW 语义），路由 `bun run`/`bun -e`/fallback，转发 stdout/stderr/exit；(2) 新建 `src/process-manager.ts` —— `ProcessManager` 类：`workerFactory` 工厂注入（势测友好，与 ThreadPool 一致）、`trackVfsSnapshot()` 积累快照、`spawn(opts):Promise<exitCode>` 创建子 Worker + 中继 IO + resolve；(3) `protocol.ts` `HandshakeRequest` 新增 `spawnWorkerUrl?`；(4) `kernel.ts` `KernelOptions` 新增 `spawnWorkerUrl?`；(5) `kernel-worker.ts` handshake 初始化 `ProcessManager`，`vfs:snapshot` 同步 `trackVfsSnapshot`，`spawn` handler 在 `ProcessManager` 存在时議包到子 Worker（否则回退 in-process，全向后兆容）；(6) 新建 `test/process-manager.test.ts` —— 11 例全通过（exit、stdout/stderr、Worker error、init payload、trackVfsSnapshot、并发 spawn）。已知限制：父进程脚本内 `Bun.write` 的内部 VFS 写入子进程暂不可见（需 wasm 重建新增 `bun_vfs_dump_snapshot`）。当前 **434/438 通过**（+11 新增，4 残留 stream 待 wasm 重建）。|
+| 2026-04-25 | claude | **T5.5.3 COOP/COEP 能力探测 + 内核 ThreadPool 接入完成**：(1) 新建 `src/thread-capability.ts` — `ThreadCapability` 接口（`crossOriginIsolated/sharedArrayBuffer/threadsReady/inWorker/atomicsWaitAsync`）、`detectThreadCapability()` 在主线程/Worker 均有效、`createSharedMemory(initialPages,maxPages)` 构造 SAB-backed WebAssembly.Memory（失败时返回 undefined）、`selectWasmModule(single,threads?,cap?)` 按能力返回 `{module,threaded,sharedMemory}` 三元组。(2) `protocol.ts` HandshakeRequest 新增 `threadsWasmModule?:WebAssembly.Module` + `sharedMemory?:WebAssembly.Memory`；HandshakeAck 新增 `threadMode:"threaded"|"single"`。(3) `wasm.ts` WasmRuntimeOptions 新增 `sharedMemory?/spawnThread?/threadId?`；`createWasmRuntime` 在 sharedMemory 存在时将其注入 `wasmImports.env.memory`（threads wasm import_memory=true 必须），并将 spawnThread/threadId 透传给 JsiHost。(4) `kernel.ts` KernelOptions 新增 `threadsWasmModule?`；构造时检测能力并在握手消息中携带 threads 所需字段。(5) `kernel-worker.ts` 握手 handler：Worker 侧再次探测能力，threadsReady 时创建 `ThreadPool` + 以 threads 模块启动 wasm，否则回退到单线程路径（零额外配置），握手应答携带 `threadMode`。(6) 新建 `test/thread-capability.test.ts` — 13 例全通过（结构验证、条件组合、createSharedMemory、selectWasmModule 四路径、幂等性）。当前 **423/427 通过**（+13 新增，4 残留 stream 仍等待 wasm 重建）。|
+| 2026-04-25 | claude | **Phase 5.5 推进 — T5.5.1 源级 + T5.5.2 host ThreadPool 落地**：(1) `build-wasm-smoke.zig` 新增 `build-wasm-threads` step —— 独立的 wasm32 target query（`cpu_features_add = {.atomics, .bulk_memory}`）+ `Executable.shared_memory=true` + `import_memory=true`，初始内存 16 MiB / 上限 256 MiB，产物 `packages/bun-browser/bun-core.threads.wasm` 与 `bun-core.wasm` 共存，host 按 `jsi_thread_capability()` 探测挑选；`single_threaded=true` 保留（Zig stdlib 非线程安全，并发由 JS 侧承担，`memory.atomic.wait32/notify` 是 wasm 指令不受影响）。源级完成，实际执行需 zig toolchain。(2) 新建 `packages/bun-browser/src/thread-pool.ts` —— `ThreadPool` 类：tid 单调分配（主=0、子≥1）、`maxThreads` 上限、`spawn/join/terminate/onExit/onError`、多消费者 join、terminate 释放 outstanding joiners；`threadPoolAvailable(memory)` 对 SAB + `memory.buffer instanceof SharedArrayBuffer` 双探测；协议 UI↔Worker 定义为 `thread:start/exit/error`，`kernel.ts` 后续只需把 `pool.spawn.bind(pool)` 注入 `JsiHostOptions.spawnThread`。(3) 新建 `test/thread-pool.test.ts` —— 14 例全通过（含 tid 单调、maxThreads 上限释放、postMessage 抛错路径、terminate 唤醒 join）。当前 **410/414 通过**（+14 新增，4 残留 stream 仍等待 wasm 重建）。|
+| 2026-04-24 | claude | **Phase 5.5 T5.5.4（JSI ABI + host 基础设施）完成**：(1) Zig 侧 `src/jsi/imports.zig` 新增 5 个 import —— `jsi_atomic_wait(view_ptr,expected,timeout_ms)u32` / `jsi_atomic_notify(view_ptr,count)u32` / `jsi_thread_spawn(arg)u32` / `jsi_thread_self()u32` / `jsi_thread_capability()u32`；(2) TS host `packages/bun-browser/src/jsi-host.ts` 实现 5 个 imports + `JsiHostOptions.spawnThread`/`threadId` 钩子（由 kernel 注入，未注入时 `thread_spawn` 返回 0，`atomic_wait` 走 non-SAB fallback path）；(3) 新建 `src/sab-ring.ts` —— SPSC 字节 ring（SharedArrayBuffer-backed，32B header [head/tail/closed/waiters] + data，空/满消歧保留 1 字节，`write/read` wrap-around 正确，`readBlocking` 在 Worker 内真阻塞）；(4) 新建 `src/atomic-wait.ts` —— `Atomics.wait/waitAsync` 跨环境抽象（sync/async/fallback 三条路径 + `detectAtomicWait()` 能力探测）；(5) 新增 3 个测试文件共 **30 例**：`sab-ring.test.ts`(11)、`atomic-wait.test.ts`(8)、`jsi-host.test.ts` Phase 5.5 补充(8) —— 全通过。**同日修复两个 Phase 5.9 failing test**：(a) 修复 `node-builtins-extra.test.ts` 两处 sha256 期望值（原值 `...5dae2ec7...` 是编造的，与 FIPS 180-4 Appendix A.1 及 Bun/Node 内建 crypto 交叉验证后应为 `...5dae2223b00361a3...`，Zig 端 `_sha256` 一直正确）；(b) 修复 `STREAM_MODULE_SRC` 第 582 行附近，`Readable.prototype.on` override 实现 "`on('data',fn)` 自动 resume"（Node.js 标准语义），已用 `/tmp/stream-test.js` 独立验证 PassThrough/Transform/pipeline 三例全 PASS，待 wasm 重建后 4 个 stream 用例可通过。当前测试状态：**396/400 通过**（+30 新增 / -2 修复 / 4 残留 stream 等待 wasm 重建）。|
+| 2026-04-24 | claude | **文档审计 — 与代码状态对齐**：(1) 新增 Phase 5.9 章节（`stream`/`crypto`/`os`/`zlib`/`http`/`https`/`child_process`/`worker_threads`/`process` 八个模块 polyfill，源码常量位于 `src/bun_browser_standalone.zig` 第 568–760 行区段，`requireFn` 与 `builtinPolyfillSource` 两条路径已接入，见第 1013–1040、2897–2902 行）；(2) 修正状态头：实测 **366/372 通过**（14 个测试文件），Phase 5.1–5.8 无回归；(3) 记录 6 个 Phase 5.9 已知失败（`test/node-builtins-extra.test.ts` 行 135/153/182/206/543/552）：stream PassThrough/Transform/pipeline 在 `write` 后 `data` 事件不触发（`Transform._write` → `_transform` → `push` 时非 flowing，首次 `on('data')` 未自动 resume）；crypto `sha256('abc')` 产出偏差（`Int32Array(64)` + `\|0` 导致中间量有符号溢出，需改为 `Uint32Array` + `>>>0`）；(4) T5.9.3/4/5/6/7/8 全通过（os/zlib/http/child_process/worker_threads/process 共 23/23）。|
 | 2026-04-21 | — | 初稿 |
 | 2026-04-21 | claude | Phase 5.1 全部完成：T5.1.1(path std.fs.path)、T5.1.2(hash/base64)、T5.1.3(inflate/deflate)、T5.1.4(url std.Uri)；wasm.ts 新增 8 个接口方法；192/192 测试通过 |
 | 2026-04-22 | claude | Phase 5.2 原型完成：轻量 TS/JSX stripper `src/bun_wasm_transform.zig`、WASM ABI `bun_transform`、`wasm.ts` 新增 `transform()` 封装、bundler 内部接入 + 失败回退 `jsi_transpile`、新增 `transform.test.ts` |

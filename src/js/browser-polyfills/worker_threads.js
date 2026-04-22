@@ -1,0 +1,5 @@
+var EE=require('events');
+function MessagePort(){EE.call(this);}
+MessagePort.prototype=Object.create(EE.prototype);MessagePort.prototype.constructor=MessagePort;MessagePort.prototype.postMessage=function(){};MessagePort.prototype.close=function(){};MessagePort.prototype.unref=function(){return this;};MessagePort.prototype.ref=function(){return this;};MessagePort.prototype.start=function(){};
+function MessageChannel(){this.port1=new MessagePort();this.port2=new MessagePort();}
+module.exports={isMainThread:true,threadId:0,workerData:null,parentPort:null,resourceLimits:{},SHARE_ENV:Symbol.for('nodejs.worker_threads.SHARE_ENV'),Worker:function Worker(src,opts){throw new Error('worker_threads.Worker is not supported in browser WASM mode');},MessageChannel:MessageChannel,MessagePort:MessagePort,receiveMessageOnPort:function(){return undefined;},moveMessagePortToContext:function(){throw new Error('moveMessagePortToContext not supported');},markAsUntransferable:function(){},markAsTransferable:function(){}};

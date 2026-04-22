@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>bun-browser demo</title>
+  <title>bun-browser — 功能演示</title>
   <style>
     *,
     *::before,
@@ -17,13 +17,22 @@
     :root {
       --bg: #1e1e1e;
       --surface: #252526;
+      --surface2: #2d2d30;
       --border: #3c3c3c;
       --text: #d4d4d4;
+      --text-dim: #858585;
       --accent: #0e639c;
-      --accent-hover: #1177bb;
-      --dim: #858585;
+      --accent-h: #1177bb;
+      --green: #4ec9b0;
+      --yellow: #dcdcaa;
+      --blue: #569cd6;
+      --purple: #c586c0;
+      --orange: #ce9178;
+      --red: #f48771;
+      --pink: #c586c0;
       --font-mono: "Cascadia Code", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
       --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --radius: 6px;
     }
 
     html,
@@ -34,109 +43,214 @@
       font-family: var(--font-ui);
     }
 
-    /* ── Layout ─────────────────────────────────────────── */
-    .app {
+    /* ── Shell ─────────────────────────────────────────── */
+    .shell {
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-rows: 48px 1fr 28px;
       height: 100vh;
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 16px;
-      gap: 12px;
     }
 
-    /* ── Header ─────────────────────────────────────────── */
-    header {
+    /* ── Top bar ────────────────────────────────────────── */
+    .topbar {
       display: flex;
       align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
+      gap: 10px;
+      padding: 0 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
     }
 
     .logo {
-      font-size: 1.1rem;
+      font-size: 1rem;
       font-weight: 700;
       letter-spacing: -0.02em;
       color: #fff;
+      user-select: none;
     }
 
-    .logo small {
+    .logo sub {
       font-weight: 400;
-      color: var(--dim);
-      font-size: 0.8rem;
+      font-size: 0.7rem;
+      color: var(--text-dim);
       margin-left: 4px;
+      vertical-align: middle;
+    }
+
+    .topbar-sep {
+      width: 1px;
+      height: 20px;
+      background: var(--border);
+      margin: 0 4px;
+    }
+
+    .nav-tabs {
+      display: flex;
+      gap: 2px;
+      height: 100%;
+      align-items: flex-end;
+    }
+
+    .nav-tab {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 14px;
+      height: 38px;
+      font-size: 0.82rem;
+      color: var(--text-dim);
+      cursor: pointer;
+      border-radius: var(--radius) var(--radius) 0 0;
+      border: 1px solid transparent;
+      border-bottom: none;
+      user-select: none;
+      white-space: nowrap;
+      transition: color .12s, background .12s;
+    }
+
+    .nav-tab:hover {
+      color: var(--text);
+      background: var(--surface2);
+    }
+
+    .nav-tab.active {
+      color: var(--text);
+      background: var(--bg);
+      border-color: var(--border);
+      border-bottom-color: var(--bg);
+    }
+
+    .nav-tab .tab-icon {
+      font-size: 0.9rem;
     }
 
     .spacer {
       flex: 1;
     }
 
-    .status-bar {
-      font-size: 0.8rem;
-      color: var(--dim);
+    .status-pill {
       display: flex;
       align-items: center;
       gap: 6px;
+      font-size: 0.78rem;
+      color: var(--text-dim);
     }
 
     .status-dot {
       width: 7px;
       height: 7px;
       border-radius: 50%;
-      background: #4ec9b0;
-      display: inline-block;
+      background: var(--text-dim);
+      flex-shrink: 0;
+      transition: background .3s;
     }
 
-    /* ── Main split ─────────────────────────────────────── */
+    .status-dot.ready {
+      background: var(--green);
+    }
+
+    .status-dot.busy {
+      background: var(--yellow);
+      animation: pulse .8s ease infinite;
+    }
+
+    .status-dot.error {
+      background: var(--red);
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: .4
+      }
+    }
+
+    /* ── Body ─────────────────────────────────────────── */
+    .body {
+      display: flex;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* ── Tab pages ─────────────────────────────────────── */
+    .tab-page {
+      display: none;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .tab-page.active {
+      display: flex;
+    }
+
+    /* ── Two-column split ────────────────────────────── */
     .split {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px;
+      flex: 1;
+      padding: 12px;
       min-height: 0;
     }
 
-    @media (max-width: 640px) {
+    @media (max-width: 800px) {
       .split {
         grid-template-columns: 1fr;
         grid-template-rows: 1fr 1fr;
       }
     }
 
+    /* ── Panel ───────────────────────────────────────── */
     .panel {
       display: flex;
       flex-direction: column;
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--radius);
       overflow: hidden;
       background: var(--surface);
+      min-height: 0;
     }
 
-    .panel-header {
+    .panel-head {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 6px 12px;
-      background: var(--bg);
+      padding: 5px 10px;
+      background: var(--surface2);
       border-bottom: 1px solid var(--border);
       font-size: 0.75rem;
-      color: var(--dim);
+      color: var(--text-dim);
       flex-shrink: 0;
     }
 
-    .panel-header span {
+    .panel-head .title {
       flex: 1;
-      font-weight: 500;
+      font-weight: 600;
+      color: var(--text);
     }
 
+    .panel-head .hint {
+      font-size: 0.7rem;
+      color: #555;
+    }
+
+    /* ── Controls ─────────────────────────────────────── */
+    button,
     select,
-    button {
+    input[type=text] {
       font-family: inherit;
       font-size: 0.8rem;
       border: 1px solid var(--border);
       border-radius: 3px;
       background: var(--bg);
       color: var(--text);
-      padding: 3px 7px;
+      padding: 3px 8px;
       cursor: pointer;
       outline: none;
     }
@@ -146,7 +260,7 @@
     }
 
     button:disabled {
-      opacity: 0.5;
+      opacity: .45;
       cursor: default;
     }
 
@@ -155,19 +269,35 @@
       border-color: var(--accent);
       color: #fff;
       font-weight: 600;
-      padding: 3px 12px;
+      padding: 4px 14px;
     }
 
     button.primary:hover:not(:disabled) {
-      background: var(--accent-hover);
-      border-color: var(--accent-hover);
+      background: var(--accent-h);
+      border-color: var(--accent-h);
     }
 
-    textarea#code {
+    input[type=text] {
+      padding: 3px 7px;
+    }
+
+    input[type=text]:focus {
+      border-color: var(--accent);
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    /* ── Editors & outputs ────────────────────────────── */
+    textarea.editor {
       flex: 1;
       font-family: var(--font-mono);
-      font-size: 0.9rem;
-      line-height: 1.6;
+      font-size: 0.86rem;
+      line-height: 1.65;
       background: var(--surface);
       color: var(--text);
       border: none;
@@ -177,11 +307,11 @@
       tab-size: 2;
     }
 
-    pre#output {
+    pre.output {
       flex: 1;
       font-family: var(--font-mono);
-      font-size: 0.85rem;
-      line-height: 1.6;
+      font-size: 0.82rem;
+      line-height: 1.65;
       padding: 12px 14px;
       overflow: auto;
       white-space: pre-wrap;
@@ -189,78 +319,1054 @@
       color: var(--text);
     }
 
-    /* ── Footer ─────────────────────────────────────────── */
-    footer {
-      font-size: 0.72rem;
-      color: var(--dim);
+    pre.output:empty::before {
+      content: '(等待输出…)';
+      color: #555;
+      font-style: italic;
+    }
+
+    pre.output .s {
+      color: var(--green);
+    }
+
+    pre.output .e {
+      color: var(--red);
+    }
+
+    pre.output .i {
+      color: var(--blue);
+    }
+
+    pre.output .x {
+      color: var(--purple);
+    }
+
+    pre.output .w {
+      color: var(--yellow);
+    }
+
+    /* ── VFS tree ────────────────────────────────────── */
+    .vfs-wrap {
+      flex: 1;
+      overflow: auto;
+      padding: 8px;
+    }
+
+    .vfs-entry {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 6px;
+      border-radius: 3px;
+      font-size: 0.82rem;
+      font-family: var(--font-mono);
+      cursor: pointer;
+    }
+
+    .vfs-entry:hover {
+      background: var(--surface2);
+    }
+
+    .vfs-entry .icon {
+      color: var(--yellow);
+      width: 14px;
       text-align: center;
     }
 
-    footer a {
-      color: var(--dim);
+    .vfs-entry .name {
+      flex: 1;
+      color: var(--text);
+    }
+
+    .vfs-entry .size {
+      color: var(--text-dim);
+      font-size: 0.75rem;
+    }
+
+    .vfs-actions {
+      padding: 6px 8px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    #vfs-new-path {
+      flex: 1;
+      min-width: 120px;
+    }
+
+    /* ── Crypto tab ───────────────────────────────────── */
+    .crypto-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      flex: 1;
+      padding: 12px;
+      overflow: auto;
+    }
+
+    @media (max-width: 800px) {
+      .crypto-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .crypto-card {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 12px;
+    }
+
+    .crypto-card h3 {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--blue);
+    }
+
+    .crypto-card textarea {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      resize: vertical;
+      padding: 6px 8px;
+      outline: none;
+      min-height: 60px;
+    }
+
+    .crypto-result {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 6px 8px;
+      color: var(--green);
+      word-break: break-all;
+      min-height: 32px;
+    }
+
+    /* ── Path tab ────────────────────────────────────── */
+    .tool-form {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 1;
+      padding: 12px;
+      overflow: auto;
+    }
+
+    .tool-group {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .tool-group h3 {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--blue);
+    }
+
+    .tool-result {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 5px 8px;
+      color: var(--green);
+      min-height: 28px;
+      word-break: break-all;
+    }
+
+    .tool-result.err {
+      color: var(--red);
+    }
+
+    /* ── Transform tab ────────────────────────────────── */
+    /* uses .split + .panel */
+
+    /* ── Ecosystem tab ─────────────────────────────────── */
+    .eco-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      flex: 1;
+      padding: 12px;
+      overflow: auto;
+    }
+
+    @media (max-width: 800px) {
+      .eco-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .eco-card {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 12px;
+      min-height: 0;
+    }
+
+    .eco-card h3 {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--blue);
+      flex-shrink: 0;
+    }
+
+    .eco-card p.desc {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+      flex-shrink: 0;
+    }
+
+    .eco-card textarea {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      resize: vertical;
+      padding: 6px 8px;
+      outline: none;
+      flex: 1;
+      min-height: 80px;
+    }
+
+    .eco-result {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 6px 8px;
+      color: var(--green);
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      flex: 1;
+      min-height: 60px;
+    }
+
+    .eco-result.err {
+      color: var(--red);
+    }
+
+    .eco-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      background: rgba(86, 156, 214, .12);
+      color: var(--blue);
+      border: 1px solid rgba(86, 156, 214, .25);
+    }
+
+    /* ── Bottom bar ───────────────────────────────────── */
+    .bottombar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 12px;
+      background: var(--accent);
+      font-size: 0.72rem;
+      color: rgba(255, 255, 255, .85);
+      flex-shrink: 0;
+    }
+
+    .bottombar a {
+      color: inherit;
       text-decoration: none;
     }
 
-    footer a:hover {
-      color: var(--text);
+    .bottombar a:hover {
+      text-decoration: underline;
+    }
+
+    .bottombar .bb-right {
+      margin-left: auto;
+      display: flex;
+      gap: 10px;
+    }
+
+    /* ── Semver tab ───────────────────────────────────── */
+    .semver-wrap {
+      flex: 1;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow: auto;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 10px;
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+
+    .tag-green {
+      background: rgba(78, 201, 176, .15);
+      color: var(--green);
+      border: 1px solid rgba(78, 201, 176, .3);
+    }
+
+    .tag-blue {
+      background: rgba(86, 156, 214, .15);
+      color: var(--blue);
+      border: 1px solid rgba(86, 156, 214, .3);
+    }
+
+    .tag-red {
+      background: rgba(244, 135, 113, .15);
+      color: var(--red);
+      border: 1px solid rgba(244, 135, 113, .3);
     }
   </style>
 </head>
 
 <body>
-  <div class="app">
-    <header>
-      <div class="logo">bun-browser <small>WebAssembly demo</small></div>
-      <select id="mode" title="执行模式">
-        <option value="eval">eval 模式 (直接执行脚本)</option>
-        <option value="run" selected>run 模式 (CJS + require)</option>
-      </select>
-      <button class="primary" id="run" disabled title="Ctrl+Enter">▶ 运行</button>
-      <button id="clear">清空输出</button>
+  <div class="shell">
+
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="logo">🍞 bun-browser <sub>WebAssembly</sub></div>
+      <div class="topbar-sep"></div>
+      <nav class="nav-tabs">
+        <div class="nav-tab active" data-tab="exec">
+          <span class="tab-icon">▶</span> 代码执行
+        </div>
+        <div class="nav-tab" data-tab="transform">
+          <span class="tab-icon">⚡</span> TS 转译
+        </div>
+        <div class="nav-tab" data-tab="bundler">
+          <span class="tab-icon">📦</span> Bundler
+        </div>
+        <div class="nav-tab" data-tab="vfs">
+          <span class="tab-icon">🗂</span> VFS 文件系统
+        </div>
+        <div class="nav-tab" data-tab="crypto">
+          <span class="tab-icon">🔐</span> 加密 & 压缩
+        </div>
+        <div class="nav-tab" data-tab="path">
+          <span class="tab-icon">📁</span> 路径 & URL
+        </div>
+        <div class="nav-tab" data-tab="semver">
+          <span class="tab-icon">🏷</span> Semver
+        </div>
+        <div class="nav-tab" data-tab="ecosystem">
+          <span class="tab-icon">🧪</span> 生态验证
+        </div>
+        <div class="nav-tab" data-tab="npm-install">
+          <span class="tab-icon">📥</span> npm 安装
+        </div>
+        <div class="nav-tab" data-tab="threads">
+          <span class="tab-icon">🧵</span> 多线程
+        </div>
+        <div class="nav-tab" data-tab="bun-apis">
+          <span class="tab-icon">🍞</span> Bun API
+        </div>
+      </nav>
       <div class="spacer"></div>
-      <div class="status-bar">
-        <span class="status-dot"></span>
-        <span id="status">初始化中 …</span>
+      <div class="status-pill">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">初始化中…</span>
       </div>
     </header>
 
-    <div class="split">
-      <div class="panel">
-        <div class="panel-header"><span>编辑器</span><span style="color:#555">Ctrl+Enter 运行 · Tab 缩进</span></div>
-        <textarea id="code" spellcheck="false">// bun-browser 运行时 demo
-// 支持 CommonJS require、process.exit 等内置特性
+    <!-- Body -->
+    <div class="body">
 
-function fizzbuzz(n) {
-  const result = [];
-  for (let i = 1; i <= n; i++) {
-    if (i % 15 === 0)      result.push("FizzBuzz");
-    else if (i % 3 === 0)  result.push("Fizz");
-    else if (i % 5 === 0)  result.push("Buzz");
-    else                   result.push(String(i));
-  }
-  return result;
-}
+      <!-- ── Tab: 代码执行 ─────────────────────────────── -->
+      <div class="tab-page active" id="tab-exec">
+        <div class="split">
+          <div class="panel">
+            <div class="panel-head">
+              <span class="title">编辑器</span>
+              <div class="row">
+                <select id="exec-mode">
+                  <option value="eval">eval 模式</option>
+                  <option value="run" selected>run 模式 (CJS)</option>
+                </select>
+                <select id="exec-preset">
+                  <option value="">— 选例子 —</option>
+                  <option value="fizzbuzz">FizzBuzz</option>
+                  <option value="fibonacci">Fibonacci (迭代)</option>
+                  <option value="json">JSON 处理</option>
+                  <option value="array">数组函数式</option>
+                  <option value="class">Class + 原型</option>
+                  <option value="async">async/await 模拟</option>
+                  <option value="byteops">字节运算</option>
+                </select>
+                <button class="primary" id="exec-run" disabled title="Ctrl+Enter">▶ 运行</button>
+                <button id="exec-clear">清空</button>
+              </div>
+              <span class="hint">Ctrl+Enter 运行 · Tab 缩进</span>
+            </div>
+            <textarea id="exec-code" class="editor" spellcheck="false">// bun-browser · 代码执行 demo
+// run 模式：脚本加载进 VFS → require() 可用
 
-const lines = fizzbuzz(20);
-for (const line of lines) {
-  console.log(line);
-}
+const data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-console.log("\n完成! bun-browser 运行在浏览器 WebAssembly 上 🎉");
+const result = data
+  .filter(n => n % 2 === 0)
+  .map(n => n ** 2)
+  .reduce((acc, n) => acc + n, 0);
+
+console.log("偶数平方和:", result);
+
+// process.env 访问
+console.log("NODE_ENV:", process.env.NODE_ENV ?? "(未设置)");
+
+// Buffer
+const buf = Buffer.from("Hello from bun-browser 🎉");
+console.log("Buffer length:", buf.length);
+console.log("Base64:", buf.toString("base64"));
 </textarea>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <span class="title">输出</span>
+              <span id="exec-exit-code" style="font-size:0.75rem;"></span>
+            </div>
+            <pre id="exec-output" class="output"></pre>
+          </div>
+        </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-header"><span>输出</span></div>
-        <pre id="output"></pre>
-      </div>
-    </div>
+      <!-- ── Tab: TS 转译 ───────────────────────────────── -->
+      <div class="tab-page" id="tab-transform">
+        <div class="split">
+          <div class="panel">
+            <div class="panel-head">
+              <span class="title">TypeScript / JSX 源码</span>
+              <div class="row">
+                <select id="ts-preset">
+                  <option value="">— 选例子 —</option>
+                  <option value="ts-class">Class + 泛型</option>
+                  <option value="ts-decorator">装饰器风格</option>
+                  <option value="tsx-react">React JSX</option>
+                  <option value="ts-enum">Enum + 类型守卫</option>
+                </select>
+                <button class="primary" id="ts-run" disabled>⚡ 转译</button>
+              </div>
+            </div>
+            <textarea id="ts-input" class="editor" spellcheck="false">// TypeScript 源码 → 使用内置 bun_transform 转译
 
-    <footer>
-      <a href="https://github.com/oven-sh/bun" target="_blank">github.com/oven-sh/bun</a>
-      &nbsp;·&nbsp; bun-core.wasm · WebAssembly + JSI bridge
+interface User {
+  id: number;
+  name: string;
+  email?: string;
+}
+
+type Role = "admin" | "user" | "guest";
+
+function greet(user: User, role: Role): string {
+  const prefix = role === "admin" ? "👑 " : "";
+  return `${prefix}Hello, ${user.name}!`;
+}
+
+const users: User[] = [
+  { id: 1, name: "Alice", email: "alice@example.com" },
+  { id: 2, name: "Bob" },
+];
+
+users.forEach(u => {
+  console.log(greet(u, u.id === 1 ? "admin" : "user"));
+});
+</textarea>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <span class="title">转译结果 (JS)</span>
+              <span id="ts-errors" style="font-size:0.75rem;color:var(--red);"></span>
+            </div>
+            <pre id="ts-output" class="output"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: Bundler ───────────────────────────────── -->
+      <div class="tab-page" id="tab-bundler">
+        <div class="split">
+          <div class="panel">
+            <div class="panel-head">
+              <span class="title">入口文件 (VFS)</span>
+              <div class="row">
+                <select id="bundle-preset">
+                  <option value="">— 选例子 —</option>
+                  <option value="multi-module">多模块</option>
+                  <option value="define">define 替换</option>
+                  <option value="external">external 依赖</option>
+                </select>
+                <button class="primary" id="bundle-run" disabled>📦 打包</button>
+              </div>
+            </div>
+            <textarea id="bundle-input" class="editor" spellcheck="false">// 入口：/src/index.js  (包含两个模块)
+// 点击"打包"后会写入 VFS 并调用 bundle2
+
+// ── /src/utils.js ──────────────────────────────
+// export function add(a, b) { return a + b; }
+// export function mul(a, b) { return a * b; }
+//
+// ── /src/index.js ──────────────────────────────
+
+import { add, mul } from "./utils.js";
+
+const a = 6, b = 7;
+console.log(`${a} + ${b} = ${add(a, b)}`);
+console.log(`${a} × ${b} = ${mul(a, b)}`);
+
+export default { add, mul };
+</textarea>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <span class="title">Bundle 输出 (IIFE)</span>
+            </div>
+            <pre id="bundle-output" class="output"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: VFS 文件系统 ───────────────────────────── -->
+      <div class="tab-page" id="tab-vfs">
+        <div class="split">
+          <!-- left: file tree + actions -->
+          <div class="panel">
+            <div class="panel-head">
+              <span class="title">VFS 文件树</span>
+              <button id="vfs-refresh" disabled>↻ 刷新</button>
+              <button id="vfs-export-btn" disabled>⤓ 导出快照</button>
+            </div>
+            <div class="vfs-wrap" id="vfs-tree">(加载中…)</div>
+            <div class="vfs-actions">
+              <input type="text" id="vfs-new-path" placeholder="/path/to/file.js" />
+              <button id="vfs-mkdir-btn" disabled>mkdir</button>
+              <button id="vfs-write-btn" disabled>写文件</button>
+              <button id="vfs-rm-btn" disabled>rm</button>
+            </div>
+          </div>
+          <!-- right: file content viewer -->
+          <div class="panel">
+            <div class="panel-head">
+              <span class="title" id="vfs-open-name">选择文件查看</span>
+              <button id="vfs-run-btn" disabled>▶ 执行此文件</button>
+            </div>
+            <pre id="vfs-content" class="output"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: 加密 & 压缩 ───────────────────────────── -->
+      <div class="tab-page" id="tab-crypto">
+        <div class="crypto-grid">
+
+          <!-- Hash -->
+          <div class="crypto-card">
+            <h3>🔑 哈希摘要 (SHA-1/256/512/MD5)</h3>
+            <div class="row">
+              <select id="hash-algo">
+                <option value="0">SHA-1</option>
+                <option value="1" selected>SHA-256</option>
+                <option value="2">SHA-512</option>
+                <option value="3">SHA-384</option>
+                <option value="4">MD5</option>
+              </select>
+              <button id="hash-run" disabled>计算</button>
+            </div>
+            <textarea id="hash-input" rows="3" placeholder="输入要哈希的文本…">Hello, bun-browser!</textarea>
+            <div class="crypto-result" id="hash-result"></div>
+          </div>
+
+          <!-- Base64 -->
+          <div class="crypto-card">
+            <h3>📝 Base64 编码 / 解码</h3>
+            <div class="row">
+              <button id="b64-encode" disabled>编码</button>
+              <button id="b64-decode" disabled>解码</button>
+            </div>
+            <textarea id="b64-input" rows="3" placeholder="输入文本或 Base64 字符串…">Hello, 世界！🌍</textarea>
+            <div class="crypto-result" id="b64-result"></div>
+          </div>
+
+          <!-- Deflate / Inflate -->
+          <div class="crypto-card">
+            <h3>🗜 Deflate / Inflate 压缩</h3>
+            <div class="row">
+              <select id="compress-fmt">
+                <option value="gzip" selected>gzip</option>
+                <option value="zlib">zlib</option>
+                <option value="raw">raw</option>
+              </select>
+              <button id="deflate-run" disabled>压缩</button>
+              <button id="inflate-run" disabled>解压</button>
+            </div>
+            <textarea id="compress-input" rows="3"
+              placeholder="输入要压缩的文本…">The quick brown fox jumps over the lazy dog. 敏捷的棕色狐狸跳过懒狗。</textarea>
+            <div class="crypto-result" id="compress-result"></div>
+            <div style="font-size:0.72rem;color:var(--text-dim);margin-top:2px;" id="compress-info"></div>
+          </div>
+
+          <!-- integrity -->
+          <div class="crypto-card">
+            <h3>✅ SRI 完整性校验</h3>
+            <p style="font-size:0.75rem;color:var(--text-dim);line-height:1.5;">
+              输入原始文本 + SRI 字符串（sha256-… / sha512-… / sha1 hex），校验是否匹配。
+            </p>
+            <textarea id="integrity-data" rows="2" placeholder="原始数据…">Hello, bun-browser!</textarea>
+            <input type="text" id="integrity-sri" placeholder="sha256-..." style="width:100%;margin-top:4px;" />
+            <div class="row" style="margin-top:4px;">
+              <button id="integrity-gen" disabled>生成 sha256 SRI</button>
+              <button id="integrity-verify" disabled>校验</button>
+            </div>
+            <div class="crypto-result" id="integrity-result"></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Tab: 路径 & URL ─────────────────────────────── -->
+      <div class="tab-page" id="tab-path">
+        <div class="tool-form">
+
+          <div class="tool-group">
+            <h3>📁 路径工具 (pathNormalize / pathJoin / pathDirname)</h3>
+            <div class="row">
+              <input type="text" id="path-base" value="/home/user/../user/projects" style="flex:1;"
+                placeholder="base path" />
+              <input type="text" id="path-rel" value="./src/../lib/utils.ts" style="flex:1;"
+                placeholder="rel path (pathJoin)" />
+              <button id="path-run" disabled>计算</button>
+            </div>
+            <div style="display:grid;grid-template-columns:120px 1fr;gap:4px;align-items:center;font-size:0.82rem;">
+              <span style="color:var(--text-dim);">normalize(base)</span>
+              <div class="tool-result" id="path-normalize"></div>
+              <span style="color:var(--text-dim);">join(base, rel)</span>
+              <div class="tool-result" id="path-join"></div>
+              <span style="color:var(--text-dim);">dirname(join)</span>
+              <div class="tool-result" id="path-dirname"></div>
+            </div>
+          </div>
+
+          <div class="tool-group">
+            <h3>🌐 URL 解析 (urlParse)</h3>
+            <div class="row">
+              <input type="text" id="url-input"
+                value="https://user:pass@registry.example.com:8080/pkg/foo?version=1.0&tag=latest#readme"
+                style="flex:1;" placeholder="URL…" />
+              <button id="url-run" disabled>解析</button>
+            </div>
+            <pre class="tool-result" id="url-result" style="white-space:pre;min-height:80px;"></pre>
+          </div>
+
+          <div class="tool-group">
+            <h3>🔢 Semver 选择 (semverSelect)</h3>
+            <div class="row">
+              <input type="text" id="sv2-versions" value='["1.0.0","1.2.3","2.0.0","2.1.0-beta.1","3.0.0"]'
+                style="flex:2;" placeholder='["1.0.0","2.0.0"]' />
+              <input type="text" id="sv2-range" value="^2.0.0" style="flex:1;" placeholder="range" />
+              <button id="sv2-run" disabled>选择</button>
+            </div>
+            <div class="tool-result" id="sv2-result"></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Tab: Semver ─────────────────────────────────── -->
+      <div class="tab-page" id="tab-semver">
+        <div class="semver-wrap">
+          <div class="tool-group">
+            <h3>🏷 Semver 版本选择矩阵</h3>
+            <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:8px;">
+              给定一组可用版本，针对不同 range 查看 Zig semver 引擎的解析结果。
+            </p>
+            <div class="row">
+              <input type="text" id="sv-versions"
+                value='["0.9.0","1.0.0","1.2.3","1.9.9","2.0.0","2.1.0-beta.1","2.1.0","3.0.0-rc.1"]' style="flex:1;"
+                placeholder='["1.0.0","2.0.0",…]' />
+              <button id="sv-run" disabled>运行矩阵</button>
+            </div>
+            <div id="sv-matrix" style="margin-top:8px;"></div>
+          </div>
+
+          <div class="tool-group" style="margin-top:12px;">
+            <h3>📋 bun.lock 解析 (parseLockfile)</h3>
+            <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:8px;">
+              粘贴 bun.lock JSON 文本，Zig 引擎解析包图并返回摘要。
+            </p>
+            <textarea id="lockfile-input"
+              style="font-family:var(--font-mono);font-size:0.78rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:8px;resize:vertical;min-height:120px;outline:none;"
+              placeholder='{ "lockfileVersion": 1, "packages": { … } }'>{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "my-app", "dependencies": { "react": "^18.2.0" } }
+  },
+  "packages": {
+    "react@18.2.0": ["react", "18.2.0", { "loose-envify": "^1.1.0" }, "sha512-/3IjMdb2L9QbBdWiW5e3P2/npwMBaU9mHCSCUzNln0ZCYbcfTsGbTJrU/kGemdH2IWmB2ioZ+zkxtmq6g09fGQ=="],
+    "loose-envify@1.4.0": ["loose-envify", "1.4.0", { "js-tokens": "^3.0.0 || ^4.0.0" }, "sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f8ZWR74wjip2L5s6sQ=="]
+  }
+}</textarea>
+            <div class="row" style="margin-top:6px;">
+              <button id="lockfile-run" disabled>解析</button>
+            </div>
+            <pre class="tool-result" id="lockfile-result"
+              style="white-space:pre-wrap;min-height:60px;margin-top:6px;"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: 生态验证 ──────────────────────────────── -->
+      <div class="tab-page" id="tab-ecosystem">
+        <div class="eco-grid">
+
+          <!-- npm / package.json -->
+          <div class="eco-card">
+            <h3>📦 npm · package.json 依赖解析</h3>
+            <p class="desc">
+              模拟 <code>bun install</code> 解析流程：从 package.json 提取依赖，通过 Zig semver 引擎
+              为每个 dep 从可用版本列表中选出最优版本，输出解析结果表格。
+            </p>
+            <textarea id="npm-pkgjson" rows="6">{
+  "name": "my-app",
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "lodash": "^4.17.0",
+    "axios": "^1.6.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0"
+  }
+}</textarea>
+            <div class="row">
+              <button id="npm-run" disabled>🔍 解析依赖</button>
+              <span id="npm-badge" class="eco-badge" style="display:none"></span>
+            </div>
+            <div class="eco-result" id="npm-result"></div>
+          </div>
+
+          <!-- Node.js API 兼容 -->
+          <div class="eco-card">
+            <h3>🟢 Node.js · 内置 API 兼容验证</h3>
+            <p class="desc">
+              在 bun-core.wasm 中运行使用 Node.js 内置 API 的代码：
+              <code>path</code>、<code>Buffer</code>、<code>process</code>、<code>os</code>、<code>crypto</code> 等。
+            </p>
+            <select id="nodejs-preset" style="flex-shrink:0">
+              <option value="path">path 模块</option>
+              <option value="buffer">Buffer 操作</option>
+              <option value="process">process / env</option>
+              <option value="events">EventEmitter</option>
+              <option value="stream">Stream Transform</option>
+              <option value="util">util / assert</option>
+            </select>
+            <textarea id="nodejs-code" class="editor" rows="8" spellcheck="false"></textarea>
+            <div class="row">
+              <button id="nodejs-run" disabled class="primary">▶ 验证</button>
+              <button id="nodejs-clear">清空</button>
+              <span id="nodejs-exit" style="font-size:0.75rem;"></span>
+            </div>
+            <pre class="eco-result" id="nodejs-output"></pre>
+          </div>
+
+          <!-- Vite 配置模拟 -->
+          <div class="eco-card">
+            <h3>⚡ Vite · 配置 & 构建模拟</h3>
+            <p class="desc">
+              模拟 Vite 生产构建：<code>define</code> 替换 <code>import.meta.env.*</code>，
+              Tree-shaking dead code，external React，生成 IIFE bundle。
+            </p>
+            <select id="vite-preset">
+              <option value="basic">基础 define 替换</option>
+              <option value="plugin">插件系统模拟</option>
+              <option value="ssr">SSR 模式 (CJS)</option>
+            </select>
+            <textarea id="vite-input" class="editor" rows="8" spellcheck="false"></textarea>
+            <div class="row">
+              <button id="vite-transform" disabled>⚡ 转译</button>
+              <button id="vite-bundle" disabled>📦 Bundle</button>
+            </div>
+            <pre class="eco-result" id="vite-output"></pre>
+          </div>
+
+          <!-- Vite React TypeScript -->
+          <div class="eco-card">
+            <h3>⚛️ Vite + React + TypeScript 项目</h3>
+            <p class="desc">
+              完整 Vite React TS 项目写入 VFS：<code>App.tsx</code>、<code>hooks/useCounter.ts</code>、
+              <code>main.tsx</code>。依次转译所有 TS/TSX 文件，再 bundle 为一个 IIFE。
+            </p>
+            <div class="row" style="flex-wrap:nowrap;gap:4px;">
+              <select id="vrt-file" style="flex:1;">
+                <option value="App.tsx">App.tsx</option>
+                <option value="hooks/useCounter.ts">hooks/useCounter.ts</option>
+                <option value="main.tsx">main.tsx</option>
+                <option value="types.ts">types.ts</option>
+              </select>
+              <button id="vrt-transform" disabled>⚡ 转译所选</button>
+              <button id="vrt-bundle-all" disabled>📦 Bundle 全部</button>
+            </div>
+            <pre class="eco-result" id="vrt-output"></pre>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Tab: npm 安装 ───────────────────────────── -->
+      <div class="tab-page" id="tab-npm-install">
+        <div class="split">
+          <div class="panel">
+            <div class="panel-head"><span>📥 npm 包安装 (installPackages)</span></div>
+            <div class="tool-form">
+              <div class="tool-group">
+                <h3>📦 依赖列表</h3>
+                <p style="font-size:0.78rem;color:var(--text-dim);">
+                  真实安装 npm 包：fetch registry → 解析 tarball → 写入 /node_modules VFS
+                </p>
+                <textarea id="npm-install-deps" class="editor" rows="6" spellcheck="false">{
+  "ms": "^2.1.0",
+  "debug": "^4.3.0"
+}</textarea>
+                <div class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px;">
+                  <button id="npm-install-run" disabled class="primary">📥 安装</button>
+                  <label style="font-size:0.8rem;display:flex;align-items:center;gap:4px;">
+                    <input type="checkbox" id="npm-install-transitive" checked /> 递归传递依赖
+                  </label>
+                  <button id="npm-install-clear">清空</button>
+                </div>
+              </div>
+              <div class="tool-group">
+                <h3>📋 安装进度</h3>
+                <pre id="npm-install-progress"
+                  style="min-height:80px;white-space:pre-wrap;font-size:0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;overflow-y:auto;max-height:200px;"></pre>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span>安装结果</span></div>
+            <div id="npm-install-result" style="padding:12px;overflow-y:auto;height:100%;font-size:0.8rem;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: 多线程 ─────────────────────────────── -->
+      <div class="tab-page" id="tab-threads">
+        <div class="semver-wrap">
+
+          <div class="tool-group">
+            <h3>🧵 线程能力检测 (detectThreadCapability)</h3>
+            <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:8px;">
+              检测当前浏览器上下文是否支持 SharedArrayBuffer / Atomics 多线程。
+              bun-browser 在启用 COOP/COEP 隔离的页面可使用真实 wasm 线程池。
+            </p>
+            <div class="row" style="margin-bottom:10px;">
+              <button id="thread-detect" class="primary">🔍 检测线程能力</button>
+            </div>
+            <div id="thread-capability-grid"
+              style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;"></div>
+          </div>
+
+          <div class="tool-group" style="margin-top:12px;">
+            <h3>🔄 SAB Ring Buffer 演示 (createSabRing)</h3>
+            <p style="font-size:0.78rem;color:var(--text-dim);margin-bottom:8px;">
+              演示 SharedArrayBuffer-backed 环形缓冲区：写入字节，读取并验证完整性。
+              跨 Worker 管道（stdin/stdout/stderr/IPC）使用此结构共享内存通道。
+            </p>
+            <div class="row">
+              <input type="text" id="sab-ring-input" value="Hello from bun-browser! 🍞" style="flex:1;"
+                placeholder="写入内容…" />
+              <select id="sab-ring-capacity">
+                <option value="64">容量 64B</option>
+                <option value="256" selected>容量 256B</option>
+                <option value="1024">容量 1KB</option>
+              </select>
+              <button id="sab-ring-run">▶ 演示</button>
+            </div>
+            <pre id="sab-ring-output"
+              style="margin-top:8px;min-height:60px;white-space:pre-wrap;font-size:0.78rem;background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;"></pre>
+          </div>
+
+          <div class="tool-group" style="margin-top:12px;">
+            <h3>📖 多线程启用说明</h3>
+            <div
+              style="font-size:0.82rem;line-height:1.7;color:var(--text-dim);background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:12px;">
+              <p>要启用 bun-browser 的完整多线程模式，服务器需返回以下响应头：</p>
+              <pre
+                style="color:var(--green);background:var(--surface);padding:8px;border-radius:3px;margin:6px 0;font-size:0.8rem;">Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp</pre>
+              <p>这些响应头启用 <code>crossOriginIsolated</code>，从而解锁：</p>
+              <ul style="margin:4px 0 0 16px;">
+                <li><code>SharedArrayBuffer</code> — 跨 Worker 共享内存</li>
+                <li><code>Atomics.wait</code> — Worker 内真阻塞等待</li>
+                <li><code>Atomics.waitAsync</code> — 主线程非阻塞等待</li>
+                <li><code>ThreadPool</code> — bun-browser 并发 wasm 线程池</li>
+              </ul>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Tab: Bun API 全览 ───────────────────────── -->
+      <div class="tab-page" id="tab-bun-apis">
+        <div class="eco-grid">
+
+          <!-- Module Resolution -->
+          <div class="eco-card">
+            <h3>🔗 模块解析 (resolve)</h3>
+            <p class="desc">从 VFS 解析模块路径，支持 Node.js 风格的裸包查找和 index.* 探测。</p>
+            <div class="row">
+              <input type="text" id="resolve-specifier" value="./utils" style="flex:2;" placeholder="specifier" />
+              <input type="text" id="resolve-from" value="/app/src/index.ts" style="flex:2;" placeholder="from path" />
+              <button id="resolve-run" disabled>解析</button>
+            </div>
+            <pre class="eco-result" id="resolve-result" style="min-height:50px;"></pre>
+          </div>
+
+          <!-- Source Map Lookup -->
+          <div class="eco-card">
+            <h3>🗺 Source Map 查找 (sourcemapLookup)</h3>
+            <p class="desc">在 source map 中查找生成代码某行/列对应的原始源码位置。</p>
+            <textarea id="sourcemap-input" rows="5"
+              style="width:100%;font-family:var(--font-mono);font-size:0.75rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:6px;resize:vertical;">{
+  "version": 3,
+  "sources": ["src/index.ts"],
+  "names": ["hello"],
+  "mappings": "AAAA,SAAS,KAAK,CAAC,CAAS;IACtB,OAAO,CAAC,GAAG,CAAC,OAAO,EAAE,CAAC,CAAC,CAAC;AAC1B,CAAC"
+}</textarea>
+            <div class="row" style="margin-top:4px;">
+              <label style="font-size:0.8rem;">行:</label>
+              <input type="number" id="sourcemap-line" value="1" min="0" style="width:60px;" />
+              <label style="font-size:0.8rem;">列:</label>
+              <input type="number" id="sourcemap-col" value="0" min="0" style="width:60px;" />
+              <button id="sourcemap-run" disabled>查找</button>
+            </div>
+            <pre class="eco-result" id="sourcemap-result" style="min-height:40px;"></pre>
+          </div>
+
+          <!-- HTML Rewrite -->
+          <div class="eco-card">
+            <h3>✂️ HTML 重写 (htmlRewrite)</h3>
+            <p class="desc">用 lol-html 规则重写 HTML：替换属性、注入内容、修改链接等。</p>
+            <textarea id="html-rewrite-input" rows="6"
+              style="width:100%;font-family:var(--font-mono);font-size:0.75rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:6px;resize:vertical;">&lt;html&gt;
+  &lt;head&gt;&lt;title&gt;My App&lt;/title&gt;&lt;/head&gt;
+  &lt;body&gt;
+    &lt;img src="/old/logo.png" alt="logo" /&gt;
+    &lt;a href="http://example.com"&gt;Visit&lt;/a&gt;
+  &lt;/body&gt;
+&lt;/html&gt;</textarea>
+            <div class="row" style="margin-top:4px;">
+              <select id="html-rewrite-preset">
+                <option value="img">替换 img src</option>
+                <option value="link">给链接加 target=_blank</option>
+                <option value="both">同时应用两条规则</option>
+              </select>
+              <button id="html-rewrite-run" disabled>重写</button>
+            </div>
+            <pre class="eco-result" id="html-rewrite-result" style="min-height:60px;white-space:pre-wrap;"></pre>
+          </div>
+
+          <!-- npm parseNpmMetadata -->
+          <div class="eco-card">
+            <h3>📡 npm 元数据解析 (parseNpmMetadata)</h3>
+            <p class="desc">用 Zig semver 引擎解析 npm registry 响应，选出最佳匹配版本（含 dist-tags 支持）。</p>
+            <textarea id="npm-meta-input" rows="8"
+              style="width:100%;font-family:var(--font-mono);font-size:0.75rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:6px;resize:vertical;">{
+  "name": "react",
+  "dist-tags": { "latest": "18.2.0", "beta": "18.3.0-beta.0" },
+  "versions": {
+    "17.0.2": { "version": "17.0.2", "dist": { "tarball": "https://…", "integrity": "sha512-abc" }, "dependencies": {} },
+    "18.0.0": { "version": "18.0.0", "dist": { "tarball": "https://…", "integrity": "sha512-def" }, "dependencies": {} },
+    "18.2.0": { "version": "18.2.0", "dist": { "tarball": "https://registry.npmjs.org/react/-/react-18.2.0.tgz", "integrity": "sha512-/3IjMdb2L9QbBdWiW5e3P2/npwMBaU9mHCSCUzNln0ZCYbcfTsGbTJrU/kGemdH2IWmB2ioZ+zkxtmq6g09fGQ==" }, "dependencies": { "loose-envify": "^1.1.0" } }
+  }
+}</textarea>
+            <div class="row">
+              <input type="text" id="npm-meta-range" value="^18.0.0" style="width:120px;"
+                placeholder="range / dist-tag" />
+              <button id="npm-meta-run" disabled>解析</button>
+            </div>
+            <pre class="eco-result" id="npm-meta-result" style="min-height:60px;"></pre>
+          </div>
+
+          <!-- writeLockfile -->
+          <div class="eco-card">
+            <h3>🔒 Lockfile 序列化 (writeLockfile)</h3>
+            <p class="desc">将已解析的包列表序列化为 bun.lock 文本。</p>
+            <textarea id="write-lockfile-input" rows="5"
+              style="width:100%;font-family:var(--font-mono);font-size:0.75rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:6px;resize:vertical;">[
+  { "key": "react@18.2.0", "name": "react", "version": "18.2.0" },
+  { "key": "react-dom@18.2.0", "name": "react-dom", "version": "18.2.0" },
+  { "key": "loose-envify@1.4.0", "name": "loose-envify", "version": "1.4.0" }
+]</textarea>
+            <div class="row" style="margin-top:4px;">
+              <button id="write-lockfile-run" disabled>序列化</button>
+            </div>
+            <pre class="eco-result" id="write-lockfile-result" style="min-height:60px;"></pre>
+          </div>
+
+          <!-- resolveGraph -->
+          <div class="eco-card">
+            <h3>🕸 依赖图解析 (resolveGraph)</h3>
+            <p class="desc">BFS 展开完整依赖图（使用内置 mock metadata），返回已解析包列表和缺失包列表。</p>
+            <textarea id="resolve-graph-deps" rows="4"
+              style="width:100%;font-family:var(--font-mono);font-size:0.75rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:6px;resize:vertical;">{
+  "react": "^18.2.0",
+  "ms": "^2.1.0"
+}</textarea>
+            <div class="row" style="margin-top:4px;">
+              <button id="resolve-graph-run" disabled>解析图</button>
+            </div>
+            <pre class="eco-result" id="resolve-graph-result" style="min-height:60px;"></pre>
+          </div>
+
+        </div>
+      </div>
+
+    </div><!-- /body -->
+
+    <!-- Bottom bar -->
+    <footer class="bottombar">
+      <span>bun-core.wasm · WebAssembly + JSI bridge</span>
+      <span class="bb-right">
+        <a href="https://github.com/oven-sh/bun" target="_blank">github.com/oven-sh/bun</a>
+        <span>·</span>
+        <span id="wasm-size">—</span>
+      </span>
     </footer>
-  </div>
+
+  </div><!-- /shell -->
+
   <script type="module" src="./main.ts"></script>
 </body>
 

@@ -9,6 +9,8 @@
 //!   bun_browser_run(ptr, len) i32                 — run an entry path from VFS
 //!   bun_browser_eval(sp,sl,fp,fl) i32             — eval raw JS source
 //!   bun_vfs_load_snapshot(ptr, len) u32           — load VFS snapshot
+//!   bun_vfs_dump_snapshot() u64                    — dump current VFS as snapshot (T5.6.1)
+//!   bun_vfs_read_file(ptr, len) u64              — read a single file from VFS; returns packed ptr+len (host must bun_free)
 //!   bun_tick() u32                                — drive event loop
 //!   bun_vfs_write(p,pl,d,dl) i32                 — write a file into VFS
 //!   jsi_host_invoke(id,this,argv,argc) u32        — HostFn dispatch
@@ -215,541 +217,62 @@ fn processExitFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!
 // Built-in module sources (path, fs)
 // ──────────────────────────────────────────────────────────
 
-const PATH_MODULE_SRC: []const u8 =
-    \\const sep = '/';
-    \\function normalize(p) {
-    \\  const abs = p.startsWith('/');
-    \\  const segs = p.split('/').reduce((a, s) => {
-    \\    if (s === '' || s === '.') return a;
-    \\    if (s === '..') { a.pop(); return a; }
-    \\    a.push(s); return a;
-    \\  }, []);
-    \\  return (abs ? '/' : '') + segs.join('/');
-    \\}
-    \\function join(...parts) { return normalize(parts.filter(Boolean).join('/')); }
-    \\function resolve(...ps) {
-    \\  let r = typeof globalThis.__bun_cwd === 'string' ? globalThis.__bun_cwd : '/';
-    \\  for (const p of ps) r = p.startsWith('/') ? p : r.endsWith('/') ? r+p : r+'/'+p;
-    \\  return normalize(r);
-    \\}
-    \\function dirname(p) { const i = p.lastIndexOf('/'); return i <= 0 ? (i===0?'/':'.') : p.slice(0,i); }
-    \\function basename(p, ext) { let b = p.split('/').pop() || ''; if (ext && b.endsWith(ext)) b = b.slice(0, b.length - ext.length); return b; }
-    \\function extname(p) { const b = basename(p); const i = b.lastIndexOf('.'); return i > 0 ? b.slice(i) : ''; }
-    \\function isAbsolute(p) { return p.startsWith('/'); }
-    \\function relative(from, to) {
-    \\  const f = resolve(from).split('/').filter(Boolean);
-    \\  const t = resolve(to).split('/').filter(Boolean);
-    \\  let i = 0; while (i < f.length && f[i] === t[i]) i++;
-    \\  return [...Array(f.length - i).fill('..'), ...t.slice(i)].join('/');
-    \\}
-    \\module.exports = { sep, normalize, join, resolve, dirname, basename, extname, isAbsolute, relative, posix: module.exports };
-;
+const PATH_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/path.js");
 
-const URL_MODULE_SRC: []const u8 =
-    \\// Phase 5.1 T5.1.4: prefer __bun_url_parse (Zig std.Uri backed) over browser URL
-    \\var _urlParse=(typeof __bun_url_parse!=='undefined')?__bun_url_parse:null;
-    \\var _URL=(typeof URL!=='undefined'?URL:(globalThis.URL||null));
-    \\function fileURLToPath(url){
-    \\  var href=typeof url==='string'?url:url.href;
-    \\  if(_urlParse){try{var r=_urlParse(href);if(r)return r.pathname||href;}catch(e){}}
-    \\  if(!_URL)return href.replace(/^file:\/\//,'');
-    \\  try{return new _URL(href).pathname;}catch(e){return href;}
-    \\}
-    \\function pathToFileURL(path){
-    \\  var p=path&&path[0]==='/'?path:'/'+path;
-    \\  if(_urlParse){try{var r=_urlParse('file://'+p);if(r)return r;}catch(e){}}
-    \\  if(_URL)return new _URL('file://'+p);
-    \\  return{href:'file://'+p,pathname:p};
-    \\}
-    \\function parse(urlStr){
-    \\  if(_urlParse){try{return _urlParse(urlStr);}catch(e){return null;}}
-    \\  if(!_URL)return null;
-    \\  try{var u=new _URL(urlStr);return{href:u.href,protocol:u.protocol,hostname:u.hostname,port:u.port||null,pathname:u.pathname,search:u.search||null,hash:u.hash||null,host:u.host,auth:null};}
-    \\  catch(e){return null;}
-    \\}
-    \\function format(urlObj){
-    \\  if(typeof urlObj==='string')return urlObj;
-    \\  if(urlObj&&typeof urlObj.href==='string')return urlObj.href;
-    \\  return '';
-    \\}
-    \\module.exports={URL:_URL,fileURLToPath:fileURLToPath,pathToFileURL:pathToFileURL,parse:parse,format:format};
-;
+const URL_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/url.js");
 
-const UTIL_MODULE_SRC: []const u8 =
-    \\function format(fmt){
-    \\  if(typeof fmt!=='string'){var a=Array.prototype.slice.call(arguments);return a.map(function(x){try{return typeof x==='object'&&x!==null?JSON.stringify(x):String(x);}catch(e){return String(x);}}).join(' ');}
-    \\  var i=1,args=arguments;
-    \\  var s=fmt.replace(/%[sdifjoO%]/g,function(m){
-    \\    if(m==='%%')return'%';if(i>=args.length)return m;var v=args[i++];
-    \\    if(m==='%s')return String(v);if(m==='%d'||m==='%i')return Math.floor(Number(v));if(m==='%f')return Number(v);
-    \\    try{return JSON.stringify(v);}catch(e){return'[Circular]';}
-    \\  });
-    \\  if(i<args.length)s+=' '+Array.prototype.slice.call(args,i).join(' ');
-    \\  return s;
-    \\}
-    \\function inspect(v){try{return JSON.stringify(v,null,2);}catch(e){return String(v);}}
-    \\function promisify(fn){return function(){var a=Array.prototype.slice.call(arguments);return new Promise(function(res,rej){fn.apply(null,a.concat(function(e,v){e?rej(e):res(v);}));});};}
-    \\module.exports={format:format,inspect:inspect,promisify:promisify,debuglog:function(){return function(){};},deprecate:function(fn){return fn;},isDeepStrictEqual:function(a,b){return JSON.stringify(a)===JSON.stringify(b);}};
-;
+const UTIL_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/util.js");
 
-const BUFFER_POLYFILL_SRC: []const u8 =
-    \\(function(){
-    \\  if(globalThis.Buffer&&globalThis.Buffer.isBuffer)return;
-    \\  var Buf={
-    \\    from:function(src,enc){
-    \\      if(typeof src==='string'){
-    \\        enc=enc||'utf8';
-    \\        if(enc==='hex'){var h=new Uint8Array(src.length>>1);for(var i=0;i<h.length;i++)h[i]=parseInt(src.slice(i*2,i*2+2),16);return Buf._w(h);}
-    \\        if(enc==='base64'){var bin=atob(src),b=new Uint8Array(bin.length);for(var j=0;j<bin.length;j++)b[j]=bin.charCodeAt(j);return Buf._w(b);}
-    \\        return Buf._w(new TextEncoder().encode(src));
-    \\      }
-    \\      if(src instanceof ArrayBuffer)return Buf._w(new Uint8Array(src));
-    \\      if(ArrayBuffer.isView(src))return Buf._w(new Uint8Array(src.buffer,src.byteOffset,src.byteLength));
-    \\      if(Array.isArray(src))return Buf._w(new Uint8Array(src));
-    \\      return Buf._w(new Uint8Array(0));
-    \\    },
-    \\    alloc:function(n,fill){var b=new Uint8Array(n);if(fill!==undefined)b.fill(typeof fill==='number'?fill:fill.charCodeAt(0));return Buf._w(b);},
-    \\    allocUnsafe:function(n){return Buf._w(new Uint8Array(n));},
-    \\    isBuffer:function(v){return v!=null&&v._isBunBuf===true;},
-    \\    concat:function(list,len){
-    \\      if(len===undefined)len=list.reduce(function(a,b){return a+b.byteLength;},0);
-    \\      var r=new Uint8Array(len),off=0;
-    \\      for(var i=0;i<list.length;i++){r.set(list[i],off);off+=list[i].byteLength;}
-    \\      return Buf._w(r);
-    \\    },
-    \\    _w:function(u8){
-    \\      Object.defineProperty(u8,'_isBunBuf',{value:true,enumerable:false,configurable:true});
-    \\      u8.toString=function(enc){
-    \\        enc=enc||'utf8';
-    \\        if(enc==='utf8'||enc==='utf-8')return new TextDecoder().decode(this);
-    \\        if(enc==='base64')return btoa(String.fromCharCode.apply(null,Array.from(this)));
-    \\        if(enc==='hex')return Array.from(this).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
-    \\        return String.fromCharCode.apply(null,Array.from(this));
-    \\      };
-    \\      return u8;
-    \\    }
-    \\  };
-    \\  globalThis.Buffer=Buf;
-    \\})();
-;
+const BUFFER_POLYFILL_SRC: []const u8 = @embedFile("js/browser-polyfills/buffer-polyfill.js");
 
 // ── Phase 5.8: Node.js 内置模块 polyfill（inline JS，供 requireFn + builtinPolyfillSource 使用）──
 
 /// `events` — 完整 EventEmitter 实现
-const EVENTS_MODULE_SRC: []const u8 =
-    \\function EventEmitter(){this._events=Object.create(null);this._maxListeners=0;}
-    \\EventEmitter.defaultMaxListeners=10;
-    \\EventEmitter.prototype.setMaxListeners=function(n){this._maxListeners=n;return this;};
-    \\EventEmitter.prototype.getMaxListeners=function(){return this._maxListeners||EventEmitter.defaultMaxListeners;};
-    \\EventEmitter.prototype.eventNames=function(){return Object.keys(this._events);};
-    \\EventEmitter.prototype.listeners=function(t){return(this._events[t]||[]).map(function(f){return f._orig||f;});};
-    \\EventEmitter.prototype.rawListeners=function(t){return(this._events[t]||[]).slice();};
-    \\EventEmitter.prototype.listenerCount=function(t){return(this._events[t]||[]).length;};
-    \\EventEmitter.listenerCount=function(ee,t){return ee.listenerCount(t);};
-    \\EventEmitter.prototype.on=EventEmitter.prototype.addListener=function(t,fn){
-    \\  if(!this._events[t])this._events[t]=[];
-    \\  this._events[t].push(fn);
-    \\  return this;
-    \\};
-    \\EventEmitter.prototype.once=function(t,fn){
-    \\  var self=this;
-    \\  function w(){self.removeListener(t,w);fn.apply(self,arguments);}
-    \\  w._orig=fn;
-    \\  return this.on(t,w);
-    \\};
-    \\EventEmitter.prototype.prependListener=function(t,fn){
-    \\  if(!this._events[t])this._events[t]=[];
-    \\  this._events[t].unshift(fn);
-    \\  return this;
-    \\};
-    \\EventEmitter.prototype.prependOnceListener=function(t,fn){
-    \\  var self=this;
-    \\  function w(){self.removeListener(t,w);fn.apply(self,arguments);}
-    \\  w._orig=fn;
-    \\  return this.prependListener(t,w);
-    \\};
-    \\EventEmitter.prototype.removeListener=EventEmitter.prototype.off=function(t,fn){
-    \\  var list=this._events[t];
-    \\  if(!list)return this;
-    \\  this._events[t]=list.filter(function(f){return f!==fn&&f._orig!==fn;});
-    \\  if(!this._events[t].length)delete this._events[t];
-    \\  return this;
-    \\};
-    \\EventEmitter.prototype.removeAllListeners=function(t){
-    \\  if(arguments.length&&t!==undefined)delete this._events[t];
-    \\  else this._events=Object.create(null);
-    \\  return this;
-    \\};
-    \\EventEmitter.prototype.emit=function(t){
-    \\  var list=this._events[t];
-    \\  if(!list||!list.length){
-    \\    if(t==='error'){var e=arguments[1];if(!(e instanceof Error))e=new Error('Unhandled "error" event');throw e;}
-    \\    return false;
-    \\  }
-    \\  var args=Array.prototype.slice.call(arguments,1);
-    \\  list.slice().forEach(function(f){f.apply(this,args);},this);
-    \\  return true;
-    \\};
-    \\function inherits(ctor,superCtor){
-    \\  ctor.super_=superCtor;
-    \\  ctor.prototype=Object.create(superCtor.prototype,{constructor:{value:ctor,writable:true,configurable:true}});
-    \\}
-    \\EventEmitter.inherits=inherits;
-    \\module.exports=EventEmitter;
-    \\module.exports.EventEmitter=EventEmitter;
-    \\module.exports.inherits=inherits;
-;
+const EVENTS_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/events.js");
 
 /// `buffer` — Buffer class, exports { Buffer }
 /// 比全局安装版（BUFFER_POLYFILL_SRC）更完整，支持 read/write 方法
-const BUFFER_MODULE_SRC: []const u8 =
-    \\(function(){
-    \\  var _enc=typeof TextEncoder!=='undefined'?new TextEncoder():null;
-    \\  var _dec=typeof TextDecoder!=='undefined'?new TextDecoder():null;
-    \\  function mkBuf(u8){
-    \\    if(!(u8 instanceof Uint8Array))u8=new Uint8Array(u8);
-    \\    Object.defineProperty(u8,'_isBunBuf',{value:true,enumerable:false,configurable:true});
-    \\    u8.toString=function(e){
-    \\      e=e||'utf8';
-    \\      if(e==='hex')return Array.from(this).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
-    \\      if(e==='base64'){var s='';for(var i=0;i<this.length;i++)s+=String.fromCharCode(this[i]);return btoa(s);}
-    \\      return _dec?_dec.decode(this):String.fromCharCode.apply(null,Array.from(this));
-    \\    };
-    \\    u8.equals=function(o){if(this.length!==o.length)return false;for(var i=0;i<this.length;i++)if(this[i]!==o[i])return false;return true;};
-    \\    u8.indexOf=function(v,off){
-    \\      off=off||0;
-    \\      if(typeof v==='number'){for(var i=off;i<this.length;i++)if(this[i]===v)return i;return -1;}
-    \\      var s=typeof v==='string'?(_enc?_enc.encode(v):new Uint8Array([].map.call(v,function(c){return c.charCodeAt(0);}))):v;
-    \\      outer:for(var i=off;i<=this.length-s.length;i++){for(var j=0;j<s.length;j++)if(this[i+j]!==s[j])continue outer;return i;}
-    \\      return -1;
-    \\    };
-    \\    u8.includes=function(v,off){return this.indexOf(v,off)>=0;};
-    \\    u8.readUInt8=function(o){return this[o||0];};
-    \\    u8.readInt8=function(o){var v=this[o||0];return v>=128?v-256:v;};
-    \\    u8.readUInt16BE=function(o){o=o||0;return(this[o]<<8)|this[o+1];};
-    \\    u8.readUInt16LE=function(o){o=o||0;return this[o]|(this[o+1]<<8);};
-    \\    u8.readUInt32BE=function(o){o=o||0;return((this[o]*0x1000000)+(this[o+1]<<16)+(this[o+2]<<8)+this[o+3])>>>0;};
-    \\    u8.readUInt32LE=function(o){o=o||0;return((this[o+3]*0x1000000)+(this[o+2]<<16)+(this[o+1]<<8)+this[o])>>>0;};
-    \\    u8.readInt32BE=function(o){return this.readUInt32BE(o)|0;};
-    \\    u8.readInt32LE=function(o){return this.readUInt32LE(o)|0;};
-    \\    u8.writeUInt8=function(v,o){this[o||0]=v&0xff;return(o||0)+1;};
-    \\    u8.writeUInt16BE=function(v,o){o=o||0;this[o]=(v>>>8)&0xff;this[o+1]=v&0xff;return o+2;};
-    \\    u8.writeUInt16LE=function(v,o){o=o||0;this[o]=v&0xff;this[o+1]=(v>>>8)&0xff;return o+2;};
-    \\    u8.writeUInt32BE=function(v,o){o=o||0;this[o]=(v>>>24)&0xff;this[o+1]=(v>>>16)&0xff;this[o+2]=(v>>>8)&0xff;this[o+3]=v&0xff;return o+4;};
-    \\    u8.writeUInt32LE=function(v,o){o=o||0;this[o]=v&0xff;this[o+1]=(v>>>8)&0xff;this[o+2]=(v>>>16)&0xff;this[o+3]=(v>>>24)&0xff;return o+4;};
-    \\    u8.write=function(s,off,len,e){off=off||0;e=e||'utf8';var b=_enc?_enc.encode(s):new Uint8Array([].map.call(s,function(c){return c.charCodeAt(0);}));if(len!==undefined)b=b.subarray(0,len);this.set(b,off);return b.length;};
-    \\    u8.copy=function(target,tOff,sOff,sEnd){var sub=this.subarray(sOff||0,sEnd||this.length);target.set(sub,tOff||0);return sub.length;};
-    \\    u8.slice=u8.subarray;
-    \\    return u8;
-    \\  }
-    \\  var Buffer={
-    \\    from:function(src,enc){
-    \\      if(typeof src==='string'){
-    \\        enc=enc||'utf8';
-    \\        if(enc==='hex'){var h=new Uint8Array(src.length>>1);for(var i=0;i<h.length;i++)h[i]=parseInt(src.slice(i*2,i*2+2),16);return mkBuf(h);}
-    \\        if(enc==='base64'){var bin=atob(src),b=new Uint8Array(bin.length);for(var j=0;j<bin.length;j++)b[j]=bin.charCodeAt(j);return mkBuf(b);}
-    \\        return mkBuf(_enc?_enc.encode(src):new Uint8Array([].map.call(src,function(c){return c.charCodeAt(0);})));
-    \\      }
-    \\      if(src instanceof ArrayBuffer)return mkBuf(new Uint8Array(src));
-    \\      if(ArrayBuffer.isView(src))return mkBuf(new Uint8Array(src.buffer,src.byteOffset,src.byteLength));
-    \\      if(typeof src==='number')return mkBuf(new Uint8Array(src));
-    \\      if(Array.isArray(src))return mkBuf(new Uint8Array(src));
-    \\      return mkBuf(new Uint8Array(0));
-    \\    },
-    \\    alloc:function(n,fill,e){var b=new Uint8Array(n);if(fill!==undefined){if(typeof fill==='string')b.fill(fill.charCodeAt(0));else b.fill(fill);}return mkBuf(b);},
-    \\    allocUnsafe:function(n){return mkBuf(new Uint8Array(n));},
-    \\    allocUnsafeSlow:function(n){return mkBuf(new Uint8Array(n));},
-    \\    isBuffer:function(v){return v!=null&&(v._isBunBuf===true||(v instanceof Uint8Array&&typeof v.toString==='function'&&v.toString.length<=1));},
-    \\    isEncoding:function(e){return['utf8','utf-8','hex','base64','ascii','latin1','binary','ucs2','utf16le'].indexOf((e||'').toLowerCase())>=0;},
-    \\    byteLength:function(s,e){if(s instanceof ArrayBuffer||ArrayBuffer.isView(s))return s.byteLength||s.length;e=(e||'utf8').toLowerCase();if(e==='hex')return(s.length>>1);if(e==='base64')return Math.floor(s.replace(/=/g,'').length*3/4);return _enc?_enc.encode(s).length:s.length;},
-    \\    concat:function(list,len){
-    \\      if(len===undefined)len=list.reduce(function(a,b){return a+(b.byteLength||b.length);},0);
-    \\      var r=new Uint8Array(len),off=0;
-    \\      for(var i=0;i<list.length;i++){r.set(list[i],off);off+=list[i].byteLength||list[i].length;}
-    \\      return mkBuf(r);
-    \\    },
-    \\    compare:function(a,b){for(var i=0;i<Math.min(a.length,b.length);i++){if(a[i]<b[i])return -1;if(a[i]>b[i])return 1;}return a.length<b.length?-1:a.length>b.length?1:0;},
-    \\    poolSize:8192,
-    \\  };
-    \\  if(typeof globalThis!=='undefined'&&!globalThis.Buffer)globalThis.Buffer=Buffer;
-    \\  module.exports={Buffer:Buffer,SlowBuffer:Buffer.alloc,kMaxLength:2147483647,INSPECT_MAX_BYTES:50};
-    \\  module.exports.Buffer=Buffer;
-    \\})();
-;
+const BUFFER_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/buffer.js");
 
 /// `assert` — Node.js assert 模块
-const ASSERT_MODULE_SRC: []const u8 =
-    \\function AssertionError(msg,actual,expected){
-    \\  this.name='AssertionError';
-    \\  this.message=msg||'Assertion failed';
-    \\  this.actual=actual;this.expected=expected;
-    \\  if(Error.captureStackTrace)Error.captureStackTrace(this,AssertionError);
-    \\}
-    \\AssertionError.prototype=Object.create(Error.prototype,{constructor:{value:AssertionError,writable:true,configurable:true}});
-    \\function assert(val,msg){if(!val)throw new AssertionError(typeof msg==='string'?msg:msg instanceof Error?msg.message:'Assertion failed',val,true);}
-    \\assert.ok=assert;
-    \\assert.fail=function(msg){throw new AssertionError(msg||'assert.fail()');};
-    \\assert.strictEqual=function(a,b,msg){if(a!==b)throw new AssertionError(msg||(a+' !== '+b),a,b);};
-    \\assert.notStrictEqual=function(a,b,msg){if(a===b)throw new AssertionError(msg||'Expected values to differ',a,b);};
-    \\assert.deepStrictEqual=function(a,b,msg){if(JSON.stringify(a)!==JSON.stringify(b))throw new AssertionError(msg||'Deep equal failed',a,b);};
-    \\assert.notDeepStrictEqual=function(a,b,msg){if(JSON.stringify(a)===JSON.stringify(b))throw new AssertionError(msg||'Values are deeply equal',a,b);};
-    \\assert.equal=function(a,b,msg){if(a!=b)throw new AssertionError(msg||(a+' != '+b),a,b);};
-    \\assert.notEqual=function(a,b,msg){if(a==b)throw new AssertionError(msg||'Expected not equal',a,b);};
-    \\assert.throws=function(fn,expected,msg){var threw=false,err=null;try{fn();}catch(e){threw=true;err=e;}if(!threw)throw new AssertionError(msg||'Missing expected exception');if(expected instanceof RegExp&&!expected.test(err.message))throw new AssertionError(msg||'Wrong error: '+err.message);};
-    \\assert.doesNotThrow=function(fn,expected,msg){try{fn();}catch(e){throw new AssertionError(msg||('Got unwanted exception: '+(e&&e.message||e)));}};
-    \\assert.rejects=function(p,expected,msg){return Promise.resolve(typeof p==='function'?p():p).then(function(){throw new AssertionError(msg||'Missing expected rejection');},function(e){if(expected instanceof RegExp&&!expected.test(e.message))throw new AssertionError(msg||'Wrong rejection: '+e.message);});};
-    \\assert.doesNotReject=function(p){return Promise.resolve(typeof p==='function'?p():p);};
-    \\assert.match=function(s,re,msg){if(!re.test(s))throw new AssertionError(msg||(s+' does not match '+re));};
-    \\assert.doesNotMatch=function(s,re,msg){if(re.test(s))throw new AssertionError(msg||(s+' matches '+re));};
-    \\assert.ifError=function(e){if(e!=null)throw e;};
-    \\assert.AssertionError=AssertionError;
-    \\module.exports=assert;
-;
+const ASSERT_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/assert.js");
 
 /// `querystring` — URL 查询字符串解析与序列化
-const QUERYSTRING_MODULE_SRC: []const u8 =
-    \\function qsEscape(s){
-    \\  return encodeURIComponent(String(s===null||s===undefined?'':s)).replace(/%20/g,'+').replace(/[!'()*]/g,function(c){return'%'+c.charCodeAt(0).toString(16).toUpperCase();});
-    \\}
-    \\function qsUnescape(s){
-    \\  try{return decodeURIComponent(String(s).replace(/\+/g,' '));}catch(e){return s;}
-    \\}
-    \\function stringify(obj,sep,eq,opts){
-    \\  sep=sep||'&';eq=eq||'=';
-    \\  if(!obj||typeof obj!=='object')return '';
-    \\  var enc=(opts&&opts.encodeURIComponent)||qsEscape;
-    \\  return Object.keys(obj).map(function(k){
-    \\    var v=obj[k];
-    \\    if(Array.isArray(v))return v.map(function(vi){return enc(k)+eq+enc(vi===null||vi===undefined?'':vi);}).join(sep);
-    \\    return enc(k)+eq+enc(v===null||v===undefined?'':v);
-    \\  }).join(sep);
-    \\}
-    \\function parse(str,sep,eq,opts){
-    \\  sep=sep||'&';eq=eq||'=';
-    \\  var maxKeys=(opts&&opts.maxKeys)||1000;
-    \\  var dec=(opts&&opts.decodeURIComponent)||qsUnescape;
-    \\  var r=Object.create(null);
-    \\  if(!str)return r;
-    \\  var pairs=String(str).split(sep);
-    \\  if(maxKeys>0&&pairs.length>maxKeys)pairs=pairs.slice(0,maxKeys);
-    \\  pairs.forEach(function(p){
-    \\    var idx=p.indexOf(eq);
-    \\    var k=idx<0?p:p.slice(0,idx);
-    \\    var v=idx<0?'':p.slice(idx+1);
-    \\    k=dec(k);v=dec(v);
-    \\    if(k in r){if(Array.isArray(r[k]))r[k].push(v);else r[k]=[r[k],v];}
-    \\    else r[k]=v;
-    \\  });
-    \\  return r;
-    \\}
-    \\module.exports={stringify:stringify,parse:parse,encode:stringify,decode:parse,escape:qsEscape,unescape:qsUnescape};
-;
+const QUERYSTRING_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/querystring.js");
 
 /// `string_decoder` — StringDecoder
-const STRING_DECODER_MODULE_SRC: []const u8 =
-    \\function StringDecoder(enc){
-    \\  this.enc=(enc||'utf8').toLowerCase().replace(/[-_]/g,'');
-    \\  this._decoder=typeof TextDecoder!=='undefined'?new TextDecoder(this.enc==='utf8'?'utf-8':this.enc,{fatal:false,ignoreBOM:true}):null;
-    \\}
-    \\StringDecoder.prototype.write=function(buf){
-    \\  if(this._decoder)return this._decoder.decode(buf instanceof Uint8Array?buf:new Uint8Array(buf),{stream:true});
-    \\  var u8=buf instanceof Uint8Array?buf:new Uint8Array(buf);
-    \\  return String.fromCharCode.apply(null,Array.from(u8));
-    \\};
-    \\StringDecoder.prototype.end=function(buf){
-    \\  var s=buf?this.write(buf):'';
-    \\  this._decoder=typeof TextDecoder!=='undefined'?new TextDecoder(this.enc==='utf8'?'utf-8':this.enc,{fatal:false,ignoreBOM:true}):null;
-    \\  return s;
-    \\};
-    \\StringDecoder.prototype.text=StringDecoder.prototype.write;
-    \\module.exports={StringDecoder:StringDecoder};
-;
+const STRING_DECODER_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/string_decoder.js");
 
 // ── Phase 5.9: 更多 Node.js 内置模块 polyfill ────────────────────────────────
 
 /// stream — Readable/Writable/Transform/PassThrough/Duplex/pipeline/finished
 /// 依赖 require('events') (Phase 5.8 EventEmitter)
-const STREAM_MODULE_SRC: []const u8 =
-    \\var EE=require('events');
-    \\function inherits(C,P){C.prototype=Object.create(P.prototype);C.prototype.constructor=C;}
-    \\function Readable(o){EE.call(this);this.readable=true;this._rs={buf:[],ended:false,flowing:false,hwm:(o&&o.highWaterMark)||16384};if(o&&o.read)this._read=o.read;}
-    \\inherits(Readable,EE);
-    \\Readable.prototype._read=function(){this.push(null);};
-    \\Readable.prototype.push=function(c){if(c===null){if(!this._rs.ended){this._rs.ended=true;this.emit('end');}return false;}this._rs.buf.push(c);if(this._rs.flowing)this.emit('data',c);return true;};
-    \\Readable.prototype.read=function(){return this._rs.buf.length?this._rs.buf.shift():null;};
-    \\Readable.prototype.pipe=function(d,o){var self=this;this.on('data',function(c){d.write(c);});this.on('end',function(){if(!o||o.end!==false)d.end();});this.resume();d.emit('pipe',self);return d;};
-    \\Readable.prototype.unpipe=function(d){this.removeAllListeners('data');if(d)d.emit('unpipe',this);return this;};
-    \\Readable.prototype.resume=function(){if(!this._rs.flowing){this._rs.flowing=true;while(this._rs.buf.length)this.emit('data',this._rs.buf.shift());if(this._rs.ended)this.emit('end');}return this;};
-    \\Readable.prototype.pause=function(){this._rs.flowing=false;return this;};
-    \\Readable.prototype.destroy=function(e){if(e)this.emit('error',e);this.emit('close');return this;};
-    \\Readable.prototype.setEncoding=function(){return this;};
-    \\if(typeof Symbol!=='undefined'&&Symbol.asyncIterator){Readable.prototype[Symbol.asyncIterator]=function(){var self=this;return{next:function(){return new Promise(function(res){var c=self.read();if(c!==null)return res({value:c,done:false});if(self._rs.ended)return res({value:undefined,done:true});self.once('data',function(v){res({value:v,done:false});});self.once('end',function(){res({value:undefined,done:true});});});},return:function(){return Promise.resolve({done:true});}};};};
-    \\Readable.from=function(iter,o){var r=new Readable(o);var items=Array.isArray(iter)?iter.slice():Array.from(iter);setTimeout(function(){for(var i=0;i<items.length;i++)r.push(items[i]);r.push(null);},0);return r;};
-    \\function Writable(o){EE.call(this);this.writable=true;this._ws={ended:false,hwm:(o&&o.highWaterMark)||16384};if(o&&o.write)this._write=o.write;if(o&&o.final)this._final=o.final;}
-    \\inherits(Writable,EE);
-    \\Writable.prototype._write=function(c,e,cb){cb();};
-    \\Writable.prototype.write=function(c,e,cb){if(typeof e==='function'){cb=e;e='utf8';}if(this._ws.ended){this.emit('error',new Error('write after end'));return false;}this._write(c,e||'utf8',cb||function(){});return true;};
-    \\Writable.prototype.end=function(c,e,cb){if(typeof c==='function'){cb=c;c=null;}else if(typeof e==='function'){cb=e;e=null;}if(c!=null)this.write(c,e);this._ws.ended=true;var self=this;if(typeof this._final==='function')this._final(function(){self.emit('finish');if(typeof cb==='function')cb();});else{this.emit('finish');if(typeof cb==='function')cb();}return this;};
-    \\Writable.prototype.destroy=function(e){if(e)this.emit('error',e);this.emit('close');return this;};
-    \\Writable.prototype.setDefaultEncoding=function(){return this;};
-    \\function Duplex(o){Readable.call(this,o);this._ws={ended:false,hwm:(o&&o.highWaterMark)||16384};if(o&&o.write)this._write=o.write;if(o&&o.final)this._final=o.final;}
-    \\inherits(Duplex,Readable);
-    \\Duplex.prototype.write=Writable.prototype.write;Duplex.prototype.end=Writable.prototype.end;Duplex.prototype._write=Writable.prototype._write;Duplex.prototype.setDefaultEncoding=Writable.prototype.setDefaultEncoding;
-    \\function Transform(o){Duplex.call(this,o);if(o&&o.transform)this._transform=o.transform;if(o&&o.flush)this._flush=o.flush;}
-    \\inherits(Transform,Duplex);
-    \\Transform.prototype._transform=function(c,e,cb){cb(null,c);};
-    \\Transform.prototype._flush=function(cb){cb();};
-    \\Transform.prototype._write=function(c,e,cb){var self=this;this._transform(c,e,function(err,d){if(err){self.emit('error',err);return;}if(d!=null)self.push(d);cb();});};
-    \\Transform.prototype.end=function(c,e,cb){if(typeof c==='function'){cb=c;c=null;}else if(typeof e==='function'){cb=e;e=null;}if(c!=null)this.write(c,e);var self=this;this._flush(function(err,d){if(err){self.emit('error',err);return;}if(d!=null)self.push(d);self.push(null);self._ws.ended=true;self.emit('finish');if(typeof cb==='function')cb();});return this;};
-    \\function PassThrough(o){Transform.call(this,o);}
-    \\inherits(PassThrough,Transform);
-    \\PassThrough.prototype._transform=function(c,e,cb){cb(null,c);};
-    \\function pipeline(){var s=Array.prototype.slice.call(arguments);var cb=typeof s[s.length-1]==='function'?s.pop():null;if(s.length<2){if(cb)cb(new Error('need at least 2 streams'));return;}s[0].on('error',function(e){if(cb)cb(e);});for(var i=0;i<s.length-1;i++)s[i].pipe(s[i+1]);var last=s[s.length-1];if(last.once)last.once('finish',function(){if(cb)cb(null);});return last;}
-    \\function finished(s,o,cb){if(typeof o==='function'){cb=o;}var done=false;function d(e){if(!done){done=true;cb(e||null);}}s.once('end',d);s.once('finish',d);s.once('error',d);return function(){};}
-    \\var Stream=Readable;Stream.Readable=Readable;Stream.Writable=Writable;Stream.Duplex=Duplex;Stream.Transform=Transform;Stream.PassThrough=PassThrough;Stream.pipeline=pipeline;Stream.finished=finished;Stream.Stream=Stream;
-    \\module.exports=Stream;
-;
+const STREAM_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/stream.js");
 
 /// crypto — createHash(sha256/sha1)/createHmac/randomBytes/randomUUID/timingSafeEqual
 /// 纯 JS 实现（SHA-256 + SHA-1），无外部依赖（Buffer 通过 try/require 软依赖）
-const CRYPTO_MODULE_SRC: []const u8 =
-    \\function _u8(d){if(typeof d==='string')return new TextEncoder().encode(d);if(d instanceof Uint8Array)return d;if(d instanceof ArrayBuffer)return new Uint8Array(d);if(d&&d._data instanceof Uint8Array)return d._data;if(d&&d.buffer instanceof ArrayBuffer)return new Uint8Array(d.buffer,d.byteOffset||0,d.byteLength||d.length||0);return new Uint8Array(0);}
-    \\function _hex(b){return Array.from(b).map(function(x){return('0'+x.toString(16)).slice(-2);}).join('');}
-    \\function _rotr(x,n){return(x>>>n)|(x<<(32-n));}
-    \\function _rotl(x,n){return(x<<n)|(x>>>(32-n));}
-    \\function _sha256(msg){
-    \\  var K=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
-    \\  var H=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-    \\  var m=_u8(msg),l=m.length,bl=l*8,pad=new Uint8Array((((l+8)>>6)+1)<<6);
-    \\  pad.set(m);pad[l]=0x80;var dv=new DataView(pad.buffer);dv.setUint32(pad.length-4,bl>>>0,false);dv.setUint32(pad.length-8,Math.floor(bl/4294967296)>>>0,false);
-    \\  var W=new Int32Array(64);
-    \\  for(var b=0,nb=pad.length>>6;b<nb;b++){
-    \\    for(var i=0;i<16;i++)W[i]=dv.getInt32((b*16+i)*4,false);
-    \\    for(var i=16;i<64;i++){var s0=(_rotr(W[i-15],7)^_rotr(W[i-15],18)^(W[i-15]>>>3))|0;var s1=(_rotr(W[i-2],17)^_rotr(W[i-2],19)^(W[i-2]>>>10))|0;W[i]=(W[i-16]+s0+W[i-7]+s1)|0;}
-    \\    var a=H[0],b_=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
-    \\    for(var i=0;i<64;i++){var S1=(_rotr(e,6)^_rotr(e,11)^_rotr(e,25))|0;var ch=((e&f)^(~e&g))|0;var t1=(h+S1+ch+K[i]+W[i])|0;var S0=(_rotr(a,2)^_rotr(a,13)^_rotr(a,22))|0;var maj=((a&b_)^(a&c)^(b_&c))|0;var t2=(S0+maj)|0;h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b_;b_=a;a=(t1+t2)|0;}
-    \\    H[0]=(H[0]+a)|0;H[1]=(H[1]+b_)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
-    \\  }
-    \\  var out=new Uint8Array(32);for(var i=0;i<8;i++)new DataView(out.buffer,i*4,4).setUint32(0,H[i]>>>0,false);return out;
-    \\}
-    \\function _sha1(msg){
-    \\  var H=[0x67452301,0xEFCDAB89,0x98BADCFE,0x10325476,0xC3D2E1F0];
-    \\  var m=_u8(msg),l=m.length,bl=l*8,pad=new Uint8Array((((l+8)>>6)+1)<<6);
-    \\  pad.set(m);pad[l]=0x80;var dv=new DataView(pad.buffer);dv.setUint32(pad.length-4,bl>>>0,false);dv.setUint32(pad.length-8,Math.floor(bl/4294967296)>>>0,false);
-    \\  var W=new Int32Array(80);
-    \\  for(var b=0,nb=pad.length>>6;b<nb;b++){
-    \\    for(var i=0;i<16;i++)W[i]=dv.getInt32((b*16+i)*4,false);
-    \\    for(var i=16;i<80;i++)W[i]=_rotl(W[i-3]^W[i-8]^W[i-14]^W[i-16],1);
-    \\    var a=H[0],b_=H[1],c=H[2],d=H[3],e=H[4];
-    \\    for(var i=0;i<80;i++){var f,k;if(i<20){f=(b_&c|(~b_&d))|0;k=0x5A827999;}else if(i<40){f=(b_^c^d)|0;k=0x6ED9EBA1;}else if(i<60){f=(b_&c|b_&d|c&d)|0;k=0x8F1BBCDC;}else{f=(b_^c^d)|0;k=0xCA62C1D6;}var t=(_rotl(a,5)+f+e+k+W[i])|0;e=d;d=c;c=_rotl(b_,30);b_=a;a=t;}
-    \\    H[0]=(H[0]+a)|0;H[1]=(H[1]+b_)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;
-    \\  }
-    \\  var out=new Uint8Array(20);for(var i=0;i<5;i++)new DataView(out.buffer,i*4,4).setUint32(0,H[i]>>>0,false);return out;
-    \\}
-    \\function _hmac(hf,key,data){
-    \\  var k=_u8(key);if(k.length>64)k=hf(k);var kb=new Uint8Array(64);kb.set(k);
-    \\  var ip=new Uint8Array(64),op=new Uint8Array(64);for(var i=0;i<64;i++){ip[i]=kb[i]^0x36;op[i]=kb[i]^0x5C;}
-    \\  var dm=_u8(data),im=new Uint8Array(64+dm.length);im.set(ip);im.set(dm,64);
-    \\  var ih=hf(im),om=new Uint8Array(64+ih.length);om.set(op);om.set(ih,64);return hf(om);
-    \\}
-    \\function _concat(chunks){var l=0;for(var i=0;i<chunks.length;i++)l+=chunks[i].length;var a=new Uint8Array(l),o=0;for(var i=0;i<chunks.length;i++){a.set(chunks[i],o);o+=chunks[i].length;}return a;}
-    \\function _tryBuffer(b){try{return require('buffer').Buffer.from(b);}catch(e){return b;}}
-    \\function Hash(alg){this._alg=alg.toLowerCase().replace(/-/g,'');this._chunks=[];}
-    \\Hash.prototype.update=function(d,enc){if(typeof d==='string'&&enc==='hex'){var b=[];for(var i=0;i<d.length;i+=2)b.push(parseInt(d.substr(i,2),16));d=new Uint8Array(b);}this._chunks.push(_u8(d));return this;};
-    \\Hash.prototype.digest=function(enc){var all=_concat(this._chunks);var hf=this._alg==='sha1'?_sha1:_sha256,h=hf(all);if(enc==='hex')return _hex(h);if(enc==='base64')return btoa(String.fromCharCode.apply(null,h));return _tryBuffer(h);};
-    \\Hash.prototype.copy=function(){var n=new Hash(this._alg);n._chunks=this._chunks.slice();return n;};
-    \\function Hmac(alg,key){this._alg=alg.toLowerCase().replace(/-/g,'');this._key=_u8(key);this._chunks=[];}
-    \\Hmac.prototype.update=Hash.prototype.update;
-    \\Hmac.prototype.digest=function(enc){var all=_concat(this._chunks);var hf=this._alg==='sha1'?_sha1:_sha256,h=_hmac(hf,this._key,all);if(enc==='hex')return _hex(h);if(enc==='base64')return btoa(String.fromCharCode.apply(null,h));return _tryBuffer(h);};
-    \\function randomBytes(n,cb){var buf=new Uint8Array(n);if(typeof globalThis.crypto!=='undefined'&&globalThis.crypto.getRandomValues)globalThis.crypto.getRandomValues(buf);else for(var i=0;i<n;i++)buf[i]=Math.floor(Math.random()*256);var r=_tryBuffer(buf);if(typeof cb==='function'){setTimeout(function(){cb(null,r);},0);}return r;}
-    \\function randomUUID(){if(typeof globalThis.crypto!=='undefined'&&typeof globalThis.crypto.randomUUID==='function')return globalThis.crypto.randomUUID();var b=new Uint8Array(16);if(typeof globalThis.crypto!=='undefined'&&globalThis.crypto.getRandomValues)globalThis.crypto.getRandomValues(b);else for(var i=0;i<16;i++)b[i]=Math.floor(Math.random()*256);b[6]=(b[6]&0x0f)|0x40;b[8]=(b[8]&0x3f)|0x80;var h=_hex(b);return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);}
-    \\function timingSafeEqual(a,b){var ab=_u8(a),bb=_u8(b);if(ab.length!==bb.length)throw new RangeError('Input buffers must have the same length');var r=0;for(var i=0;i<ab.length;i++)r|=ab[i]^bb[i];return r===0;}
-    \\function pbkdf2Sync(pw,salt,iter,keylen){var h=_hmac(_sha256,pw,_u8(salt));var out=new Uint8Array(keylen);out.set(h.slice(0,Math.min(keylen,h.length)));return _tryBuffer(out);}
-    \\module.exports={createHash:function(a){return new Hash(a);},createHmac:function(a,k){return new Hmac(a,k);},randomBytes:randomBytes,randomFillSync:function(b){if(typeof globalThis.crypto!=='undefined'&&globalThis.crypto.getRandomValues)globalThis.crypto.getRandomValues(b instanceof Uint8Array?b:new Uint8Array(b));return b;},randomUUID:randomUUID,timingSafeEqual:timingSafeEqual,pbkdf2Sync:pbkdf2Sync,pbkdf2:function(pw,s,it,kl,dg,cb){if(typeof dg==='function'){cb=dg;}setTimeout(function(){cb(null,pbkdf2Sync(pw,s,it,kl));},0);},Hash:Hash,Hmac:Hmac,getHashes:function(){return['sha1','sha256','sha512','md5'];},getCiphers:function(){return[];},scryptSync:function(){throw new Error('crypto.scryptSync not supported in browser mode');},scrypt:function(pw,s,n,o,cb){if(typeof o==='function'){cb=o;}setTimeout(function(){cb(new Error('crypto.scrypt not supported in browser mode'));},0);}};
-;
+const CRYPTO_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/crypto.js");
 
 /// os — 平台信息 stub（纯 JS，无外部依赖）
-const OS_MODULE_SRC: []const u8 =
-    \\var _p=typeof navigator!=='undefined'&&(/win/i.test(navigator.platform||''))?'win32':'linux';
-    \\module.exports={platform:function(){return _p;},type:function(){return _p==='win32'?'Windows_NT':'Linux';},arch:function(){return 'wasm32';},hostname:function(){return typeof location!=='undefined'?location.hostname:'localhost';},homedir:function(){return '/home/user';},tmpdir:function(){return '/tmp';},EOL:'\n',cpus:function(){return [{model:'WASM',speed:0,times:{user:0,nice:0,sys:0,idle:0,irq:0}}];},totalmem:function(){return 536870912;},freemem:function(){return 268435456;},uptime:function(){return 0;},loadavg:function(){return [0,0,0];},networkInterfaces:function(){return {};},userInfo:function(){return {username:'user',uid:1000,gid:1000,shell:'/bin/sh',homedir:'/home/user'};},release:function(){return '1.0.0';},version:function(){return 'bun-browser';},endianness:function(){return 'LE';},constants:{signals:{SIGINT:2,SIGTERM:15,SIGHUP:1,SIGKILL:9}}};
-;
+const OS_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/os.js");
 
 /// zlib — 解压由 Bun.gunzipSync 驱动，压缩 stub（浏览器模式不支持）
 /// createGunzip/createInflate 返回 PassThrough（stream 软依赖）
-const ZLIB_MODULE_SRC: []const u8 =
-    \\var PT=require('stream').PassThrough;
-    \\function _gun(d){if(typeof globalThis.Bun!=='undefined'&&typeof globalThis.Bun.gunzipSync==='function'){var u=d instanceof Uint8Array?d:new Uint8Array(d instanceof ArrayBuffer?d:d.buffer||d);return globalThis.Bun.gunzipSync(u);}throw new Error('zlib.gunzipSync: unavailable (Bun.gunzipSync not found)');}
-    \\module.exports={
-    \\  gunzipSync:function(b){return _gun(b);},
-    \\  inflateSync:function(b){return _gun(b);},
-    \\  unzipSync:function(b){return _gun(b);},
-    \\  brotliDecompressSync:function(){throw new Error('zlib.brotliDecompressSync: not available');},
-    \\  gzipSync:function(){throw new Error('zlib.gzipSync: compression not available in browser mode');},
-    \\  deflateSync:function(){throw new Error('zlib.deflateSync: not available in browser mode');},
-    \\  gunzip:function(b,o,cb){if(typeof o==='function'){cb=o;}try{cb(null,_gun(b));}catch(e){cb(e);}},
-    \\  inflate:function(b,o,cb){if(typeof o==='function'){cb=o;}try{cb(null,_gun(b));}catch(e){cb(e);}},
-    \\  gzip:function(b,o,cb){if(typeof o==='function'){cb=o;}cb(new Error('zlib.gzip not available in browser mode'));},
-    \\  deflate:function(b,o,cb){if(typeof o==='function'){cb=o;}cb(new Error('zlib.deflate not available in browser mode'));},
-    \\  createGunzip:function(){return new PT();},
-    \\  createInflate:function(){return new PT();},
-    \\  createUnzip:function(){return new PT();},
-    \\  createBrotliDecompress:function(){return new PT();},
-    \\  createGzip:function(){throw new Error('zlib.createGzip: not available in browser mode');},
-    \\  createDeflate:function(){throw new Error('zlib.createDeflate: not available in browser mode');},
-    \\  constants:{Z_NO_FLUSH:0,Z_PARTIAL_FLUSH:1,Z_SYNC_FLUSH:2,Z_FULL_FLUSH:3,Z_FINISH:4,Z_DEFAULT_COMPRESSION:-1,Z_BEST_SPEED:1,Z_BEST_COMPRESSION:9,Z_DEFAULT_STRATEGY:0,Z_DEFLATED:8}
-    \\};
-;
+const ZLIB_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/zlib.js");
 
 /// http/https — 基于 fetch 的 HTTP 客户端 + 无操作服务端 stub
 /// 依赖 require('events')
-const HTTP_MODULE_SRC: []const u8 =
-    \\var EE=require('events');
-    \\function _inherits(C,P){C.prototype=Object.create(P.prototype);C.prototype.constructor=C;}
-    \\function IncomingMessage(url,method,headers){EE.call(this);this.url=url||'/';this.method=method||'GET';this.headers=headers||{};this.statusCode=200;this.statusMessage='OK';}
-    \\_inherits(IncomingMessage,EE);
-    \\function ServerResponse(){EE.call(this);this.statusCode=200;this.statusMessage='OK';this.headers={};}
-    \\_inherits(ServerResponse,EE);
-    \\ServerResponse.prototype.setHeader=function(k,v){this.headers[k.toLowerCase()]=v;return this;};
-    \\ServerResponse.prototype.getHeader=function(k){return this.headers[k.toLowerCase()];};
-    \\ServerResponse.prototype.removeHeader=function(k){delete this.headers[k.toLowerCase()];};
-    \\ServerResponse.prototype.writeHead=function(code,msg,h){this.statusCode=code;if(typeof msg==='object')Object.assign(this.headers,msg);else if(h)Object.assign(this.headers,h);return this;};
-    \\ServerResponse.prototype.write=function(d,e,cb){if(typeof e==='function'){cb=e;}if(cb)setTimeout(cb,0);return true;};
-    \\ServerResponse.prototype.end=function(d,e,cb){if(typeof d==='function'){cb=d;d=null;}else if(typeof e==='function'){cb=e;e=null;}if(d!=null)this.write(d,e);if(cb)setTimeout(cb,0);this.emit('finish');return this;};
-    \\function _mkReq(opts,cb){if(typeof opts==='string')opts={href:opts};var url=opts.href||opts.url||((opts.protocol||'http:')+'//'+(opts.host||opts.hostname||'localhost')+(opts.port?':'+opts.port:'')+(opts.path||'/'));var method=(opts.method||'GET').toUpperCase(),chunks=[],hdrs=opts.headers||{};var req=Object.create(EE.prototype);EE.call(req);req.write=function(d){chunks.push(typeof d==='string'?d:new TextDecoder().decode(d instanceof Uint8Array?d:new Uint8Array(d.buffer||d)));return true;};req.end=function(d,e,cb2){if(typeof d==='function'){cb2=d;d=null;}if(d)req.write(d);var body=chunks.length&&method!=='GET'&&method!=='HEAD'?chunks.join(''):undefined;fetch(url,{method:method,headers:hdrs,body:body}).then(function(r){var res=new IncomingMessage(url,method,{});r.headers.forEach(function(v,k){res.headers[k]=v;});res.statusCode=r.status;res.statusMessage=r.statusText||'';if(cb)cb(res);return r.arrayBuffer();}).then(function(ab){}).catch(function(e){req.emit('error',e);});if(cb2)setTimeout(cb2,0);return req;};req.setHeader=function(k,v){hdrs[k.toLowerCase()]=v;return req;};req.getHeader=function(k){return hdrs[k.toLowerCase()];};req.setTimeout=function(){return req;};req.destroy=function(){return req;};req.abort=function(){};return req;}
-    \\function createServer(h){var srv={listen:function(port,host,cb){if(typeof host==='function'){cb=host;}if(typeof cb==='function')setTimeout(cb,0);return srv;},close:function(cb){if(cb)setTimeout(cb,0);return srv;},on:function(){return srv;},once:function(){return srv;},emit:function(){return srv;},address:function(){return{port:0,family:'IPv4',address:'127.0.0.1'};}};return srv;}
-    \\var STATUS_CODES={100:'Continue',200:'OK',201:'Created',202:'Accepted',204:'No Content',206:'Partial Content',301:'Moved Permanently',302:'Found',304:'Not Modified',400:'Bad Request',401:'Unauthorized',403:'Forbidden',404:'Not Found',405:'Method Not Allowed',408:'Request Timeout',409:'Conflict',422:'Unprocessable Entity',429:'Too Many Requests',500:'Internal Server Error',501:'Not Implemented',502:'Bad Gateway',503:'Service Unavailable',504:'Gateway Timeout'};
-    \\module.exports={request:_mkReq,get:function(o,cb){var r=_mkReq(o,cb);r.end();return r;},createServer:createServer,STATUS_CODES:STATUS_CODES,IncomingMessage:IncomingMessage,ServerResponse:ServerResponse,METHODS:['GET','POST','PUT','DELETE','PATCH','HEAD','OPTIONS','TRACE','CONNECT'],globalAgent:{maxSockets:Infinity}};
-;
+const HTTP_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/http.js");
 
 /// child_process — stubs（浏览器 WASM 不支持真实进程）
 /// 依赖 require('events')
-const CHILD_PROCESS_MODULE_SRC: []const u8 =
-    \\var EE=require('events');
-    \\function ChildProcess(){EE.call(this);this.pid=0;this.exitCode=null;this.signalCode=null;this.stdin={write:function(){return true;},end:function(){},destroy:function(){},on:function(){return this;},once:function(){return this;}};this.stdout=new EE();this.stderr=new EE();}
-    \\ChildProcess.prototype=Object.create(EE.prototype);ChildProcess.prototype.constructor=ChildProcess;ChildProcess.prototype.kill=function(){return false;};ChildProcess.prototype.unref=function(){return this;};ChildProcess.prototype.ref=function(){return this;};
-    \\function exec(cmd,opts,cb){if(typeof opts==='function'){cb=opts;opts={};}var cp=new ChildProcess();if(cb)setTimeout(function(){cb(new Error('exec not supported in browser WASM mode'),null,null);},0);return cp;}
-    \\function spawn(cmd,args,opts){var cp=new ChildProcess();setTimeout(function(){cp.exitCode=1;cp.emit('close',1,null);},0);return cp;}
-    \\function fork(mod,args,opts){return spawn('node',[mod].concat(args||[]),opts);}
-    \\function execFile(file,args,opts,cb){if(typeof args==='function'){cb=args;args=[];opts={};}else if(typeof opts==='function'){cb=opts;opts={};}var cp=new ChildProcess();if(cb)setTimeout(function(){cb(new Error('execFile not supported in browser WASM mode'),null,null);},0);return cp;}
-    \\function spawnSync(){return{pid:0,output:[],stdout:new Uint8Array(0),stderr:new Uint8Array(0),status:1,signal:null,error:new Error('spawnSync not supported in browser WASM mode')};}
-    \\function execSync(){throw new Error('execSync not supported in browser WASM mode');}
-    \\function execFileSync(){throw new Error('execFileSync not supported in browser WASM mode');}
-    \\module.exports={exec:exec,execSync:execSync,spawn:spawn,spawnSync:spawnSync,fork:fork,execFile:execFile,execFileSync:execFileSync,ChildProcess:ChildProcess};
-;
+const CHILD_PROCESS_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/child_process.js");
 
 /// worker_threads — stubs（浏览器 WASM 单线程模式）
-const WORKER_THREADS_MODULE_SRC: []const u8 =
-    \\var EE=require('events');
-    \\function MessagePort(){EE.call(this);}
-    \\MessagePort.prototype=Object.create(EE.prototype);MessagePort.prototype.constructor=MessagePort;MessagePort.prototype.postMessage=function(){};MessagePort.prototype.close=function(){};MessagePort.prototype.unref=function(){return this;};MessagePort.prototype.ref=function(){return this;};MessagePort.prototype.start=function(){};
-    \\function MessageChannel(){this.port1=new MessagePort();this.port2=new MessagePort();}
-    \\module.exports={isMainThread:true,threadId:0,workerData:null,parentPort:null,resourceLimits:{},SHARE_ENV:Symbol.for('nodejs.worker_threads.SHARE_ENV'),Worker:function Worker(src,opts){throw new Error('worker_threads.Worker is not supported in browser WASM mode');},MessageChannel:MessageChannel,MessagePort:MessagePort,receiveMessageOnPort:function(){return undefined;},moveMessagePortToContext:function(){throw new Error('moveMessagePortToContext not supported');},markAsUntransferable:function(){},markAsTransferable:function(){}};
-;
+const WORKER_THREADS_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/worker_threads.js");
 
 /// process — 代理到 globalThis.process，否则返回最小兼容对象
-const PROCESS_MODULE_SRC: []const u8 =
-    \\module.exports=globalThis.process||(globalThis.process={env:{NODE_ENV:'production'},argv:['node'],platform:'linux',arch:'wasm32',version:'v18.0.0',versions:{node:'18.0.0'},exit:function(c){throw new Error('process.exit('+( c||0)+')')},cwd:function(){return '/';},chdir:function(){},nextTick:function(f){setTimeout(f,0);},stdout:{write:function(s){if(typeof console!=='undefined')console.log(s);return true;}},stderr:{write:function(s){if(typeof console!=='undefined')console.error(s);return true;}},stdin:{on:function(){return this;},read:function(){return null;}},hrtime:function(){return [0,0];},hrtime:{bigint:function(){return BigInt(0);}},memoryUsage:function(){return {rss:0,heapTotal:0,heapUsed:0,external:0};},pid:1,ppid:0,title:'bun',browser:true,on:function(){return this;},off:function(){return this;},removeListener:function(){return this;},emit:function(){},binding:function(){throw new Error('process.binding not supported');},dlopen:function(){throw new Error('process.dlopen not supported');}});
-;
+const PROCESS_MODULE_SRC: []const u8 = @embedFile("js/browser-polyfills/process.js");
 
 /// Bun 全局对象 polyfill。
 /// Bun.serve({ fetch, port? }) — 注册路由到 `globalThis.__bun_routes`；Host 侧可通过
@@ -758,188 +281,7 @@ const PROCESS_MODULE_SRC: []const u8 =
 /// RFC Phase 3 T3.4：最小可工作的 Bun.serve 注入；真实 TCP 在 Phase 4+。
 /// Phase 5.7 T5.7.1：扩充 Bun 对象 — env/argv/main/sleep/which/inspect/file/write/
 ///   resolveSync/gunzipSync/Transpiler/hash/password。
-const BUN_GLOBAL_SRC: []const u8 =
-    \\(function(){
-    \\  if(globalThis.__bun_wasm_serve_installed)return;
-    \\  globalThis.__bun_wasm_serve_installed=true;
-    \\  globalThis.__bun_routes=globalThis.__bun_routes||Object.create(null);
-    \\  globalThis.__bun_next_port=globalThis.__bun_next_port||40000;
-    \\  // ── Bun.serve ──────────────────────────────────────────────────
-    \\  function serve(opts){
-    \\    if(!opts||typeof opts.fetch!=='function')throw new TypeError('Bun.serve requires { fetch }');
-    \\    var port=opts.port;
-    \\    if(port===undefined||port===0)port=globalThis.__bun_next_port++;
-    \\    globalThis.__bun_routes[port]={fetch:opts.fetch,hostname:opts.hostname||'localhost',development:!!opts.development};
-    \\    return {
-    \\      port:port,
-    \\      hostname:opts.hostname||'localhost',
-    \\      url:new URL('http://'+(opts.hostname||'localhost')+':'+port+'/'),
-    \\      stop:function(){delete globalThis.__bun_routes[port];},
-    \\      reload:function(newOpts){if(newOpts&&typeof newOpts.fetch==='function')globalThis.__bun_routes[port].fetch=newOpts.fetch;},
-    \\      development:!!opts.development,
-    \\      pendingRequests:0,pendingWebSockets:0,
-    \\      publish:function(){return 0;},
-    \\      upgrade:function(){return false;},
-    \\      requestIP:function(){return null;},
-    \\      timeout:function(){},
-    \\      unref:function(){return this;},ref:function(){return this;},
-    \\    };
-    \\  }
-    \\  /** Host fetch dispatch — returns Promise<Response>. */
-    \\  function __dispatch(port,reqInit){
-    \\    var route=globalThis.__bun_routes[port];
-    \\    if(!route)return Promise.resolve(new Response('no route for port '+port,{status:502}));
-    \\    try{
-    \\      var url=reqInit.url||('http://localhost:'+port+'/');
-    \\      var init={method:reqInit.method||'GET'};
-    \\      if(reqInit.headers)init.headers=reqInit.headers;
-    \\      if(reqInit.body!==undefined&&reqInit.body!==null)init.body=reqInit.body;
-    \\      var req=new Request(url,init);
-    \\      return Promise.resolve(route.fetch(req));
-    \\    }catch(e){return Promise.resolve(new Response(String(e),{status:500}));}
-    \\  }
-    \\  // ── Phase 5.7 helpers ──────────────────────────────────────────
-    \\  function __mimeFor(p){
-    \\    if(p.endsWith('.json'))return 'application/json';
-    \\    if(p.endsWith('.js')||p.endsWith('.mjs')||p.endsWith('.ts')||p.endsWith('.tsx')||p.endsWith('.jsx'))return 'text/javascript';
-    \\    if(p.endsWith('.html')||p.endsWith('.htm'))return 'text/html';
-    \\    if(p.endsWith('.css'))return 'text/css';
-    \\    if(p.endsWith('.txt'))return 'text/plain';
-    \\    if(p.endsWith('.png'))return 'image/png';
-    \\    if(p.endsWith('.svg'))return 'image/svg+xml';
-    \\    return 'application/octet-stream';
-    \\  }
-    \\  function __inspect(v,opts){
-    \\    var depth=opts&&typeof opts.depth==='number'?opts.depth:2;
-    \\    var seen=[];
-    \\    function fmt(x,d){
-    \\      if(x===null)return 'null';
-    \\      if(x===undefined)return 'undefined';
-    \\      if(typeof x==='string')return JSON.stringify(x);
-    \\      if(typeof x==='bigint')return x.toString()+'n';
-    \\      if(typeof x!=='object'&&typeof x!=='function')return String(x);
-    \\      if(typeof x==='function')return '[Function: '+(x.name||'(anonymous)')+']';
-    \\      if(seen.indexOf(x)>=0)return '[Circular]';
-    \\      if(d<=0)return Array.isArray(x)?'[Array]':'[Object]';
-    \\      seen.push(x);
-    \\      try{
-    \\        if(x instanceof Error)return x.stack||x.message||String(x);
-    \\        if(Array.isArray(x)){return '[ '+x.map(function(i){return fmt(i,d-1);}).join(', ')+' ]';}
-    \\        var keys=Object.keys(x);
-    \\        if(!keys.length)return '{}';
-    \\        return '{ '+keys.map(function(k){return k+': '+fmt(x[k],d-1);}).join(', ')+' }';
-    \\      }finally{seen.pop();}
-    \\    }
-    \\    return fmt(v,depth);
-    \\  }
-    \\  // Capture HostFn refs before we delete them from globalThis
-    \\  var __fileRead   = globalThis.__bun_file_read;
-    \\  var __fileSize   = globalThis.__bun_file_size;
-    \\  var __fileWrite  = globalThis.__bun_file_write;
-    \\  var __resolveSyn = globalThis.__bun_resolve_sync;
-    \\  var __gunzip     = globalThis.__bun_gunzip_sync;
-    \\  var __transpile  = globalThis.__bun_transpile_code;
-    \\  // ── Bun object ─────────────────────────────────────────────────
-    \\  var __bunObj={
-    \\    serve:serve,
-    \\    version:'0.1.0-bun-browser',
-    \\    revision:'00000000000000000000000000000000',
-    \\    // process aliases
-    \\    get env(){return globalThis.process?globalThis.process.env:{};},
-    \\    set env(v){if(globalThis.process)globalThis.process.env=v;},
-    \\    get argv(){return globalThis.process?globalThis.process.argv:['bun'];},
-    \\    get main(){var a=globalThis.process&&globalThis.process.argv;return(a&&a[1])||'/';},
-    \\    // async sleep
-    \\    sleep:function(ms){return new Promise(function(r){setTimeout(r,ms||0);});},
-    \\    sleepSync:function(){},
-    \\    // which — no PATH in browser
-    \\    which:function(){return null;},
-    \\    // inspect
-    \\    inspect:__inspect,
-    \\    // Bun.file(path) — lazy VFS reader
-    \\    file:function(path){
-    \\      return{
-    \\        name:path,type:__mimeFor(path),
-    \\        text:function(){return Promise.resolve(new TextDecoder().decode(new Uint8Array(__fileRead(path))));},
-    \\        arrayBuffer:function(){return Promise.resolve(__fileRead(path));},
-    \\        bytes:function(){return Promise.resolve(new Uint8Array(__fileRead(path)));},
-    \\        json:function(){return Promise.resolve(JSON.parse(new TextDecoder().decode(new Uint8Array(__fileRead(path)))));},
-    \\        stream:function(){var ab=__fileRead(path);return new ReadableStream({start:function(c){c.enqueue(new Uint8Array(ab));c.close();}});},
-    \\        get size(){return __fileSize(path);},
-    \\      };
-    \\    },
-    \\    // Bun.write(dest, data) — writes to VFS, returns Promise<number>
-    \\    write:function(dest,data){
-    \\      if(data&&typeof data.text==='function'&&typeof data!=='string'){
-    \\        return data.text().then(function(t){return __fileWrite(dest,t);});
-    \\      }
-    \\      return Promise.resolve(__fileWrite(dest,data));
-    \\    },
-    \\    // Bun.resolveSync(spec, from)
-    \\    resolveSync:function(spec,from){return __resolveSyn(spec,from||'/');},
-    \\    // Bun.gunzipSync / gzipSync
-    \\    gunzipSync:function(data){
-    \\      var ab=data instanceof Uint8Array?data:new Uint8Array(data instanceof ArrayBuffer?data:data.buffer||data);
-    \\      return new Uint8Array(__gunzip(ab).buffer);
-    \\    },
-    \\    gzipSync:function(){throw new Error('Bun.gzipSync: compression not available in browser mode');},
-    \\    // Bun.Transpiler
-    \\    Transpiler:(function(){
-    \\      function Transpiler(opts){this._opts=opts||{};}
-    \\      Transpiler.prototype.transform=function(code,opts){
-    \\        var loader=(opts&&opts.loader)||this._opts.loader||'ts';
-    \\        return Promise.resolve(__transpile(code,'file.'+loader));
-    \\      };
-    \\      Transpiler.prototype.transformSync=function(code,opts){
-    \\        var loader=(opts&&opts.loader)||this._opts.loader||'ts';
-    \\        return __transpile(code,'file.'+loader);
-    \\      };
-    \\      Transpiler.prototype.scan=function(){return{imports:[],exports:[]};};
-    \\      Transpiler.prototype.scanImports=function(){return[];};
-    \\      return Transpiler;
-    \\    })(),
-    \\    // Bun.password — stub (no native crypto in sandbox)
-    \\    password:{
-    \\      hash:function(){return Promise.reject(new Error('Bun.password not available in browser mode'));},
-    \\      verify:function(){return Promise.reject(new Error('Bun.password not available in browser mode'));},
-    \\    },
-    \\    // Bun.hash — stub (use Web Crypto API for real hashes)
-    \\    hash:Object.assign(function(data){return 0;},{
-    \\      wyhash:function(){return 0;},crc32:function(){return 0;},adler32:function(){return 0;},
-    \\      cityHash32:function(){return 0;},cityHash64:function(){return BigInt(0);},
-    \\      xxHash32:function(){return 0;},xxHash64:function(){return BigInt(0);},
-    \\      murmur32v3:function(){return 0;},murmur64v2:function(){return BigInt(0);},
-    \\    }),
-    \\    // Bun.deepEquals / Bun.deepMatch — use JSON-roundtrip heuristic
-    \\    deepEquals:function(a,b){try{return JSON.stringify(a)===JSON.stringify(b);}catch{return a===b;}},
-    \\    deepMatch:function(a,b){
-    \\      if(b===null||typeof b!=='object')return a===b;
-    \\      return Object.keys(b).every(function(k){return __bunObj.deepMatch(a[k],b[k]);});
-    \\    },
-    \\    // Bun.color / Bun.enableANSIColors — terminal color (no-op in browser)
-    \\    enableANSIColors:false,
-    \\    color:function(v){return String(v);},
-    \\  };
-    \\  if(globalThis.Bun&&globalThis.Bun.serve)globalThis.__bun_real_Bun=globalThis.Bun;
-    \\  var __replaced=false;
-    \\  try{Object.defineProperty(globalThis,'Bun',{value:__bunObj,writable:true,configurable:true});__replaced=(globalThis.Bun===__bunObj);}catch(_e){}
-    \\  if(!__replaced){try{globalThis.Bun=__bunObj;__replaced=(globalThis.Bun===__bunObj);}catch(_e){}}
-    \\  if(!__replaced&&globalThis.Bun){
-    \\    var __keys=Object.keys(__bunObj);
-    \\    for(var __i=0;__i<__keys.length;__i++){
-    \\      try{Object.defineProperty(globalThis.Bun,__keys[__i],{value:__bunObj[__keys[__i]],writable:true,configurable:true});}catch(_e){try{globalThis.Bun[__keys[__i]]=__bunObj[__keys[__i]];}catch(_e2){}}
-    \\    }
-    \\  }
-    \\  globalThis.__bun_dispatch_fetch=__dispatch;
-    \\  // cleanup temporary HostFn globals
-    \\  delete globalThis.__bun_file_read;
-    \\  delete globalThis.__bun_file_size;
-    \\  delete globalThis.__bun_file_write;
-    \\  delete globalThis.__bun_resolve_sync;
-    \\  delete globalThis.__bun_gunzip_sync;
-    \\  delete globalThis.__bun_transpile_code;
-    \\})();
-;
+const BUN_GLOBAL_SRC: []const u8 = @embedFile("js/browser-polyfills/bun-global.js");
 
 fn evalBuiltinSrc(src: []const u8, url: []const u8) !jsi.Value {
     const wrapper = try std.fmt.allocPrint(
@@ -980,64 +322,16 @@ fn requireFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.
     jsi.imports.jsi_string_read(args[0].handle, @intFromPtr(specifier.ptr), len);
 
     // ── Built-in module interception ──────────────────────
-    if (std.mem.eql(u8, specifier, "path") or std.mem.eql(u8, specifier, "node:path")) {
-        return evalBuiltinSrc(PATH_MODULE_SRC, "<path>");
-    }
-    if (std.mem.eql(u8, specifier, "fs") or std.mem.eql(u8, specifier, "node:fs")) {
-        return makeFsModule();
-    }
-    if (std.mem.eql(u8, specifier, "url") or std.mem.eql(u8, specifier, "node:url")) {
-        return evalBuiltinSrc(URL_MODULE_SRC, "<url>");
-    }
-    if (std.mem.eql(u8, specifier, "util") or std.mem.eql(u8, specifier, "node:util")) {
-        return evalBuiltinSrc(UTIL_MODULE_SRC, "<util>");
-    }
-    // ── Phase 5.8: 新增内置模块 polyfill ──────────────────
-    if (std.mem.eql(u8, specifier, "events") or std.mem.eql(u8, specifier, "node:events")) {
-        return evalBuiltinSrc(EVENTS_MODULE_SRC, "<events>");
-    }
-    if (std.mem.eql(u8, specifier, "buffer") or std.mem.eql(u8, specifier, "node:buffer")) {
-        return evalBuiltinSrc(BUFFER_MODULE_SRC, "<buffer>");
-    }
-    if (std.mem.eql(u8, specifier, "assert") or std.mem.eql(u8, specifier, "node:assert") or
-        std.mem.eql(u8, specifier, "assert/strict") or std.mem.eql(u8, specifier, "node:assert/strict"))
-    {
-        return evalBuiltinSrc(ASSERT_MODULE_SRC, "<assert>");
-    }
-    if (std.mem.eql(u8, specifier, "querystring") or std.mem.eql(u8, specifier, "node:querystring")) {
-        return evalBuiltinSrc(QUERYSTRING_MODULE_SRC, "<querystring>");
-    }
-    if (std.mem.eql(u8, specifier, "string_decoder") or std.mem.eql(u8, specifier, "node:string_decoder")) {
-        return evalBuiltinSrc(STRING_DECODER_MODULE_SRC, "<string_decoder>");
-    }
-    // ── Phase 5.9: 新增内置模块 polyfill ──────────────────
-    if (std.mem.eql(u8, specifier, "stream") or std.mem.eql(u8, specifier, "node:stream") or
-        std.mem.eql(u8, specifier, "stream/promises") or std.mem.eql(u8, specifier, "node:stream/promises"))
-    {
-        return evalBuiltinSrc(STREAM_MODULE_SRC, "<stream>");
-    }
-    if (std.mem.eql(u8, specifier, "crypto") or std.mem.eql(u8, specifier, "node:crypto")) {
-        return evalBuiltinSrc(CRYPTO_MODULE_SRC, "<crypto>");
-    }
-    if (std.mem.eql(u8, specifier, "os") or std.mem.eql(u8, specifier, "node:os")) {
-        return evalBuiltinSrc(OS_MODULE_SRC, "<os>");
-    }
-    if (std.mem.eql(u8, specifier, "zlib") or std.mem.eql(u8, specifier, "node:zlib")) {
-        return evalBuiltinSrc(ZLIB_MODULE_SRC, "<zlib>");
-    }
-    if (std.mem.eql(u8, specifier, "http") or std.mem.eql(u8, specifier, "node:http") or
-        std.mem.eql(u8, specifier, "https") or std.mem.eql(u8, specifier, "node:https"))
-    {
-        return evalBuiltinSrc(HTTP_MODULE_SRC, "<http>");
-    }
-    if (std.mem.eql(u8, specifier, "child_process") or std.mem.eql(u8, specifier, "node:child_process")) {
-        return evalBuiltinSrc(CHILD_PROCESS_MODULE_SRC, "<child_process>");
-    }
-    if (std.mem.eql(u8, specifier, "worker_threads") or std.mem.eql(u8, specifier, "node:worker_threads")) {
-        return evalBuiltinSrc(WORKER_THREADS_MODULE_SRC, "<worker_threads>");
-    }
-    if (std.mem.eql(u8, specifier, "process") or std.mem.eql(u8, specifier, "node:process")) {
-        return evalBuiltinSrc(PROCESS_MODULE_SRC, "<process>");
+    // Single dispatch path — builtinPolyfillSource is the sole mapping table.
+    // Only "fs" / "node:fs" is special-cased because it returns a HostFn-backed object
+    // rather than evaluated JS source.
+    if (isNodeBuiltin(specifier)) {
+        if (std.mem.eql(u8, specifier, "fs") or std.mem.eql(u8, specifier, "node:fs")) {
+            return makeFsModule();
+        }
+        const vpath = try std.fmt.allocPrint(allocator, "<{s}>", .{specifier});
+        defer allocator.free(vpath);
+        return evalBuiltinSrc(builtinPolyfillSource(specifier), vpath);
     }
 
     // ── VFS CJS loader ────────────────────────────────────
@@ -1605,6 +899,32 @@ export fn bun_vfs_load_snapshot(ptr: [*]const u8, len: u32) u32 {
     if (!initialized) return 0;
     const count = vfs_g.loadSnapshot(ptr[0..len]) catch return 0;
     return count;
+}
+
+/// T5.6.1: Serialize current VFS state as a binary snapshot (same format as bun_vfs_load_snapshot).
+/// Returns packed u64: high 32 bits = ptr, low 32 bits = len.
+/// Returns 0 on error or empty VFS.
+/// Host MUST call bun_free(ptr) after consuming the data.
+export fn bun_vfs_dump_snapshot() u64 {
+    if (!initialized) return 0;
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+    _ = vfs_g.exportSnapshot(&out) catch return 0;
+    const len = out.items.len;
+    if (len == 0) return 0;
+    const buf = allocator.dupe(u8, out.items) catch return 0;
+    return handOff(buf);
+}
+
+/// Read a single file from the VFS and hand its content to the host.
+/// Returns packed u64: high 32 bits = ptr, low 32 bits = len.
+/// Returns 0 if not initialized, file not found, or OOM.
+/// Host MUST call bun_free(ptr) after consuming the data.
+export fn bun_vfs_read_file(path_ptr: [*]const u8, path_len: u32) u64 {
+    if (!initialized) return 0;
+    const path = path_ptr[0..path_len];
+    const data = vfs_g.readFile(path) catch return 0;
+    return handOff(data);
 }
 
 export fn bun_browser_run(path_ptr: [*]const u8, path_len: u32) i32 {

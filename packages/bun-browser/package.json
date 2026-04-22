@@ -25,6 +25,10 @@
     "build:wasm:opt": "cd ../.. && /tmp/zig-dl/bootstrap-aarch64-linux-musl/zig build --build-file build-wasm-smoke.zig build-wasm -Doptimize=ReleaseFast && wasm-opt -O3 --enable-bulk-memory --strip-debug --strip-producers -o packages/bun-browser/bun-core.wasm zig-out/packages/bun-browser/bun-core.wasm",
     "build:demo": "bun demo/build.ts",
     "demo:serve": "bun run build:demo && bun --hot demo/server.ts",
+    "lint": "bunx oxlint --config=../../oxlint.json src/ test/",
+    "lint:fix": "bunx oxlint --config=../../oxlint.json --fix src/ test/",
+    "fmt": "bunx --bun prettier@latest --plugin=prettier-plugin-organize-imports --config ../../.prettierrc --write src/ test/",
+    "fmt:check": "bunx --bun prettier@latest --config ../../.prettierrc --check src/ test/",
     "typecheck": "tsc -p .",
     "test": "bun test test/"
   },

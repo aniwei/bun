@@ -100,3 +100,38 @@ pub extern "jsi" fn jsi_read_arraybuffer(handle: u32, dest_ptr: u32, dest_len: u
 /// Phase 5.7: Return the byteLength of an ArrayBuffer / TypedArray handle.
 /// Returns -1 if handle is not an array-buffer or typed-array.
 pub extern "jsi" fn jsi_arraybuffer_byteLength(handle: u32) i32;
+
+// ── Phase 5.5: wasm-threads + SAB 事件循环 ─────────────────────────
+//
+// 这些 import 仅在 host 检测到 SAB + COOP/COEP isolated context 时生效；
+// 非 isolated 环境下 host 侧实现会退化到 microtask 轮询并返回 timed-out/0。
+//
+// 线程模型（详见 RFC Phase 5.5）：
+//   - tid 0 是主 Worker；子 tid 由 `jsi_thread_spawn` 分配，单调递增。
+//   - 所有线程共享 WebAssembly.Memory（shared-memory build）；
+//     SAB 通过 `jsi_make_arraybuffer(copy=0)` 暴露同一底层 buffer。
+//   - `jsi_atomic_wait` 在 Worker 线程内是真阻塞；主线程调用等同 `timed-out`。
+
+/// 阻塞等待 `view[index*4..index*4+4]` 变为与 `expected` 不同的值。
+/// `view_ptr` 指向 WASM linear memory 中一个 Int32 槽位（4 字节对齐）。
+/// 返回值：0=ok, 1=not-equal（已经不相等，立即返回）, 2=timed-out。
+/// `timeout_ms` 取 u32；`0xFFFFFFFF` 表示永久。
+pub extern "jsi" fn jsi_atomic_wait(view_ptr: u32, expected: i32, timeout_ms: u32) u32;
+
+/// 唤醒最多 `count` 个等待在 `view_ptr` 的线程；`count = 0xFFFFFFFF` 表示全部。
+/// 返回值：实际唤醒的线程数。非 SAB 环境下返回 0（no-op）。
+pub extern "jsi" fn jsi_atomic_notify(view_ptr: u32, count: u32) u32;
+
+/// 孵化一个新的 Worker 线程，在其内部调用 wasm export `bun_thread_entry(arg)`。
+/// 成功返回 tid（>0），失败返回 0（未启用 threads / 超出上限 / host 未实现）。
+pub extern "jsi" fn jsi_thread_spawn(arg: u32) u32;
+
+/// 返回当前线程的 tid；主线程为 0，子线程为 `jsi_thread_spawn` 分配的值。
+pub extern "jsi" fn jsi_thread_self() u32;
+
+/// 线程能力探测位图：
+///   bit0 = SAB 可用
+///   bit1 = Atomics.wait 真阻塞（当前线程 inside Worker）
+///   bit2 = host 允许 `jsi_thread_spawn`（COOP/COEP isolated + pool 未满）
+/// 未启用任何一位时宿主退化为单线程轮询。
+pub extern "jsi" fn jsi_thread_capability() u32;
