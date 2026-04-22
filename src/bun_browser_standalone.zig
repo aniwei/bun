@@ -18,11 +18,22 @@
 //!   bun_semver_select(vp,vl,rp,rl) u64           — pick best version from JSON array
 //!   bun_integrity_verify(dp,dl,ip,il) u32        — verify tarball integrity (SRI)
 //!   bun_transform(opts_ptr, opts_len) u64         — Phase 5.2: TS/JSX → JS (内置转译器)
+//!   bun_tgz_extract(input_ptr, input_len) u64     — Phase 5.4 T5.4.3: extract .tgz into VFS
+//!   bun_npm_parse_metadata(jp,jl,rp,rl) u64      — Phase 5.4 T5.4.1: parse npm metadata + resolve version
+//!   bun_npm_resolve_graph(ptr, len) u64          — Phase 5.4 T5.4.2: BFS dependency graph flatten (WASM-side)
+//!   bun_npm_install_begin(ptr, len) u64          — Phase 5.4 T5.4.4: start async install session
+//!   bun_npm_need_fetch() u64                     — Phase 5.4 T5.4.4: pop next pending fetch request
+//!   bun_npm_feed_response(id, ptr, len) u64      — Phase 5.4 T5.4.4: feed fetch response to state machine
+//!   bun_npm_install_result() u64                 — Phase 5.4 T5.4.4: get resolved packages JSON
+//!   bun_npm_install_end()                        — Phase 5.4 T5.4.4: free install session
+//!   bun_lockfile_write(ptr, len) u64             — Phase 5.4 T5.4.5: generate bun.lock text
+//!   bun_sourcemap_lookup(ptr, len) u64           — Phase 5.7 T5.7.2: VLQ sourcemap position lookup
+//!   bun_html_rewrite(ptr, len) u64               — Phase 5.7 T5.7.3: minimal HTML element rewriter
 
 const std = @import("std");
 const Timer = @import("timer.zig").Timer;
 // ── Phase 5.2: 内置 TS/JSX strip 转译器 ──
-const bun_transform = @import("bun_wasm_transform.zig");
+const bun_wasm_transform = @import("bun_wasm_transform.zig");
 
 // ── External JSI / sys_wasm imports (injected via build module map) ──
 const jsi = @import("jsi");
@@ -105,7 +116,7 @@ const ModuleLoader = struct {
 
         if (self.vfs.stat(abs)) |_| return abs else |_| {}
 
-        for ([_][]const u8{ ".js", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".json" }) |ext| {
+        for ([_][]const u8{ ".js", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".json", ".css" }) |ext| {
             const with_ext = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ abs, ext });
             if (self.vfs.stat(with_ext)) |_| {
                 self.alloc.free(abs);
@@ -322,17 +333,252 @@ const BUFFER_POLYFILL_SRC: []const u8 =
     \\})();
 ;
 
+// ── Phase 5.8: Node.js 内置模块 polyfill（inline JS，供 requireFn + builtinPolyfillSource 使用）──
+
+/// `events` — 完整 EventEmitter 实现
+const EVENTS_MODULE_SRC: []const u8 =
+    \\function EventEmitter(){this._events=Object.create(null);this._maxListeners=0;}
+    \\EventEmitter.defaultMaxListeners=10;
+    \\EventEmitter.prototype.setMaxListeners=function(n){this._maxListeners=n;return this;};
+    \\EventEmitter.prototype.getMaxListeners=function(){return this._maxListeners||EventEmitter.defaultMaxListeners;};
+    \\EventEmitter.prototype.eventNames=function(){return Object.keys(this._events);};
+    \\EventEmitter.prototype.listeners=function(t){return(this._events[t]||[]).map(function(f){return f._orig||f;});};
+    \\EventEmitter.prototype.rawListeners=function(t){return(this._events[t]||[]).slice();};
+    \\EventEmitter.prototype.listenerCount=function(t){return(this._events[t]||[]).length;};
+    \\EventEmitter.listenerCount=function(ee,t){return ee.listenerCount(t);};
+    \\EventEmitter.prototype.on=EventEmitter.prototype.addListener=function(t,fn){
+    \\  if(!this._events[t])this._events[t]=[];
+    \\  this._events[t].push(fn);
+    \\  return this;
+    \\};
+    \\EventEmitter.prototype.once=function(t,fn){
+    \\  var self=this;
+    \\  function w(){self.removeListener(t,w);fn.apply(self,arguments);}
+    \\  w._orig=fn;
+    \\  return this.on(t,w);
+    \\};
+    \\EventEmitter.prototype.prependListener=function(t,fn){
+    \\  if(!this._events[t])this._events[t]=[];
+    \\  this._events[t].unshift(fn);
+    \\  return this;
+    \\};
+    \\EventEmitter.prototype.prependOnceListener=function(t,fn){
+    \\  var self=this;
+    \\  function w(){self.removeListener(t,w);fn.apply(self,arguments);}
+    \\  w._orig=fn;
+    \\  return this.prependListener(t,w);
+    \\};
+    \\EventEmitter.prototype.removeListener=EventEmitter.prototype.off=function(t,fn){
+    \\  var list=this._events[t];
+    \\  if(!list)return this;
+    \\  this._events[t]=list.filter(function(f){return f!==fn&&f._orig!==fn;});
+    \\  if(!this._events[t].length)delete this._events[t];
+    \\  return this;
+    \\};
+    \\EventEmitter.prototype.removeAllListeners=function(t){
+    \\  if(arguments.length&&t!==undefined)delete this._events[t];
+    \\  else this._events=Object.create(null);
+    \\  return this;
+    \\};
+    \\EventEmitter.prototype.emit=function(t){
+    \\  var list=this._events[t];
+    \\  if(!list||!list.length){
+    \\    if(t==='error'){var e=arguments[1];if(!(e instanceof Error))e=new Error('Unhandled "error" event');throw e;}
+    \\    return false;
+    \\  }
+    \\  var args=Array.prototype.slice.call(arguments,1);
+    \\  list.slice().forEach(function(f){f.apply(this,args);},this);
+    \\  return true;
+    \\};
+    \\function inherits(ctor,superCtor){
+    \\  ctor.super_=superCtor;
+    \\  ctor.prototype=Object.create(superCtor.prototype,{constructor:{value:ctor,writable:true,configurable:true}});
+    \\}
+    \\EventEmitter.inherits=inherits;
+    \\module.exports=EventEmitter;
+    \\module.exports.EventEmitter=EventEmitter;
+    \\module.exports.inherits=inherits;
+;
+
+/// `buffer` — Buffer class, exports { Buffer }
+/// 比全局安装版（BUFFER_POLYFILL_SRC）更完整，支持 read/write 方法
+const BUFFER_MODULE_SRC: []const u8 =
+    \\(function(){
+    \\  var _enc=typeof TextEncoder!=='undefined'?new TextEncoder():null;
+    \\  var _dec=typeof TextDecoder!=='undefined'?new TextDecoder():null;
+    \\  function mkBuf(u8){
+    \\    if(!(u8 instanceof Uint8Array))u8=new Uint8Array(u8);
+    \\    Object.defineProperty(u8,'_isBunBuf',{value:true,enumerable:false,configurable:true});
+    \\    u8.toString=function(e){
+    \\      e=e||'utf8';
+    \\      if(e==='hex')return Array.from(this).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+    \\      if(e==='base64'){var s='';for(var i=0;i<this.length;i++)s+=String.fromCharCode(this[i]);return btoa(s);}
+    \\      return _dec?_dec.decode(this):String.fromCharCode.apply(null,Array.from(this));
+    \\    };
+    \\    u8.equals=function(o){if(this.length!==o.length)return false;for(var i=0;i<this.length;i++)if(this[i]!==o[i])return false;return true;};
+    \\    u8.indexOf=function(v,off){
+    \\      off=off||0;
+    \\      if(typeof v==='number'){for(var i=off;i<this.length;i++)if(this[i]===v)return i;return -1;}
+    \\      var s=typeof v==='string'?(_enc?_enc.encode(v):new Uint8Array([].map.call(v,function(c){return c.charCodeAt(0);}))):v;
+    \\      outer:for(var i=off;i<=this.length-s.length;i++){for(var j=0;j<s.length;j++)if(this[i+j]!==s[j])continue outer;return i;}
+    \\      return -1;
+    \\    };
+    \\    u8.includes=function(v,off){return this.indexOf(v,off)>=0;};
+    \\    u8.readUInt8=function(o){return this[o||0];};
+    \\    u8.readInt8=function(o){var v=this[o||0];return v>=128?v-256:v;};
+    \\    u8.readUInt16BE=function(o){o=o||0;return(this[o]<<8)|this[o+1];};
+    \\    u8.readUInt16LE=function(o){o=o||0;return this[o]|(this[o+1]<<8);};
+    \\    u8.readUInt32BE=function(o){o=o||0;return((this[o]*0x1000000)+(this[o+1]<<16)+(this[o+2]<<8)+this[o+3])>>>0;};
+    \\    u8.readUInt32LE=function(o){o=o||0;return((this[o+3]*0x1000000)+(this[o+2]<<16)+(this[o+1]<<8)+this[o])>>>0;};
+    \\    u8.readInt32BE=function(o){return this.readUInt32BE(o)|0;};
+    \\    u8.readInt32LE=function(o){return this.readUInt32LE(o)|0;};
+    \\    u8.writeUInt8=function(v,o){this[o||0]=v&0xff;return(o||0)+1;};
+    \\    u8.writeUInt16BE=function(v,o){o=o||0;this[o]=(v>>>8)&0xff;this[o+1]=v&0xff;return o+2;};
+    \\    u8.writeUInt16LE=function(v,o){o=o||0;this[o]=v&0xff;this[o+1]=(v>>>8)&0xff;return o+2;};
+    \\    u8.writeUInt32BE=function(v,o){o=o||0;this[o]=(v>>>24)&0xff;this[o+1]=(v>>>16)&0xff;this[o+2]=(v>>>8)&0xff;this[o+3]=v&0xff;return o+4;};
+    \\    u8.writeUInt32LE=function(v,o){o=o||0;this[o]=v&0xff;this[o+1]=(v>>>8)&0xff;this[o+2]=(v>>>16)&0xff;this[o+3]=(v>>>24)&0xff;return o+4;};
+    \\    u8.write=function(s,off,len,e){off=off||0;e=e||'utf8';var b=_enc?_enc.encode(s):new Uint8Array([].map.call(s,function(c){return c.charCodeAt(0);}));if(len!==undefined)b=b.subarray(0,len);this.set(b,off);return b.length;};
+    \\    u8.copy=function(target,tOff,sOff,sEnd){var sub=this.subarray(sOff||0,sEnd||this.length);target.set(sub,tOff||0);return sub.length;};
+    \\    u8.slice=u8.subarray;
+    \\    return u8;
+    \\  }
+    \\  var Buffer={
+    \\    from:function(src,enc){
+    \\      if(typeof src==='string'){
+    \\        enc=enc||'utf8';
+    \\        if(enc==='hex'){var h=new Uint8Array(src.length>>1);for(var i=0;i<h.length;i++)h[i]=parseInt(src.slice(i*2,i*2+2),16);return mkBuf(h);}
+    \\        if(enc==='base64'){var bin=atob(src),b=new Uint8Array(bin.length);for(var j=0;j<bin.length;j++)b[j]=bin.charCodeAt(j);return mkBuf(b);}
+    \\        return mkBuf(_enc?_enc.encode(src):new Uint8Array([].map.call(src,function(c){return c.charCodeAt(0);})));
+    \\      }
+    \\      if(src instanceof ArrayBuffer)return mkBuf(new Uint8Array(src));
+    \\      if(ArrayBuffer.isView(src))return mkBuf(new Uint8Array(src.buffer,src.byteOffset,src.byteLength));
+    \\      if(typeof src==='number')return mkBuf(new Uint8Array(src));
+    \\      if(Array.isArray(src))return mkBuf(new Uint8Array(src));
+    \\      return mkBuf(new Uint8Array(0));
+    \\    },
+    \\    alloc:function(n,fill,e){var b=new Uint8Array(n);if(fill!==undefined){if(typeof fill==='string')b.fill(fill.charCodeAt(0));else b.fill(fill);}return mkBuf(b);},
+    \\    allocUnsafe:function(n){return mkBuf(new Uint8Array(n));},
+    \\    allocUnsafeSlow:function(n){return mkBuf(new Uint8Array(n));},
+    \\    isBuffer:function(v){return v!=null&&(v._isBunBuf===true||(v instanceof Uint8Array&&typeof v.toString==='function'&&v.toString.length<=1));},
+    \\    isEncoding:function(e){return['utf8','utf-8','hex','base64','ascii','latin1','binary','ucs2','utf16le'].indexOf((e||'').toLowerCase())>=0;},
+    \\    byteLength:function(s,e){if(s instanceof ArrayBuffer||ArrayBuffer.isView(s))return s.byteLength||s.length;e=(e||'utf8').toLowerCase();if(e==='hex')return(s.length>>1);if(e==='base64')return Math.floor(s.replace(/=/g,'').length*3/4);return _enc?_enc.encode(s).length:s.length;},
+    \\    concat:function(list,len){
+    \\      if(len===undefined)len=list.reduce(function(a,b){return a+(b.byteLength||b.length);},0);
+    \\      var r=new Uint8Array(len),off=0;
+    \\      for(var i=0;i<list.length;i++){r.set(list[i],off);off+=list[i].byteLength||list[i].length;}
+    \\      return mkBuf(r);
+    \\    },
+    \\    compare:function(a,b){for(var i=0;i<Math.min(a.length,b.length);i++){if(a[i]<b[i])return -1;if(a[i]>b[i])return 1;}return a.length<b.length?-1:a.length>b.length?1:0;},
+    \\    poolSize:8192,
+    \\  };
+    \\  if(typeof globalThis!=='undefined'&&!globalThis.Buffer)globalThis.Buffer=Buffer;
+    \\  module.exports={Buffer:Buffer,SlowBuffer:Buffer.alloc,kMaxLength:2147483647,INSPECT_MAX_BYTES:50};
+    \\  module.exports.Buffer=Buffer;
+    \\})();
+;
+
+/// `assert` — Node.js assert 模块
+const ASSERT_MODULE_SRC: []const u8 =
+    \\function AssertionError(msg,actual,expected){
+    \\  this.name='AssertionError';
+    \\  this.message=msg||'Assertion failed';
+    \\  this.actual=actual;this.expected=expected;
+    \\  if(Error.captureStackTrace)Error.captureStackTrace(this,AssertionError);
+    \\}
+    \\AssertionError.prototype=Object.create(Error.prototype,{constructor:{value:AssertionError,writable:true,configurable:true}});
+    \\function assert(val,msg){if(!val)throw new AssertionError(typeof msg==='string'?msg:msg instanceof Error?msg.message:'Assertion failed',val,true);}
+    \\assert.ok=assert;
+    \\assert.fail=function(msg){throw new AssertionError(msg||'assert.fail()');};
+    \\assert.strictEqual=function(a,b,msg){if(a!==b)throw new AssertionError(msg||(a+' !== '+b),a,b);};
+    \\assert.notStrictEqual=function(a,b,msg){if(a===b)throw new AssertionError(msg||'Expected values to differ',a,b);};
+    \\assert.deepStrictEqual=function(a,b,msg){if(JSON.stringify(a)!==JSON.stringify(b))throw new AssertionError(msg||'Deep equal failed',a,b);};
+    \\assert.notDeepStrictEqual=function(a,b,msg){if(JSON.stringify(a)===JSON.stringify(b))throw new AssertionError(msg||'Values are deeply equal',a,b);};
+    \\assert.equal=function(a,b,msg){if(a!=b)throw new AssertionError(msg||(a+' != '+b),a,b);};
+    \\assert.notEqual=function(a,b,msg){if(a==b)throw new AssertionError(msg||'Expected not equal',a,b);};
+    \\assert.throws=function(fn,expected,msg){var threw=false,err=null;try{fn();}catch(e){threw=true;err=e;}if(!threw)throw new AssertionError(msg||'Missing expected exception');if(expected instanceof RegExp&&!expected.test(err.message))throw new AssertionError(msg||'Wrong error: '+err.message);};
+    \\assert.doesNotThrow=function(fn,expected,msg){try{fn();}catch(e){throw new AssertionError(msg||('Got unwanted exception: '+(e&&e.message||e)));}};
+    \\assert.rejects=function(p,expected,msg){return Promise.resolve(typeof p==='function'?p():p).then(function(){throw new AssertionError(msg||'Missing expected rejection');},function(e){if(expected instanceof RegExp&&!expected.test(e.message))throw new AssertionError(msg||'Wrong rejection: '+e.message);});};
+    \\assert.doesNotReject=function(p){return Promise.resolve(typeof p==='function'?p():p);};
+    \\assert.match=function(s,re,msg){if(!re.test(s))throw new AssertionError(msg||(s+' does not match '+re));};
+    \\assert.doesNotMatch=function(s,re,msg){if(re.test(s))throw new AssertionError(msg||(s+' matches '+re));};
+    \\assert.ifError=function(e){if(e!=null)throw e;};
+    \\assert.AssertionError=AssertionError;
+    \\module.exports=assert;
+;
+
+/// `querystring` — URL 查询字符串解析与序列化
+const QUERYSTRING_MODULE_SRC: []const u8 =
+    \\function qsEscape(s){
+    \\  return encodeURIComponent(String(s===null||s===undefined?'':s)).replace(/%20/g,'+').replace(/[!'()*]/g,function(c){return'%'+c.charCodeAt(0).toString(16).toUpperCase();});
+    \\}
+    \\function qsUnescape(s){
+    \\  try{return decodeURIComponent(String(s).replace(/\+/g,' '));}catch(e){return s;}
+    \\}
+    \\function stringify(obj,sep,eq,opts){
+    \\  sep=sep||'&';eq=eq||'=';
+    \\  if(!obj||typeof obj!=='object')return '';
+    \\  var enc=(opts&&opts.encodeURIComponent)||qsEscape;
+    \\  return Object.keys(obj).map(function(k){
+    \\    var v=obj[k];
+    \\    if(Array.isArray(v))return v.map(function(vi){return enc(k)+eq+enc(vi===null||vi===undefined?'':vi);}).join(sep);
+    \\    return enc(k)+eq+enc(v===null||v===undefined?'':v);
+    \\  }).join(sep);
+    \\}
+    \\function parse(str,sep,eq,opts){
+    \\  sep=sep||'&';eq=eq||'=';
+    \\  var maxKeys=(opts&&opts.maxKeys)||1000;
+    \\  var dec=(opts&&opts.decodeURIComponent)||qsUnescape;
+    \\  var r=Object.create(null);
+    \\  if(!str)return r;
+    \\  var pairs=String(str).split(sep);
+    \\  if(maxKeys>0&&pairs.length>maxKeys)pairs=pairs.slice(0,maxKeys);
+    \\  pairs.forEach(function(p){
+    \\    var idx=p.indexOf(eq);
+    \\    var k=idx<0?p:p.slice(0,idx);
+    \\    var v=idx<0?'':p.slice(idx+1);
+    \\    k=dec(k);v=dec(v);
+    \\    if(k in r){if(Array.isArray(r[k]))r[k].push(v);else r[k]=[r[k],v];}
+    \\    else r[k]=v;
+    \\  });
+    \\  return r;
+    \\}
+    \\module.exports={stringify:stringify,parse:parse,encode:stringify,decode:parse,escape:qsEscape,unescape:qsUnescape};
+;
+
+/// `string_decoder` — StringDecoder
+const STRING_DECODER_MODULE_SRC: []const u8 =
+    \\function StringDecoder(enc){
+    \\  this.enc=(enc||'utf8').toLowerCase().replace(/[-_]/g,'');
+    \\  this._decoder=typeof TextDecoder!=='undefined'?new TextDecoder(this.enc==='utf8'?'utf-8':this.enc,{fatal:false,ignoreBOM:true}):null;
+    \\}
+    \\StringDecoder.prototype.write=function(buf){
+    \\  if(this._decoder)return this._decoder.decode(buf instanceof Uint8Array?buf:new Uint8Array(buf),{stream:true});
+    \\  var u8=buf instanceof Uint8Array?buf:new Uint8Array(buf);
+    \\  return String.fromCharCode.apply(null,Array.from(u8));
+    \\};
+    \\StringDecoder.prototype.end=function(buf){
+    \\  var s=buf?this.write(buf):'';
+    \\  this._decoder=typeof TextDecoder!=='undefined'?new TextDecoder(this.enc==='utf8'?'utf-8':this.enc,{fatal:false,ignoreBOM:true}):null;
+    \\  return s;
+    \\};
+    \\StringDecoder.prototype.text=StringDecoder.prototype.write;
+    \\module.exports={StringDecoder:StringDecoder};
+;
+
 /// Bun 全局对象 polyfill。
 /// Bun.serve({ fetch, port? }) — 注册路由到 `globalThis.__bun_routes`；Host 侧可通过
 /// `kernel.fetch(port, init)` 把请求派发给已注册的 fetch handler。
 /// 端口 0 或缺省时自动分配（从 40000 起递增）。
 /// RFC Phase 3 T3.4：最小可工作的 Bun.serve 注入；真实 TCP 在 Phase 4+。
+/// Phase 5.7 T5.7.1：扩充 Bun 对象 — env/argv/main/sleep/which/inspect/file/write/
+///   resolveSync/gunzipSync/Transpiler/hash/password。
 const BUN_GLOBAL_SRC: []const u8 =
     \\(function(){
     \\  if(globalThis.__bun_wasm_serve_installed)return;
     \\  globalThis.__bun_wasm_serve_installed=true;
     \\  globalThis.__bun_routes=globalThis.__bun_routes||Object.create(null);
     \\  globalThis.__bun_next_port=globalThis.__bun_next_port||40000;
+    \\  // ── Bun.serve ──────────────────────────────────────────────────
     \\  function serve(opts){
     \\    if(!opts||typeof opts.fetch!=='function')throw new TypeError('Bun.serve requires { fetch }');
     \\    var port=opts.port;
@@ -345,17 +591,15 @@ const BUN_GLOBAL_SRC: []const u8 =
     \\      stop:function(){delete globalThis.__bun_routes[port];},
     \\      reload:function(newOpts){if(newOpts&&typeof newOpts.fetch==='function')globalThis.__bun_routes[port].fetch=newOpts.fetch;},
     \\      development:!!opts.development,
-    \\      pendingRequests:0,
-    \\      pendingWebSockets:0,
+    \\      pendingRequests:0,pendingWebSockets:0,
     \\      publish:function(){return 0;},
     \\      upgrade:function(){return false;},
     \\      requestIP:function(){return null;},
     \\      timeout:function(){},
-    \\      unref:function(){return this;},
-    \\      ref:function(){return this;},
+    \\      unref:function(){return this;},ref:function(){return this;},
     \\    };
     \\  }
-    \\  /** Host 派发入口：Host 侧拿到 Response 后序列化；此函数返回 Promise<Response>。 */
+    \\  /** Host fetch dispatch — returns Promise<Response>. */
     \\  function __dispatch(port,reqInit){
     \\    var route=globalThis.__bun_routes[port];
     \\    if(!route)return Promise.resolve(new Response('no route for port '+port,{status:502}));
@@ -368,18 +612,146 @@ const BUN_GLOBAL_SRC: []const u8 =
     \\      return Promise.resolve(route.fetch(req));
     \\    }catch(e){return Promise.resolve(new Response(String(e),{status:500}));}
     \\  }
-    \\  // 若宿主 global 已有真实 Bun（Bun 自身进程/Worker 中 `globalThis.Bun` 为 non-configurable），
-    \\  // 我们保存它到 `__bun_real_Bun`，然后尝试把 Bun 整体替换为 WASM 版本。
-    \\  // 若替换失败（non-configurable），退化为在真实 Bun 上逐属性覆盖 serve/version。
-    \\  var __bunObj={serve:serve,version:'0.1.0-bun-browser'};
+    \\  // ── Phase 5.7 helpers ──────────────────────────────────────────
+    \\  function __mimeFor(p){
+    \\    if(p.endsWith('.json'))return 'application/json';
+    \\    if(p.endsWith('.js')||p.endsWith('.mjs')||p.endsWith('.ts')||p.endsWith('.tsx')||p.endsWith('.jsx'))return 'text/javascript';
+    \\    if(p.endsWith('.html')||p.endsWith('.htm'))return 'text/html';
+    \\    if(p.endsWith('.css'))return 'text/css';
+    \\    if(p.endsWith('.txt'))return 'text/plain';
+    \\    if(p.endsWith('.png'))return 'image/png';
+    \\    if(p.endsWith('.svg'))return 'image/svg+xml';
+    \\    return 'application/octet-stream';
+    \\  }
+    \\  function __inspect(v,opts){
+    \\    var depth=opts&&typeof opts.depth==='number'?opts.depth:2;
+    \\    var seen=[];
+    \\    function fmt(x,d){
+    \\      if(x===null)return 'null';
+    \\      if(x===undefined)return 'undefined';
+    \\      if(typeof x==='string')return JSON.stringify(x);
+    \\      if(typeof x==='bigint')return x.toString()+'n';
+    \\      if(typeof x!=='object'&&typeof x!=='function')return String(x);
+    \\      if(typeof x==='function')return '[Function: '+(x.name||'(anonymous)')+']';
+    \\      if(seen.indexOf(x)>=0)return '[Circular]';
+    \\      if(d<=0)return Array.isArray(x)?'[Array]':'[Object]';
+    \\      seen.push(x);
+    \\      try{
+    \\        if(x instanceof Error)return x.stack||x.message||String(x);
+    \\        if(Array.isArray(x)){return '[ '+x.map(function(i){return fmt(i,d-1);}).join(', ')+' ]';}
+    \\        var keys=Object.keys(x);
+    \\        if(!keys.length)return '{}';
+    \\        return '{ '+keys.map(function(k){return k+': '+fmt(x[k],d-1);}).join(', ')+' }';
+    \\      }finally{seen.pop();}
+    \\    }
+    \\    return fmt(v,depth);
+    \\  }
+    \\  // Capture HostFn refs before we delete them from globalThis
+    \\  var __fileRead   = globalThis.__bun_file_read;
+    \\  var __fileSize   = globalThis.__bun_file_size;
+    \\  var __fileWrite  = globalThis.__bun_file_write;
+    \\  var __resolveSyn = globalThis.__bun_resolve_sync;
+    \\  var __gunzip     = globalThis.__bun_gunzip_sync;
+    \\  var __transpile  = globalThis.__bun_transpile_code;
+    \\  // ── Bun object ─────────────────────────────────────────────────
+    \\  var __bunObj={
+    \\    serve:serve,
+    \\    version:'0.1.0-bun-browser',
+    \\    revision:'00000000000000000000000000000000',
+    \\    // process aliases
+    \\    get env(){return globalThis.process?globalThis.process.env:{};},
+    \\    set env(v){if(globalThis.process)globalThis.process.env=v;},
+    \\    get argv(){return globalThis.process?globalThis.process.argv:['bun'];},
+    \\    get main(){var a=globalThis.process&&globalThis.process.argv;return(a&&a[1])||'/';},
+    \\    // async sleep
+    \\    sleep:function(ms){return new Promise(function(r){setTimeout(r,ms||0);});},
+    \\    sleepSync:function(){},
+    \\    // which — no PATH in browser
+    \\    which:function(){return null;},
+    \\    // inspect
+    \\    inspect:__inspect,
+    \\    // Bun.file(path) — lazy VFS reader
+    \\    file:function(path){
+    \\      return{
+    \\        name:path,type:__mimeFor(path),
+    \\        text:function(){return Promise.resolve(new TextDecoder().decode(new Uint8Array(__fileRead(path))));},
+    \\        arrayBuffer:function(){return Promise.resolve(__fileRead(path));},
+    \\        bytes:function(){return Promise.resolve(new Uint8Array(__fileRead(path)));},
+    \\        json:function(){return Promise.resolve(JSON.parse(new TextDecoder().decode(new Uint8Array(__fileRead(path)))));},
+    \\        stream:function(){var ab=__fileRead(path);return new ReadableStream({start:function(c){c.enqueue(new Uint8Array(ab));c.close();}});},
+    \\        get size(){return __fileSize(path);},
+    \\      };
+    \\    },
+    \\    // Bun.write(dest, data) — writes to VFS, returns Promise<number>
+    \\    write:function(dest,data){
+    \\      if(data&&typeof data.text==='function'&&typeof data!=='string'){
+    \\        return data.text().then(function(t){return __fileWrite(dest,t);});
+    \\      }
+    \\      return Promise.resolve(__fileWrite(dest,data));
+    \\    },
+    \\    // Bun.resolveSync(spec, from)
+    \\    resolveSync:function(spec,from){return __resolveSyn(spec,from||'/');},
+    \\    // Bun.gunzipSync / gzipSync
+    \\    gunzipSync:function(data){
+    \\      var ab=data instanceof Uint8Array?data:new Uint8Array(data instanceof ArrayBuffer?data:data.buffer||data);
+    \\      return new Uint8Array(__gunzip(ab).buffer);
+    \\    },
+    \\    gzipSync:function(){throw new Error('Bun.gzipSync: compression not available in browser mode');},
+    \\    // Bun.Transpiler
+    \\    Transpiler:(function(){
+    \\      function Transpiler(opts){this._opts=opts||{};}
+    \\      Transpiler.prototype.transform=function(code,opts){
+    \\        var loader=(opts&&opts.loader)||this._opts.loader||'ts';
+    \\        return Promise.resolve(__transpile(code,'file.'+loader));
+    \\      };
+    \\      Transpiler.prototype.transformSync=function(code,opts){
+    \\        var loader=(opts&&opts.loader)||this._opts.loader||'ts';
+    \\        return __transpile(code,'file.'+loader);
+    \\      };
+    \\      Transpiler.prototype.scan=function(){return{imports:[],exports:[]};};
+    \\      Transpiler.prototype.scanImports=function(){return[];};
+    \\      return Transpiler;
+    \\    })(),
+    \\    // Bun.password — stub (no native crypto in sandbox)
+    \\    password:{
+    \\      hash:function(){return Promise.reject(new Error('Bun.password not available in browser mode'));},
+    \\      verify:function(){return Promise.reject(new Error('Bun.password not available in browser mode'));},
+    \\    },
+    \\    // Bun.hash — stub (use Web Crypto API for real hashes)
+    \\    hash:Object.assign(function(data){return 0;},{
+    \\      wyhash:function(){return 0;},crc32:function(){return 0;},adler32:function(){return 0;},
+    \\      cityHash32:function(){return 0;},cityHash64:function(){return BigInt(0);},
+    \\      xxHash32:function(){return 0;},xxHash64:function(){return BigInt(0);},
+    \\      murmur32v3:function(){return 0;},murmur64v2:function(){return BigInt(0);},
+    \\    }),
+    \\    // Bun.deepEquals / Bun.deepMatch — use JSON-roundtrip heuristic
+    \\    deepEquals:function(a,b){try{return JSON.stringify(a)===JSON.stringify(b);}catch{return a===b;}},
+    \\    deepMatch:function(a,b){
+    \\      if(b===null||typeof b!=='object')return a===b;
+    \\      return Object.keys(b).every(function(k){return __bunObj.deepMatch(a[k],b[k]);});
+    \\    },
+    \\    // Bun.color / Bun.enableANSIColors — terminal color (no-op in browser)
+    \\    enableANSIColors:false,
+    \\    color:function(v){return String(v);},
+    \\  };
     \\  if(globalThis.Bun&&globalThis.Bun.serve)globalThis.__bun_real_Bun=globalThis.Bun;
     \\  var __replaced=false;
     \\  try{Object.defineProperty(globalThis,'Bun',{value:__bunObj,writable:true,configurable:true});__replaced=(globalThis.Bun===__bunObj);}catch(_e){}
     \\  if(!__replaced){try{globalThis.Bun=__bunObj;__replaced=(globalThis.Bun===__bunObj);}catch(_e){}}
     \\  if(!__replaced&&globalThis.Bun){
-    \\    try{Object.defineProperty(globalThis.Bun,'serve',{value:serve,writable:true,configurable:true});}catch(_e){try{globalThis.Bun.serve=serve;}catch(_e2){}}
+    \\    var __keys=Object.keys(__bunObj);
+    \\    for(var __i=0;__i<__keys.length;__i++){
+    \\      try{Object.defineProperty(globalThis.Bun,__keys[__i],{value:__bunObj[__keys[__i]],writable:true,configurable:true});}catch(_e){try{globalThis.Bun[__keys[__i]]=__bunObj[__keys[__i]];}catch(_e2){}}
+    \\    }
     \\  }
     \\  globalThis.__bun_dispatch_fetch=__dispatch;
+    \\  // cleanup temporary HostFn globals
+    \\  delete globalThis.__bun_file_read;
+    \\  delete globalThis.__bun_file_size;
+    \\  delete globalThis.__bun_file_write;
+    \\  delete globalThis.__bun_resolve_sync;
+    \\  delete globalThis.__bun_gunzip_sync;
+    \\  delete globalThis.__bun_transpile_code;
     \\})();
 ;
 
@@ -433,6 +805,24 @@ fn requireFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.
     }
     if (std.mem.eql(u8, specifier, "util") or std.mem.eql(u8, specifier, "node:util")) {
         return evalBuiltinSrc(UTIL_MODULE_SRC, "<util>");
+    }
+    // ── Phase 5.8: 新增内置模块 polyfill ──────────────────
+    if (std.mem.eql(u8, specifier, "events") or std.mem.eql(u8, specifier, "node:events")) {
+        return evalBuiltinSrc(EVENTS_MODULE_SRC, "<events>");
+    }
+    if (std.mem.eql(u8, specifier, "buffer") or std.mem.eql(u8, specifier, "node:buffer")) {
+        return evalBuiltinSrc(BUFFER_MODULE_SRC, "<buffer>");
+    }
+    if (std.mem.eql(u8, specifier, "assert") or std.mem.eql(u8, specifier, "node:assert") or
+        std.mem.eql(u8, specifier, "assert/strict") or std.mem.eql(u8, specifier, "node:assert/strict"))
+    {
+        return evalBuiltinSrc(ASSERT_MODULE_SRC, "<assert>");
+    }
+    if (std.mem.eql(u8, specifier, "querystring") or std.mem.eql(u8, specifier, "node:querystring")) {
+        return evalBuiltinSrc(QUERYSTRING_MODULE_SRC, "<querystring>");
+    }
+    if (std.mem.eql(u8, specifier, "string_decoder") or std.mem.eql(u8, specifier, "node:string_decoder")) {
+        return evalBuiltinSrc(STRING_DECODER_MODULE_SRC, "<string_decoder>");
     }
 
     // ── VFS CJS loader ────────────────────────────────────
@@ -768,6 +1158,115 @@ fn clearTimeoutFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror
 }
 
 // ──────────────────────────────────────────────────────────
+// Phase 5.7 T5.7.1 — Bun.* HostFunctions
+// ──────────────────────────────────────────────────────────
+
+/// Bun.file(path) helper — reads VFS file as an ArrayBuffer handle.
+/// Throws if the file does not exist.
+fn bunFileReadFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
+    if (args.len == 0 or args[0].isNullOrUndefined()) return error.JSIException;
+    const path = try runtime_g.dupeString(args[0]);
+    defer allocator.free(path);
+    const data = vfs_g.readFile(path) catch return error.JSIException;
+    defer allocator.free(data);
+    return runtime_g.makeArrayBuffer(data, true);
+}
+
+/// Bun.file(path).size — returns the byte size of a VFS file (or 0 if missing).
+fn bunFileSizeFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
+    if (args.len == 0 or args[0].isNullOrUndefined()) return runtime_g.makeNumber(0);
+    const path = try runtime_g.dupeString(args[0]);
+    defer allocator.free(path);
+    const st = vfs_g.stat(path) catch return runtime_g.makeNumber(0);
+    return runtime_g.makeNumber(@floatFromInt(st.size));
+}
+
+/// Bun.write(path, data) — write string or binary data to VFS.
+/// Returns number of bytes written.
+fn bunFileWriteFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
+    if (args.len < 2) return runtime_g.makeNumber(0);
+    const path = try runtime_g.dupeString(args[0]);
+    defer allocator.free(path);
+    const dir = pathDirname(path);
+    if (!std.mem.eql(u8, dir, "/")) vfs_g.mkdir(dir, 0o755) catch {};
+    const type_tag = jsi.imports.jsi_typeof(args[1].handle);
+    if (type_tag == @intFromEnum(jsi.TypeTag.string)) {
+        const data = try runtime_g.dupeString(args[1]);
+        defer allocator.free(data);
+        vfs_g.writeFile(path, data, 0o644) catch return error.JSIException;
+        return runtime_g.makeNumber(@floatFromInt(data.len));
+    } else if (type_tag == @intFromEnum(jsi.TypeTag.arraybuffer) or
+        type_tag == @intFromEnum(jsi.TypeTag.typed_array))
+    {
+        const byte_len = jsi.imports.jsi_arraybuffer_byteLength(args[1].handle);
+        if (byte_len < 0) return runtime_g.makeNumber(0);
+        const buf = try allocator.alloc(u8, @intCast(byte_len));
+        defer allocator.free(buf);
+        const n = jsi.imports.jsi_read_arraybuffer(args[1].handle, @intFromPtr(buf.ptr), @intCast(byte_len));
+        if (n < 0) return runtime_g.makeNumber(0);
+        vfs_g.writeFile(path, buf[0..@intCast(n)], 0o644) catch return error.JSIException;
+        return runtime_g.makeNumber(@floatFromInt(n));
+    }
+    return runtime_g.makeNumber(0);
+}
+
+/// Bun.resolveSync(spec, from) — resolve a module specifier from a given file path.
+fn bunResolveSyncFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
+    if (args.len == 0 or args[0].isNullOrUndefined()) return error.JSIException;
+    const spec = try runtime_g.dupeString(args[0]);
+    defer allocator.free(spec);
+    const from = if (args.len > 1 and !args[1].isNullOrUndefined())
+        try runtime_g.dupeString(args[1])
+    else
+        try allocator.dupe(u8, "/");
+    defer allocator.free(from);
+
+    const base_dir: []const u8 = if (from.len > 0 and from[0] == '/') pathDirname(from) else "/";
+
+    if (isNodeBuiltin(spec)) {
+        const vpath = builtinVirtualPath(allocator, spec) catch return error.JSIException;
+        defer allocator.free(vpath);
+        return runtime_g.makeString(vpath);
+    }
+    const is_bare = spec.len > 0 and !(spec[0] == '/' or spec[0] == '.');
+    const resolved: ResolveResult = if (is_bare) blk: {
+        if (resolveViaTsconfigPaths(allocator, base_dir, spec)) |r| break :blk r else |err| switch (err) {
+            error.OutOfMemory => return error.JSIException,
+            error.ModuleNotFound => {},
+        }
+        break :blk resolveBareInVfs(allocator, base_dir, spec) catch return error.JSIException;
+    } else resolveRelative(allocator, base_dir, spec) catch return error.JSIException;
+    defer allocator.free(resolved.path);
+    return runtime_g.makeString(resolved.path);
+}
+
+/// Bun.gunzipSync(data: Uint8Array) → Uint8Array — gzip decompression using inflateImpl.
+fn bunGunzipSyncFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
+    if (args.len == 0) return error.JSIException;
+    const byte_len = jsi.imports.jsi_arraybuffer_byteLength(args[0].handle);
+    if (byte_len < 0) return error.JSIException;
+    const input = try allocator.alloc(u8, @intCast(byte_len));
+    defer allocator.free(input);
+    const read_n = jsi.imports.jsi_read_arraybuffer(args[0].handle, @intFromPtr(input.ptr), @intCast(byte_len));
+    if (read_n < 0) return error.JSIException;
+    const decompressed = inflateImpl(input[0..@intCast(read_n)], 0) catch return error.JSIException;
+    defer allocator.free(decompressed);
+    return runtime_g.makeArrayBuffer(decompressed, true);
+}
+
+/// Bun.Transpiler host bridge — transpiles code with the same pipeline as the bundler.
+fn bunTranspileCodeFn(_: *anyopaque, _: jsi.Value, args: []const jsi.Value) anyerror!jsi.Value {
+    if (args.len < 2) return jsi.Value.null_;
+    const code = try runtime_g.dupeString(args[0]);
+    defer allocator.free(code);
+    const filename = try runtime_g.dupeString(args[1]);
+    defer allocator.free(filename);
+    const result = transpileIfNeeded(allocator, filename, code) catch return jsi.Value.null_;
+    defer allocator.free(result);
+    return runtime_g.makeString(result);
+}
+
+// ──────────────────────────────────────────────────────────
 // VFS write-file helper (called from Host to add files)
 // ──────────────────────────────────────────────────────────
 
@@ -801,6 +1300,20 @@ fn setupGlobals(rt: *jsi.Runtime) !void {
     // ── URL parser (Phase 5.1 T5.1.4) ────────────────────
     const url_parse_fn = try rt.createHostFunction(urlParseHostFn, "__bun_url_parse", 1);
     rt.setProperty(rt.global, "__bun_url_parse", url_parse_fn);
+
+    // ── Phase 5.7 T5.7.1: Bun.* host bridges ─────────────
+    const bun_file_read_fn  = try rt.createHostFunction(bunFileReadFn,    "__bun_file_read",    1);
+    const bun_file_size_fn  = try rt.createHostFunction(bunFileSizeFn,    "__bun_file_size",    1);
+    const bun_file_write_fn = try rt.createHostFunction(bunFileWriteFn,   "__bun_file_write",   2);
+    const bun_resolve_fn    = try rt.createHostFunction(bunResolveSyncFn, "__bun_resolve_sync", 2);
+    const bun_gunzip_fn     = try rt.createHostFunction(bunGunzipSyncFn,  "__bun_gunzip_sync",  1);
+    const bun_transpile_fn  = try rt.createHostFunction(bunTranspileCodeFn, "__bun_transpile_code", 2);
+    rt.setProperty(rt.global, "__bun_file_read",      bun_file_read_fn);
+    rt.setProperty(rt.global, "__bun_file_size",      bun_file_size_fn);
+    rt.setProperty(rt.global, "__bun_file_write",     bun_file_write_fn);
+    rt.setProperty(rt.global, "__bun_resolve_sync",   bun_resolve_fn);
+    rt.setProperty(rt.global, "__bun_gunzip_sync",    bun_gunzip_fn);
+    rt.setProperty(rt.global, "__bun_transpile_code", bun_transpile_fn);
 
     _ = try rt.evalScript(
         \\globalThis.require = globalThis.__bun_require;
@@ -1117,19 +1630,43 @@ export fn bun_semver_select(
     return semverSelect(versions_json, range_str) catch packError(1);
 }
 
-fn semverSelect(versions_json: []const u8, range_str: []const u8) !u64 {
+/// Pick the best matching version from a flat slice of version strings.
+/// Skips pre-release versions unless the range explicitly targets them.
+/// Returns `error.NoMatch` when nothing satisfies the range.
+fn semverSelectFromList(ver_list: []const []const u8, range_str: []const u8) ![]const u8 {
     const Semver = bun.Semver;
     const Version = Semver.Version;
     const Query = Semver.Query;
     const SlicedString = Semver.SlicedString;
 
-    // Parse the semver range
     const range_sliced = SlicedString{ .buf = range_str, .slice = range_str };
     var group = try Query.parse(allocator, range_str, range_sliced);
     defer group.deinit();
 
+    var best: ?struct { ver: Version, str: []const u8 } = null;
+
+    for (ver_list) |ver_str| {
+        const parse_result = Version.parseUTF8(ver_str);
+        if (!parse_result.valid) continue;
+        const ver = parse_result.version.min();
+
+        // Skip pre-release versions unless the range explicitly requests them.
+        if (ver.tag.hasPre()) continue;
+
+        if (!group.satisfies(ver, range_str, ver_str)) continue;
+
+        // Keep the highest version that satisfies.
+        if (best) |b| {
+            if (ver.order(b.ver, ver_str, b.str) != .gt) continue;
+        }
+        best = .{ .ver = ver, .str = ver_str };
+    }
+
+    return (best orelse return error.NoMatch).str;
+}
+
+fn semverSelect(versions_json: []const u8, range_str: []const u8) !u64 {
     // Parse the JSON array of version strings.
-    // We use a simple streaming parser to avoid allocating the full AST.
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, versions_json, .{});
     defer parsed.deinit();
 
@@ -1138,35 +1675,208 @@ fn semverSelect(versions_json: []const u8, range_str: []const u8) !u64 {
         else => return packError(1),
     };
 
-    var best: ?struct { ver: Version, str: []const u8 } = null;
+    var ver_list: std.ArrayList([]const u8) = .empty;
+    defer ver_list.deinit(allocator);
 
     for (arr.items) |item| {
         const ver_str = switch (item) {
             .string => |s| s,
             else => continue,
         };
-
-        const parse_result = Version.parseUTF8(ver_str);
-        if (!parse_result.valid) continue;
-        const ver = parse_result.version.min();
-
-        // Skip pre-release versions unless the range explicitly requests them
-        if (ver.tag.hasPre()) continue;
-
-        if (!group.satisfies(ver, range_str, ver_str)) continue;
-
-        // Keep the highest version that satisfies
-        if (best) |b| {
-            const ord = ver.order(b.ver, ver_str, b.str);
-            if (ord != .gt) continue;
-        }
-        best = .{ .ver = ver, .str = ver_str };
+        try ver_list.append(allocator, ver_str);
     }
 
-    const chosen = (best orelse return packError(1)).str;
-
+    const chosen = semverSelectFromList(ver_list.items, range_str) catch return packError(1);
     const buf = try allocator.dupe(u8, chosen);
     return handOff(buf);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// T5.4.1 — bun_npm_parse_metadata
+// Parse a full npm registry metadata JSON, apply semver range (or dist-tag),
+// and return the resolved version info as a compact JSON object.
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Input:
+//   json_ptr/json_len  — raw bytes from GET https://registry.npmjs.org/<pkgname>
+//   range_ptr/range_len — semver range or dist-tag ("^1.0.0", "latest", "1.2.3", "*")
+//
+// Returns packed (ptr << 32 | len) → JSON:
+//   {"version":"1.2.3","tarball":"https://...","integrity":"sha512-...","shasum":"...","dependencies":{...}}
+// Errors:
+//   packError(1) = OOM
+//   packError(2) = invalid / unparsable JSON or missing required fields
+//   packError(3) = no version satisfying the range
+
+/// Returns true if the string looks like a semver range, not a dist-tag.
+fn isVersionLike(s: []const u8) bool {
+    if (s.len == 0) return false;
+    const c = s[0];
+    return (c >= '0' and c <= '9') or c == '^' or c == '~' or
+        c == '>' or c == '<' or c == '=' or c == '*' or c == 'x' or c == 'X';
+}
+
+export fn bun_npm_parse_metadata(
+    json_ptr: [*]const u8,
+    json_len: u32,
+    range_ptr: [*]const u8,
+    range_len: u32,
+) u64 {
+    if (!initialized) return packError(2);
+    const json_bytes = json_ptr[0..json_len];
+    const range_str = range_ptr[0..range_len];
+    return npmParseMetadata(json_bytes, range_str) catch |err| switch (err) {
+        error.NoMatch => packError(3),
+        error.OutOfMemory => packError(1),
+        else => packError(2),
+    };
+}
+
+fn npmParseMetadata(json_bytes: []const u8, range_str: []const u8) !u64 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{
+        .duplicate_field_behavior = .use_last,
+    });
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.SyntaxError,
+    };
+
+    // Extract versions object.
+    const versions_obj = switch (root.get("versions") orelse return error.SyntaxError) {
+        .object => |o| o,
+        else => return error.SyntaxError,
+    };
+
+    // Extract dist-tags (optional but required for dist-tag range resolution).
+    const dist_tags_opt: ?std.json.ObjectMap = if (root.get("dist-tags")) |v| switch (v) {
+        .object => |o| o,
+        else => null,
+    } else null;
+
+    // Resolve effective semver range from the raw range argument.
+    // Rules:
+    //   - Wildcard ("", "*", "x", "X") → use "latest" dist-tag if present
+    //   - Non-version-like string       → treat as dist-tag, look up in dist-tags
+    //   - Everything else               → pass directly to semverSelectFromList
+    var effective_range_buf: [256]u8 = undefined;
+    var effective_range: []const u8 = std.mem.trim(u8, range_str, " \t");
+
+    if (effective_range.len == 0 or
+        std.mem.eql(u8, effective_range, "*") or
+        std.mem.eql(u8, effective_range, "x") or
+        std.mem.eql(u8, effective_range, "X"))
+    {
+        // Wildcard: try to pin to "latest" first.
+        if (dist_tags_opt) |dt| {
+            if (dt.get("latest")) |lv| {
+                if (lv == .string and lv.string.len < effective_range_buf.len) {
+                    @memcpy(effective_range_buf[0..lv.string.len], lv.string);
+                    effective_range = effective_range_buf[0..lv.string.len];
+                }
+            }
+        }
+        // Still wildcard after dist-tag lookup → leave as "*" for semver.
+        if (effective_range.len == 0) effective_range = "*";
+    } else if (!isVersionLike(effective_range)) {
+        // Dist-tag (e.g. "latest", "next", "beta").
+        if (dist_tags_opt) |dt| {
+            if (dt.get(effective_range)) |tv| {
+                if (tv == .string and tv.string.len < effective_range_buf.len) {
+                    @memcpy(effective_range_buf[0..tv.string.len], tv.string);
+                    effective_range = effective_range_buf[0..tv.string.len];
+                }
+            }
+        }
+    }
+
+    // Build a flat list of version strings for semver selection.
+    var ver_list: std.ArrayList([]const u8) = .empty;
+    defer ver_list.deinit(allocator);
+    {
+        var it = versions_obj.iterator();
+        while (it.next()) |entry| {
+            try ver_list.append(allocator, entry.key_ptr.*);
+        }
+    }
+
+    // Select the best matching version.
+    // Exact match first (avoids full semver parse for pinned versions).
+    const chosen_ver: []const u8 = blk: {
+        if (versions_obj.get(effective_range) != null) break :blk effective_range;
+        break :blk semverSelectFromList(ver_list.items, effective_range) catch |e| switch (e) {
+            error.NoMatch => return error.NoMatch,
+            else => return e,
+        };
+    };
+
+    // Fetch version-specific metadata.
+    const ver_meta = switch (versions_obj.get(chosen_ver) orelse return error.NoMatch) {
+        .object => |o| o,
+        else => return error.SyntaxError,
+    };
+
+    // Extract dist fields.
+    const dist_opt: ?std.json.ObjectMap = if (ver_meta.get("dist")) |v| switch (v) {
+        .object => |o| o,
+        else => null,
+    } else null;
+
+    const tarball: []const u8 = if (dist_opt) |d| switch (d.get("tarball") orelse .null) {
+        .string => |s| s,
+        else => "",
+    } else "";
+    const integrity: []const u8 = if (dist_opt) |d| switch (d.get("integrity") orelse .null) {
+        .string => |s| s,
+        else => "",
+    } else "";
+    const shasum: []const u8 = if (dist_opt) |d| switch (d.get("shasum") orelse .null) {
+        .string => |s| s,
+        else => "",
+    } else "";
+
+    // Extract dependencies (optional).
+    const deps_opt: ?std.json.ObjectMap = if (ver_meta.get("dependencies")) |v| switch (v) {
+        .object => |o| o,
+        else => null,
+    } else null;
+
+    // Serialize output JSON.
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "{\"version\":");
+    try jsonEscapeTo(&out, chosen_ver);
+    try out.appendSlice(allocator, ",\"tarball\":");
+    try jsonEscapeTo(&out, tarball);
+    if (integrity.len > 0) {
+        try out.appendSlice(allocator, ",\"integrity\":");
+        try jsonEscapeTo(&out, integrity);
+    }
+    if (shasum.len > 0) {
+        try out.appendSlice(allocator, ",\"shasum\":");
+        try jsonEscapeTo(&out, shasum);
+    }
+    try out.appendSlice(allocator, ",\"dependencies\":{");
+    if (deps_opt) |deps| {
+        var dep_it = deps.iterator();
+        var first = true;
+        while (dep_it.next()) |dep_entry| {
+            if (!first) try out.append(allocator, ',');
+            first = false;
+            try jsonEscapeTo(&out, dep_entry.key_ptr.*);
+            try out.append(allocator, ':');
+            const dep_range = switch (dep_entry.value_ptr.*) {
+                .string => |s| s,
+                else => "*",
+            };
+            try jsonEscapeTo(&out, dep_range);
+        }
+    }
+    try out.appendSlice(allocator, "}}");
+
+    return handOff(try out.toOwnedSlice(allocator));
 }
 
 export fn bun_lockfile_parse(src_ptr: [*]const u8, src_len: u32) u64 {
@@ -1358,6 +2068,13 @@ export fn bun_resolve(
     // base_dir 优先使用 from 文件的 dirname；from 为空或非绝对路径时退化到 /
     const base_dir: []const u8 = if (from.len > 0 and from[0] == '/') pathDirname(from) else "/";
 
+    // T5.3.1i: Node builtin modules → virtual path (never in VFS)
+    if (isNodeBuiltin(spec)) {
+        const vpath = builtinVirtualPath(allocator, spec) catch return packError(1);
+        defer allocator.free(vpath);
+        return emitResolveResult(vpath, "js");
+    }
+
     // 裸包（例如 "react"）：不以 / . 开头
     const is_bare = !(spec[0] == '/' or spec[0] == '.');
     if (is_bare) {
@@ -1410,6 +2127,88 @@ export fn bun_bundle(entry_ptr: [*]const u8, entry_len: u32) u64 {
     return handOff(emitted);
 }
 
+/// T5.3.3: `bun_bundle2` — bundle with full JSON config.
+///
+/// Input JSON schema:
+///   {
+///     "entrypoint": "/app/index.ts",   // required
+///     "external": ["react", "lodash"], // optional: skip bundling, delegate to globalThis.require
+///     "define": {                      // optional: text substitutions applied after transpile
+///       "process.env.NODE_ENV": "\"production\""
+///     }
+///   }
+///
+/// Returns the same IIFE bundle format as bun_bundle.
+/// Error codes: 1=OOM/parse, 2=entry not found, 3=too deep, 4=transpile failed, 5=missing entrypoint
+export fn bun_bundle2(cfg_ptr: [*]const u8, cfg_len: u32) u64 {
+    if (!initialized) return packError(1);
+    const cfg_json = cfg_ptr[0..cfg_len];
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, cfg_json, .{
+        .ignore_unknown_fields = true,
+    }) catch return packError(1);
+    defer parsed.deinit();
+
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return packError(1),
+    };
+
+    // Extract required entrypoint
+    const entry_val = obj.get("entrypoint") orelse return packError(5);
+    const entry = switch (entry_val) {
+        .string => |s| s,
+        else => return packError(5),
+    };
+
+    var bundler = Bundler.init(allocator) catch return packError(1);
+    defer bundler.deinit();
+
+    // Parse optional externals array
+    if (obj.get("external")) |ext_val| {
+        if (ext_val == .array) {
+            for (ext_val.array.items) |item| {
+                if (item != .string) continue;
+                const copy = allocator.dupe(u8, item.string) catch return packError(1);
+                bundler.externals.append(allocator, copy) catch {
+                    allocator.free(copy);
+                    return packError(1);
+                };
+            }
+        }
+    }
+
+    // Parse optional define object
+    if (obj.get("define")) |def_val| {
+        if (def_val == .object) {
+            var it = def_val.object.iterator();
+            while (it.next()) |kv| {
+                if (kv.value_ptr.* != .string) continue;
+                const key = allocator.dupe(u8, kv.key_ptr.*) catch return packError(1);
+                const val = allocator.dupe(u8, kv.value_ptr.*.string) catch {
+                    allocator.free(key);
+                    return packError(1);
+                };
+                bundler.defines.append(allocator, .{ .key = key, .value = val }) catch {
+                    allocator.free(key);
+                    allocator.free(val);
+                    return packError(1);
+                };
+            }
+        }
+    }
+
+    bundler.addEntry(entry) catch |err| switch (err) {
+        error.OutOfMemory => return packError(1),
+        error.ModuleNotFound => return packError(2),
+        error.TooDeep => return packError(3),
+        error.TranspileFailed => return packError(4),
+    };
+
+    const emitted = bundler.emit() catch return packError(1);
+    return handOff(emitted);
+}
+
 const ResolveResult = struct { path: []u8, loader: []const u8 };
 
 fn classifyLoader(path: []const u8) []const u8 {
@@ -1421,6 +2220,7 @@ fn classifyLoader(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".mjs")) return "mjs";
     if (std.mem.endsWith(u8, path, ".cjs")) return "cjs";
     if (std.mem.endsWith(u8, path, ".json")) return "json";
+    if (std.mem.endsWith(u8, path, ".css")) return "css";
     return "js";
 }
 
@@ -1434,7 +2234,7 @@ fn resolveRelative(alloc: std.mem.Allocator, base_dir: []const u8, spec: []const
         return .{ .path = abs, .loader = classifyLoader(abs) };
     }
 
-    const exts = [_][]const u8{ ".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx", ".json" };
+    const exts = [_][]const u8{ ".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx", ".json", ".css" };
     for (exts) |ext| {
         const p = try std.fmt.allocPrint(alloc, "{s}{s}", .{ abs, ext });
         if (isFile(p)) {
@@ -1811,6 +2611,91 @@ fn isDir(path: []const u8) bool {
     return st.kind == .directory;
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// T5.3.1i — Node builtin recognition & virtual path polyfill
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Bare names (without "node:" prefix) that are recognised as Node.js builtins.
+const NODE_BUILTIN_BARE_NAMES = [_][]const u8{
+    "fs",              "path",         "url",       "util",      "crypto",
+    "buffer",          "os",           "net",        "http",      "https",
+    "events",          "stream",       "assert",     "vm",        "module",
+    "child_process",   "string_decoder", "querystring", "tls",    "readline",
+    "zlib",            "dns",          "dgram",      "cluster",   "tty",
+    "constants",       "timers",       "async_hooks", "perf_hooks", "worker_threads",
+    "punycode",        "process",
+};
+
+/// Returns true when `spec` is a Node.js built-in specifier
+/// ("node:fs", "fs", "path", "node:crypto", etc.).
+fn isNodeBuiltin(spec: []const u8) bool {
+    if (std.mem.startsWith(u8, spec, "node:")) return true;
+    for (NODE_BUILTIN_BARE_NAMES) |name| {
+        if (std.mem.eql(u8, spec, name)) return true;
+    }
+    return false;
+}
+
+/// Allocates and returns the virtual path for a builtin specifier.
+/// "fs" → "<builtin:node:fs>",  "node:path" → "<builtin:node:path>"
+fn builtinVirtualPath(alloc: std.mem.Allocator, spec: []const u8) ![]u8 {
+    if (std.mem.startsWith(u8, spec, "node:")) {
+        return std.fmt.allocPrint(alloc, "<builtin:{s}>", .{spec});
+    }
+    return std.fmt.allocPrint(alloc, "<builtin:node:{s}>", .{spec});
+}
+
+/// Extracts the canonical "node:<name>" module name from a virtual path
+/// like "<builtin:node:fs>".  Returns null if the format doesn't match.
+fn canonicalFromVirtualPath(path: []const u8) ?[]const u8 {
+    const prefix = "<builtin:";
+    const suffix = ">";
+    if (!std.mem.startsWith(u8, path, prefix)) return null;
+    if (!std.mem.endsWith(u8, path, suffix)) return null;
+    return path[prefix.len .. path.len - suffix.len];
+}
+
+/// Returns the CJS-compatible JS polyfill source for a builtin module.
+/// `canonical` is the canonical form, e.g. "node:path", "node:fs".
+/// - path / url / util  → inline JS polyfill (already defined as constants)
+/// - fs / crypto / etc. → delegate to globalThis.require (set up by bun_browser_init)
+/// - all others         → empty-object stub
+fn builtinPolyfillSource(canonical: []const u8) []const u8 {
+    if (std.mem.eql(u8, canonical, "node:path") or std.mem.eql(u8, canonical, "path"))
+        return PATH_MODULE_SRC;
+    if (std.mem.eql(u8, canonical, "node:url") or std.mem.eql(u8, canonical, "url"))
+        return URL_MODULE_SRC;
+    if (std.mem.eql(u8, canonical, "node:util") or std.mem.eql(u8, canonical, "util"))
+        return UTIL_MODULE_SRC;
+    // Phase 5.8: inline polyfills for common Node.js built-ins
+    if (std.mem.eql(u8, canonical, "node:events") or std.mem.eql(u8, canonical, "events"))
+        return EVENTS_MODULE_SRC;
+    if (std.mem.eql(u8, canonical, "node:buffer") or std.mem.eql(u8, canonical, "buffer"))
+        return BUFFER_MODULE_SRC;
+    if (std.mem.eql(u8, canonical, "node:assert") or std.mem.eql(u8, canonical, "assert") or
+        std.mem.eql(u8, canonical, "node:assert/strict"))
+        return ASSERT_MODULE_SRC;
+    if (std.mem.eql(u8, canonical, "node:querystring") or std.mem.eql(u8, canonical, "querystring"))
+        return QUERYSTRING_MODULE_SRC;
+    if (std.mem.eql(u8, canonical, "node:string_decoder") or std.mem.eql(u8, canonical, "string_decoder"))
+        return STRING_DECODER_MODULE_SRC;
+    // HostFn-backed builtins: delegate through globalThis.require at runtime.
+    if (std.mem.eql(u8, canonical, "node:fs") or std.mem.eql(u8, canonical, "fs"))
+        return "module.exports=(typeof globalThis!==\"undefined\"&&typeof globalThis.require===\"function\")?globalThis.require(\"node:fs\"):{};"; 
+    if (std.mem.eql(u8, canonical, "node:crypto") or std.mem.eql(u8, canonical, "crypto"))
+        return "module.exports=(typeof globalThis!==\"undefined\"&&typeof globalThis.require===\"function\")?globalThis.require(\"node:crypto\"):{};"; 
+    if (std.mem.eql(u8, canonical, "node:events") or std.mem.eql(u8, canonical, "events"))
+        return "module.exports=(typeof globalThis!==\"undefined\"&&typeof globalThis.require===\"function\")?globalThis.require(\"node:events\"):{};"; 
+    if (std.mem.eql(u8, canonical, "node:stream") or std.mem.eql(u8, canonical, "stream"))
+        return "module.exports=(typeof globalThis!==\"undefined\"&&typeof globalThis.require===\"function\")?globalThis.require(\"node:stream\"):{};"; 
+    if (std.mem.eql(u8, canonical, "node:buffer") or std.mem.eql(u8, canonical, "buffer"))
+        return "module.exports={Buffer:typeof globalThis!==\"undefined\"?globalThis.Buffer||{}:{}};"; 
+    if (std.mem.eql(u8, canonical, "node:os") or std.mem.eql(u8, canonical, "os"))
+        return "module.exports={platform:function(){return'browser';},type:function(){return'Browser';},homedir:function(){return'/';},tmpdir:function(){return'/tmp';},EOL:'\\n',arch:function(){return'wasm32';}};"; 
+    // Unknown builtin → empty-object stub (forward-compatible)
+    return "module.exports={};"; 
+}
+
 fn emitResolveResult(path: []const u8, loader: []const u8) u64 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -1845,6 +2730,12 @@ const Bundler = struct {
     /// 按顺序持有：每项为 { path, js_source, deps: []DepEdge }
     entries: std.ArrayListUnmanaged(BundleEntry),
     entry_id: u32 = 0,
+    /// T5.3.3: external package names (skipped bundling, delegated to outer require)
+    externals: std.ArrayListUnmanaged([]u8) = .{},
+    /// T5.3.3: define substitutions e.g. process.env.NODE_ENV → "production"
+    defines: std.ArrayListUnmanaged(DefineEntry) = .{},
+
+    const DefineEntry = struct { key: []u8, value: []u8 };
 
     const BundleEntry = struct {
         path: []u8,
@@ -1882,16 +2773,62 @@ const Bundler = struct {
             e.deps.deinit(self.alloc);
         }
         self.entries.deinit(self.alloc);
+        for (self.externals.items) |s| self.alloc.free(s);
+        self.externals.deinit(self.alloc);
+        for (self.defines.items) |d| { self.alloc.free(d.key); self.alloc.free(d.value); }
+        self.defines.deinit(self.alloc);
     }
 
     fn addEntry(self: *Bundler, entry_path: []const u8) BundlerError!void {
         self.entry_id = try self.addFile(entry_path, "/", 0);
     }
 
+    /// T5.3.3: Register an external specifier as a synthetic module that delegates to
+    /// the outer globalThis.require at runtime (consistent with node builtin polyfill pattern).
+    fn addExternalModule(self: *Bundler, specifier: []const u8) BundlerError!u32 {
+        const synthetic_path = std.fmt.allocPrint(self.alloc, "<external:{s}>", .{specifier}) catch return error.OutOfMemory;
+        if (self.by_path.get(synthetic_path)) |existing_id| {
+            self.alloc.free(synthetic_path);
+            return existing_id;
+        }
+        // Emit: module.exports via globalThis.require (same pattern as node builtin delegate)
+        var js_buf: std.ArrayList(u8) = .empty;
+        defer js_buf.deinit(self.alloc);
+        js_buf.appendSlice(self.alloc, "module.exports=(typeof globalThis!==\"undefined\"&&typeof globalThis.require===\"function\")?globalThis.require(") catch return error.OutOfMemory;
+        jsonEscapeTo(&js_buf, specifier) catch return error.OutOfMemory;
+        js_buf.appendSlice(self.alloc, "):{};") catch return error.OutOfMemory;
+        const js = js_buf.toOwnedSlice(self.alloc) catch return error.OutOfMemory;
+
+        const id: u32 = @intCast(self.entries.items.len);
+        const key = self.alloc.dupe(u8, synthetic_path) catch {
+            self.alloc.free(js);
+            self.alloc.free(synthetic_path);
+            return error.OutOfMemory;
+        };
+        self.by_path.put(key, id) catch {
+            self.alloc.free(key);
+            self.alloc.free(js);
+            self.alloc.free(synthetic_path);
+            return error.OutOfMemory;
+        };
+        self.entries.append(self.alloc, .{
+            .path = synthetic_path,
+            .js_source = js,
+            .deps = .{},
+        }) catch return error.OutOfMemory;
+        return id;
+    }
+
     /// Phase 5.3: union resolver — relative/abs → resolveRelative,
     /// bare → tsconfig paths → node_modules (package.json main/exports).
+    /// T5.3.1i: node builtins → virtual "<builtin:node:X>" paths.
     fn resolveModule(self: *Bundler, specifier: []const u8, base_dir: []const u8) !ResolveResult {
         if (specifier.len == 0) return error.ModuleNotFound;
+        // T5.3.1i: catch Node builtins before any VFS or bare-package lookup
+        if (isNodeBuiltin(specifier)) {
+            const vpath = builtinVirtualPath(self.alloc, specifier) catch return error.OutOfMemory;
+            return .{ .path = vpath, .loader = "js" };
+        }
         const is_bare = !(specifier[0] == '/' or specifier[0] == '.');
         if (is_bare) {
             if (resolveViaTsconfigPaths(self.alloc, base_dir, specifier)) |r| return r else |err| switch (err) {
@@ -1906,6 +2843,13 @@ const Bundler = struct {
     fn addFile(self: *Bundler, specifier: []const u8, base_dir: []const u8, depth: u32) BundlerError!u32 {
         if (depth > 256) return error.TooDeep;
 
+        // T5.3.3: check externals before any resolution
+        for (self.externals.items) |ext| {
+            if (std.mem.eql(u8, specifier, ext)) {
+                return self.addExternalModule(specifier);
+            }
+        }
+
         const resolved = self.resolveModule(specifier, base_dir) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ModuleNotFound => return error.ModuleNotFound,
@@ -1916,14 +2860,48 @@ const Bundler = struct {
             return id;
         }
 
+        // T5.3.1i: virtual builtin path → inline polyfill source, skip VFS
+        if (canonicalFromVirtualPath(resolved.path)) |canonical| {
+            const polyfill = builtinPolyfillSource(canonical);
+            const js = self.alloc.dupe(u8, polyfill) catch {
+                self.alloc.free(resolved.path);
+                return error.OutOfMemory;
+            };
+            const id: u32 = @intCast(self.entries.items.len);
+            const key = self.alloc.dupe(u8, resolved.path) catch {
+                self.alloc.free(js);
+                self.alloc.free(resolved.path);
+                return error.OutOfMemory;
+            };
+            errdefer self.alloc.free(key);
+            try self.by_path.put(key, id);
+            try self.entries.append(self.alloc, .{
+                .path = resolved.path, // ownership transferred to entry
+                .js_source = js,
+                .deps = .{},
+            });
+            return id;
+        }
+
         // 读取 & 转译
         const raw = vfs_g.readFile(resolved.path) catch {
             self.alloc.free(resolved.path);
             return error.ModuleNotFound;
         };
-        defer self.alloc.free(raw);
+        // T5.3.3: apply define substitutions BEFORE transpile so the host transpiler
+        // sees already-replaced values (and won't substitute its own env defines).
+        const pre_transpile = if (self.defines.items.len > 0) blk: {
+            const defined = applyDefines(self.alloc, raw, self.defines.items) catch {
+                self.alloc.free(raw);
+                self.alloc.free(resolved.path);
+                return error.OutOfMemory;
+            };
+            self.alloc.free(raw);
+            break :blk defined;
+        } else raw;
+        defer self.alloc.free(pre_transpile);
 
-        const js = transpileIfNeeded(self.alloc, resolved.path, raw) catch |err| switch (err) {
+        const js = transpileIfNeeded(self.alloc, resolved.path, pre_transpile) catch |err| switch (err) {
             error.OutOfMemory => {
                 self.alloc.free(resolved.path);
                 return error.OutOfMemory;
@@ -1993,7 +2971,14 @@ const Bundler = struct {
         //   __modules__[i]=function(module,exports,require){ ...js... };
         //   __modules__[i].__deps__={ "<spec>": id, ... };
         for (self.entries.items, 0..) |entry, i| {
+            try appendFmt(&out, "// {s}\n", .{entry.path});
             try appendFmt(&out, "__modules__[{d}]=function(module,exports,require){{\n", .{i});
+            // T5.3.7: inject __filename and __dirname for Node.js compatibility
+            try out.appendSlice(self.alloc, "var __filename=");
+            try jsonEscapeTo(&out, entry.path);
+            try out.appendSlice(self.alloc, ",__dirname=");
+            try jsonEscapeTo(&out, pathDirname(entry.path));
+            try out.appendSlice(self.alloc, ";\n");
             try out.appendSlice(self.alloc, entry.js_source);
             try out.appendSlice(self.alloc, "\n};\n");
             try appendFmt(&out, "__modules__[{d}].__deps__={{", .{i});
@@ -2013,6 +2998,42 @@ const Bundler = struct {
     }
 };
 
+/// T5.3.3: Apply define substitutions to JS source.
+/// Replaces occurrences of define keys that appear at identifier boundaries.
+/// E.g. `process.env.NODE_ENV` → `"production"`.
+fn applyDefines(alloc: std.mem.Allocator, src: []const u8, defines: []const Bundler.DefineEntry) error{OutOfMemory}![]u8 {
+    if (defines.len == 0) return alloc.dupe(u8, src);
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    outer: while (i < src.len) {
+        for (defines) |def| {
+            if (def.key.len == 0) continue;
+            if (i + def.key.len > src.len) continue;
+            if (!std.mem.eql(u8, src[i .. i + def.key.len], def.key)) continue;
+            // Left boundary: not preceded by identifier char
+            if (i > 0) {
+                const p = src[i - 1];
+                if ((p >= 'a' and p <= 'z') or (p >= 'A' and p <= 'Z') or
+                    (p >= '0' and p <= '9') or p == '_' or p == '$') continue;
+            }
+            // Right boundary: not followed by identifier char or '.' (avoid partial match)
+            const after = i + def.key.len;
+            if (after < src.len) {
+                const n = src[after];
+                if ((n >= 'a' and n <= 'z') or (n >= 'A' and n <= 'Z') or
+                    (n >= '0' and n <= '9') or n == '_' or n == '$' or n == '.') continue;
+            }
+            try out.appendSlice(alloc, def.value);
+            i += def.key.len;
+            continue :outer;
+        }
+        try out.append(alloc, src[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 fn transpileIfNeeded(alloc: std.mem.Allocator, path: []const u8, src: []const u8) error{ OutOfMemory, TranspileFailed }![]u8 {
     const is_ts = std.mem.endsWith(u8, path, ".ts") or
         std.mem.endsWith(u8, path, ".tsx") or
@@ -2022,37 +3043,55 @@ fn transpileIfNeeded(alloc: std.mem.Allocator, path: []const u8, src: []const u8
         // JSON 作为模块：包装成 module.exports = <json>
         return std.fmt.allocPrint(alloc, "module.exports={s};", .{src}) catch error.OutOfMemory;
     }
+    if (std.mem.endsWith(u8, path, ".css")) {
+        // T5.3.2: CSS as side-effect module — inject a <style> tag when DOM is available.
+        var css_buf: std.ArrayList(u8) = .empty;
+        defer css_buf.deinit(alloc);
+        try css_buf.appendSlice(alloc, "(function(){if(typeof document!==\"undefined\"){var s=document.createElement(\"style\");s.textContent=");
+        try jsonEscapeTo(&css_buf, src);
+        try css_buf.appendSlice(alloc, ";document.head.appendChild(s);}})();module.exports={};");
+        return css_buf.toOwnedSlice(alloc) catch error.OutOfMemory;
+    }
     if (!is_ts) return alloc.dupe(u8, src) catch error.OutOfMemory;
 
-    // ── Phase 5.2：优先使用内置 WASM 转译器 ──────────────────────────
-    const opts = bun_transform.TransformOptions{
-        .source = src,
-        .filename = path,
-        .jsx = if (std.mem.endsWith(u8, path, ".tsx") or std.mem.endsWith(u8, path, ".jsx"))
-            .react
-        else
-            .none,
-    };
-    var result = bun_transform.transform(alloc, opts) catch return error.OutOfMemory;
-    defer result.deinit();
-
-    if (result.code) |code| {
-        return alloc.dupe(u8, code) catch error.OutOfMemory;
-    }
-
-    // 内置转译器报错 → 回退 Host jsi_transpile（如果可用）
+    // ── 优先使用 Host jsi_transpile（支持完整 ESM→CJS 降级）──────────
     const h = jsi.imports.jsi_transpile(
         @intFromPtr(src.ptr),
         src.len,
         @intFromPtr(path.ptr),
         path.len,
     );
-    if (h == jsi.Value.exception_sentinel) return error.TranspileFailed;
-    defer jsi.imports.jsi_release(h);
-    const js_len = jsi.imports.jsi_string_length(h);
-    const js_buf = alloc.alloc(u8, js_len) catch return error.OutOfMemory;
-    jsi.imports.jsi_string_read(h, @intFromPtr(js_buf.ptr), js_len);
-    return js_buf;
+    if (h != jsi.Value.exception_sentinel) {
+        defer jsi.imports.jsi_release(h);
+        const js_len = jsi.imports.jsi_string_length(h);
+        const js_buf = alloc.alloc(u8, js_len) catch return error.OutOfMemory;
+        jsi.imports.jsi_string_read(h, @intFromPtr(js_buf.ptr), js_len);
+        // T5.2.8: Host 返回与输入相同（identity 模式）→ 回退到内置 WASM 转译器
+        if (!std.mem.eql(u8, js_buf, src)) {
+            return js_buf; // Host 做了真实转换，直接使用
+        }
+        alloc.free(js_buf);
+        // fall through to WASM transform with ESM→CJS
+    }
+
+    // ── Host 不可用或 identity → 内置 WASM 转译器（T5.2.6: 含 ESM→CJS）────────────
+    const opts = bun_wasm_transform.TransformOptions{
+        .source = src,
+        .filename = path,
+        .esm_to_cjs = true, // T5.2.6: WASM 内置 ESM→CJS 转换
+        .jsx = if (std.mem.endsWith(u8, path, ".tsx") or std.mem.endsWith(u8, path, ".jsx"))
+            .react
+        else
+            .none,
+    };
+    var result = bun_wasm_transform.transform(alloc, opts) catch return error.OutOfMemory;
+    defer result.deinit();
+
+    if (result.code) |code| {
+        return alloc.dupe(u8, code) catch error.OutOfMemory;
+    }
+
+    return error.TranspileFailed;
 }
 
 /// 扫描源码中的 `require("...")`, `require('...')`, `import ... from "..."`,
@@ -2104,6 +3143,9 @@ fn findNextImportSite(san: []const u8, from: usize) ?ImportSite {
         // `import "x"` / `import('x')` / `import x from "x"` / `export ... from "x"`
         if ((san[i] == 'i' and san.len - i >= 7 and std.mem.startsWith(u8, san[i..], "import ")) or
             (san[i] == 'i' and san.len - i >= 7 and std.mem.startsWith(u8, san[i..], "import(")) or
+            // import"x" / import'x' (no space — Bun transpiler output normalization)
+            (san[i] == 'i' and san.len - i >= 7 and std.mem.startsWith(u8, san[i..], "import\"")) or
+            (san[i] == 'i' and san.len - i >= 7 and std.mem.startsWith(u8, san[i..], "import'")) or
             (san[i] == 'e' and san.len - i >= 7 and std.mem.startsWith(u8, san[i..], "export ")))
         {
             if (!isIdentBoundary(san, i)) continue;
@@ -2473,6 +3515,202 @@ fn inflateImpl(src: []const u8, format: u32) ![]u8 {
 // BlockWriter.zig (old std.io.Writer). Decompression (bun_inflate) is unaffected.
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.4 T5.4.3 — bun_tgz_extract
+// Decompress a .tgz tarball and write extracted files directly into the WASM VFS.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const TAR_BLOCK: usize = 512;
+
+/// Read a null-terminated ASCII octal number from a tar header field.
+fn tarReadOctal(buf: []const u8) u64 {
+    var result: u64 = 0;
+    for (buf) |c| {
+        if (c == 0 or c == ' ') break;
+        if (c >= '0' and c <= '7') {
+            result = result *% 8 +% @as(u64, c - '0');
+        }
+    }
+    return result;
+}
+
+/// Return the slice up to the first NUL byte (null-terminator for tar strings).
+fn tarReadStr(buf: []const u8) []const u8 {
+    for (buf, 0..) |c, i| {
+        if (c == 0) return buf[0..i];
+    }
+    return buf;
+}
+
+/// Strip the first path component ("package/...") — standard npm tarball layout.
+fn tarStripFirstComponent(path: []const u8) []const u8 {
+    const slash = std.mem.indexOfScalar(u8, path, '/') orelse return path;
+    return if (slash + 1 < path.len) path[slash + 1 ..] else "";
+}
+
+/// Parse a PAX extended header block to extract the "path" field value.
+/// Returns a slice into `data` on success, null if not found.
+fn tarParsePaxPath(data: []const u8) ?[]const u8 {
+    var off: usize = 0;
+    while (off < data.len) {
+        // Each record: "<decimal-len> <key>=<value>\n"
+        const sp = std.mem.indexOfScalarPos(u8, data, off, ' ') orelse break;
+        const eq = std.mem.indexOfScalarPos(u8, data, sp + 1, '=') orelse break;
+        const nl = std.mem.indexOfScalarPos(u8, data, eq + 1, '\n') orelse break;
+        const key = data[sp + 1 .. eq];
+        if (std.mem.eql(u8, key, "path")) return data[eq + 1 .. nl];
+        const record_len = std.fmt.parseInt(usize, data[off..sp], 10) catch break;
+        off += record_len;
+    }
+    return null;
+}
+
+/// T5.4.3 — Extract a .tgz tarball directly into the WASM VFS.
+///
+/// Input layout (packed buffer):
+///   [prefix_len: u32 LE][prefix bytes][tgz bytes]
+///
+/// `prefix` is prepended to each extracted path (e.g. "/node_modules/react").
+/// The leading "package/" component in npm tarballs is stripped.
+///
+/// Returns packed (ptr << 32 | len) → JSON `{"extracted":N}`.
+/// Errors: packError(1)=OOM, packError(2)=decompress fail, packError(3)=bad input.
+export fn bun_tgz_extract(input_ptr: [*]const u8, input_len: u32) u64 {
+    if (input_len < 4) return packError(3);
+    const buf = input_ptr[0..input_len];
+    const prefix_len = std.mem.readInt(u32, buf[0..4], .little);
+    if (4 + prefix_len > input_len) return packError(3);
+    const prefix = buf[4 .. 4 + prefix_len];
+    const tgz = buf[4 + prefix_len .. input_len];
+
+    // 1. Decompress gzip → raw tar bytes
+    const tar = inflateImpl(tgz, 0) catch return packError(2);
+    defer allocator.free(tar);
+
+    // 2. Parse tar + write files to VFS
+    var off: usize = 0;
+    var extracted: u32 = 0;
+
+    // Buffers for GNU long-name / PAX path overrides
+    var gnu_name_buf: [4096]u8 = undefined;
+    var gnu_name_len: usize = 0;
+    var pax_name_buf: [4096]u8 = undefined;
+    var pax_name_len: usize = 0;
+    // Buffer for ustar prefix+name concatenation
+    var ustar_path_buf: [4096]u8 = undefined;
+
+    while (off + TAR_BLOCK <= tar.len) {
+        const header = tar[off .. off + TAR_BLOCK];
+
+        // End-of-archive: two consecutive zero-filled blocks.
+        var all_zero = true;
+        for (header) |c| {
+            if (c != 0) { all_zero = false; break; }
+        }
+        if (all_zero) { off += TAR_BLOCK; continue; }
+
+        const size: usize = @intCast(tarReadOctal(header[124..136]));
+        const type_flag = header[156];
+        const data_start = off + TAR_BLOCK;
+        const padded = ((size + TAR_BLOCK - 1) / TAR_BLOCK) * TAR_BLOCK;
+        const next_off = data_start + padded;
+
+        if (data_start + size > tar.len) break; // truncated
+        const data = tar[data_start .. data_start + size];
+        off = next_off;
+
+        switch (type_flag) {
+            'L' => {
+                // GNU long name: data contains the long filename (null-terminated).
+                const n = @min(size, gnu_name_buf.len);
+                @memcpy(gnu_name_buf[0..n], data[0..n]);
+                gnu_name_len = n;
+                // Trim trailing NULs
+                while (gnu_name_len > 0 and gnu_name_buf[gnu_name_len - 1] == 0) gnu_name_len -= 1;
+                continue;
+            },
+            'x' => {
+                // PAX extended header
+                if (tarParsePaxPath(data)) |pname| {
+                    const n = @min(pname.len, pax_name_buf.len);
+                    @memcpy(pax_name_buf[0..n], pname[0..n]);
+                    pax_name_len = n;
+                }
+                continue;
+            },
+            'g' => { continue; }, // global PAX header — ignore
+            '5' => {
+                // Directory entry — reset pending names, skip
+                gnu_name_len = 0;
+                pax_name_len = 0;
+                continue;
+            },
+            '0', '7', 0 => {}, // regular file — fall through to extraction
+            else => {
+                gnu_name_len = 0;
+                pax_name_len = 0;
+                continue;
+            },
+        }
+
+        // Determine the raw path from the header
+        // Priority: PAX extended path > GNU long name > ustar name+prefix
+        const name_raw: []const u8 = name_blk: {
+            if (pax_name_len > 0) {
+                const n = pax_name_len;
+                pax_name_len = 0;
+                gnu_name_len = 0;
+                break :name_blk pax_name_buf[0..n];
+            }
+            if (gnu_name_len > 0) {
+                const n = gnu_name_len;
+                gnu_name_len = 0;
+                break :name_blk gnu_name_buf[0..n];
+            }
+            // Standard ustar path
+            const name_field = tarReadStr(header[0..100]);
+            const prefix_field = tarReadStr(header[345..500]);
+            const ustar_magic = header[257..263];
+            if (std.mem.startsWith(u8, ustar_magic, "ustar") and prefix_field.len > 0) {
+                const total = prefix_field.len + 1 + name_field.len;
+                if (total <= ustar_path_buf.len) {
+                    @memcpy(ustar_path_buf[0..prefix_field.len], prefix_field);
+                    ustar_path_buf[prefix_field.len] = '/';
+                    @memcpy(ustar_path_buf[prefix_field.len + 1 .. prefix_field.len + 1 + name_field.len], name_field);
+                    break :name_blk ustar_path_buf[0..total];
+                }
+            }
+            break :name_blk name_field;
+        };
+
+        // Strip leading "package/" (npm convention) or any single top-level dir
+        const stripped = tarStripFirstComponent(name_raw);
+        if (stripped.len == 0) continue; // only the root dir itself
+
+        // Build absolute VFS path: prefix + "/" + stripped
+        const full_path = joinPath(allocator, prefix, stripped) catch return packError(1);
+        defer allocator.free(full_path);
+
+        // Ensure parent directory exists (including intermediate dirs)
+        if (std.mem.lastIndexOfScalar(u8, full_path, '/')) |last_slash| {
+            if (last_slash > 0) {
+                vfs_g.mkdirp(full_path[0..last_slash]) catch {};
+            }
+        }
+
+        // Write file content to VFS
+        vfs_g.writeFile(full_path, data, 0o644) catch return packError(1);
+        extracted += 1;
+    }
+
+    // Return JSON result
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(allocator);
+    std.fmt.format(result.writer(allocator), "{{\"extracted\":{d}}}", .{extracted}) catch return packError(1);
+    const out = allocator.dupe(u8, result.items) catch return packError(1);
+    return handOff(out);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Phase 5.1 T5.1.1 — bun_path_normalize / bun_path_dirname / bun_path_join
 // Uses std.fs.path (pure Zig stdlib, no system calls → WASM-safe).
 // All functions follow the packed (ptr << 32 | len) return convention.
@@ -2538,19 +3776,29 @@ export fn bun_transform(opts_ptr: [*]const u8, opts_len: u32) u64 {
     const jsx_val = root.object.get("jsx");
     const code = switch (code_val) { .string => |s| s, else => return packError(2), };
     const filename = switch (filename_val) { .string => |s| s, else => return packError(2), };
-    var jsx_mode: bun_transform.TransformOptions.JsxMode = .react;
-    if (jsx_val) |jv| if (jv == .string) {
-        if (std.mem.eql(u8, jv.string, "react")) jsx_mode = .react;
-        else if (std.mem.eql(u8, jv.string, "react-jsx")) jsx_mode = .react_jsx;
-        else if (std.mem.eql(u8, jv.string, "preserve")) jsx_mode = .preserve;
-        else jsx_mode = .none;
+    var jsx_mode: bun_wasm_transform.TransformOptions.JsxMode = .react;
+    if (jsx_val) |jv| {
+        if (jv == .string) {
+            if (std.mem.eql(u8, jv.string, "react")) jsx_mode = .react
+            else if (std.mem.eql(u8, jv.string, "react-jsx")) jsx_mode = .react_jsx
+            else if (std.mem.eql(u8, jv.string, "preserve")) jsx_mode = .preserve
+            else jsx_mode = .none;
+        }
     }
-    const opts = bun_transform.TransformOptions{
+    const opts = bun_wasm_transform.TransformOptions{
         .source = code,
         .filename = filename,
         .jsx = jsx_mode,
+        .esm_to_cjs = if (root.object.get("esm_to_cjs")) |v| switch (v) {
+            .bool => |b| b,
+            else => false,
+        } else false,
+        .source_map = if (root.object.get("source_map")) |v| switch (v) {
+            .bool => |b| b,
+            else => false,
+        } else false,
     };
-    var result = bun_transform.transform(allocator, opts) catch {
+    var result = bun_wasm_transform.transform(allocator, opts) catch {
         const err_json = "{\"code\":null,\"errors\":[\"transform failed\"]}";
         const buf = allocator.dupe(u8, err_json) catch return packError(1);
         return handOff(buf);
@@ -2561,6 +3809,10 @@ export fn bun_transform(opts_ptr: [*]const u8, opts_len: u32) u64 {
     if (result.code) |js| {
         out.appendSlice(allocator, "{\"code\":") catch return packError(1);
         jsonEscapeTo(&out, js) catch return packError(1);
+        if (result.map) |m| {
+            out.appendSlice(allocator, ",\"map\":") catch return packError(1);
+            jsonEscapeTo(&out, m) catch return packError(1);
+        }
         out.appendSlice(allocator, ",\"errors\":[]}") catch return packError(1);
     } else {
         out.appendSlice(allocator, "{\"code\":null,\"errors\":[") catch return packError(1);
@@ -2706,4 +3958,1011 @@ fn jsonWriteString(w: std.ArrayListUnmanaged(u8).Writer, s: []const u8) !void {
         }
     }
     try w.writeByte('"');
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.4 T5.4.5 — bun_lockfile_write
+// Generate a minimal bun.lock JSON text from an installed packages manifest.
+//
+// Input JSON:
+//   {
+//     "packages": [{ "key":"react@18.2.0", "name":"react", "version":"18.2.0" }, ...],
+//     "workspaceCount": 1
+//   }
+//
+// Returns packed (ptr << 32 | len) → UTF-8 bun.lock text (JSON5-compatible).
+// Errors: packError(1)=OOM, packError(2)=invalid input JSON.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export fn bun_lockfile_write(input_ptr: [*]const u8, input_len: u32) u64 {
+    if (!initialized) return packError(2);
+    const input = input_ptr[0..input_len];
+    return lockfileWrite(input) catch |e| switch (e) {
+        error.OutOfMemory => packError(1),
+        else => packError(2),
+    };
+}
+
+fn lockfileWrite(input: []const u8) !u64 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.SyntaxError,
+    };
+
+    const pkgs_arr: std.json.Array = switch (root.get("packages") orelse .null) {
+        .array => |a| a,
+        else => return error.SyntaxError,
+    };
+    const workspace_count: i64 = if (root.get("workspaceCount")) |wc| switch (wc) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => 1,
+    } else 1;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator,
+        "{\n  \"lockfileVersion\": 0,\n  \"workspaces\": {\n    \"\": {\n      \"name\": \"\"\n    }\n  },\n");
+    _ = workspace_count;
+
+    try out.appendSlice(allocator, "  \"packages\": {\n");
+    for (pkgs_arr.items, 0..) |item, idx| {
+        if (item != .object) continue;
+        const pkg = item.object;
+        const key = switch (pkg.get("key") orelse .null) { .string => |s| s, else => continue };
+        const name = switch (pkg.get("name") orelse .null) { .string => |s| s, else => continue };
+        const ver = switch (pkg.get("version") orelse .null) { .string => |s| s, else => continue };
+        if (idx > 0) try out.appendSlice(allocator, ",\n");
+        // "react@18.2.0": ["react@18.2.0", {...}]
+        try out.appendSlice(allocator, "    ");
+        try jsonEscapeTo(&out, key);
+        try out.appendSlice(allocator, ": [");
+        try jsonEscapeTo(&out, name);
+        try out.append(allocator, '@');
+        // The string was opened above — we already closed the first arg. Rebuild properly.
+        // Actually restart: key-value pair format: "<key>": ["<name>@<ver>", {}]
+        // Remove what we partially wrote — simpler to just assemble correctly:
+        // Undo last append by truncating.
+        out.shrinkRetainingCapacity(out.items.len - (1 + key.len + 4 + name.len + 1));
+        // Correct assembly:
+        try out.appendSlice(allocator, "    ");
+        try jsonEscapeTo(&out, key);
+        try out.appendSlice(allocator, ": [\"");
+        try out.appendSlice(allocator, name);
+        try out.append(allocator, '@');
+        try out.appendSlice(allocator, ver);
+        try out.appendSlice(allocator, "\", {}]");
+    }
+    try out.appendSlice(allocator, "\n  }\n}\n");
+
+    return handOff(try out.toOwnedSlice(allocator));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.4 T5.4.2 — bun_npm_resolve_graph
+// Flatten a dependency graph using BFS entirely inside WASM.
+//
+// Input JSON:
+//   {
+//     "deps": {"react": "^18.0.0", "lodash": "^4.17.0"},
+//     "metadata": {
+//       "react":  "<raw npm registry json>",
+//       "lodash": "<raw npm registry json>"
+//     }
+//   }
+//
+// Returns packed (ptr << 32 | len) → JSON:
+//   {
+//     "resolved": [
+//       {"name":"react","version":"18.2.0","tarball":"...","integrity":"...","shasum":"...","dependencies":{...}},
+//       ...
+//     ],
+//     "missing": ["somepkg"]   // packages with metadata absent from the input map
+//   }
+//
+// Error codes: 1=OOM, 2=bad input JSON.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export fn bun_npm_resolve_graph(input_ptr: [*]const u8, input_len: u32) u64 {
+    if (!initialized) return packError(2);
+    const input = input_ptr[0..input_len];
+    return npmResolveGraph(input) catch |e| switch (e) {
+        error.OutOfMemory => packError(1),
+        else => packError(2),
+    };
+}
+
+fn npmResolveGraph(input: []const u8) !u64 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{
+        .duplicate_field_behavior = .use_last,
+    });
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.SyntaxError,
+    };
+
+    // Initial direct deps: {"name": "range", ...}
+    const top_deps: std.json.ObjectMap = switch (root.get("deps") orelse .null) {
+        .object => |o| o,
+        else => return error.SyntaxError,
+    };
+
+    // Metadata map: {"name": "<npm json string>", ...}
+    const meta_map: std.json.ObjectMap = switch (root.get("metadata") orelse std.json.Value.null) {
+        .object => |o| o,
+        else => std.json.ObjectMap.init(allocator),
+    };
+
+    // BFS queue item type
+    const QueueItem = struct { name: []const u8, range: []const u8 };
+    // BFS structures
+    var queue: std.ArrayListUnmanaged(QueueItem) = .empty;
+    defer queue.deinit(allocator);
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+    var resolved: std.ArrayListUnmanaged(u8) = .empty;
+    defer resolved.deinit(allocator);
+    var missing: std.ArrayListUnmanaged(u8) = .empty;
+    defer missing.deinit(allocator);
+
+    // Seed queue with top-level deps
+    {
+        var it = top_deps.iterator();
+        while (it.next()) |entry| {
+            const rng = switch (entry.value_ptr.*) { .string => |s| s, else => "*" };
+            try queue.append(allocator, .{ .name = entry.key_ptr.*, .range = rng });
+        }
+    }
+
+    var resolved_count: usize = 0;
+    var missing_count: usize = 0;
+
+    while (queue.items.len > 0) {
+        const item = queue.orderedRemove(0);
+        if (seen.contains(item.name)) continue;
+        try seen.put(item.name, {});
+
+        // Look up metadata for this package
+        const meta_val = meta_map.get(item.name) orelse {
+            // Missing metadata — report to caller
+            if (missing_count > 0) try missing.append(allocator, ',');
+            try jsonEscapeTo2(&missing, allocator, item.name);
+            missing_count += 1;
+            continue;
+        };
+        const meta_json: []const u8 = switch (meta_val) { .string => |s| s, else => continue };
+
+        // Parse metadata + resolve version
+        const result_packed = npmParseMetadata(meta_json, item.range) catch continue;
+        const out_ptr = @as(u32, @truncate(result_packed >> 32));
+        const out_len = @as(u32, @truncate(result_packed & 0xffffffff));
+        if (out_ptr == 0) continue; // no match
+
+        // Read the result JSON from WASM memory
+        const result_slice = @as([*]const u8, @ptrFromInt(out_ptr))[0..out_len];
+        // result_slice is a JSON object like {"version":...,"dependencies":{...}}
+        // Inject "name" field
+        if (resolved_count > 0) try resolved.append(allocator, ',');
+        try resolved.appendSlice(allocator, "{\"name\":");
+        try jsonEscapeTo2(&resolved, allocator, item.name);
+        try resolved.append(allocator, ',');
+        // Append the rest of the JSON object (skip leading '{')
+        if (result_slice.len > 1) {
+            try resolved.appendSlice(allocator, result_slice[1..]);
+        } else {
+            try resolved.append(allocator, '}');
+        }
+        resolved_count += 1;
+
+        // Enqueue transitive deps by re-parsing the result JSON (before freeing)
+        var sub_parsed = std.json.parseFromSlice(std.json.Value, allocator, result_slice, .{}) catch {
+            allocator.free(result_slice);
+            continue;
+        };
+        defer sub_parsed.deinit();
+        if (sub_parsed.value == .object) {
+            if (sub_parsed.value.object.get("dependencies")) |dv| {
+                if (dv == .object) {
+                    var dep_it = dv.object.iterator();
+                    while (dep_it.next()) |dep_entry| {
+                        const dname = dep_entry.key_ptr.*;
+                        if (!seen.contains(dname)) {
+                            const drng = switch (dep_entry.value_ptr.*) { .string => |s| s, else => "*" };
+                            try queue.append(allocator, .{ .name = dname, .range = drng });
+                        }
+                    }
+                }
+            }
+        }
+        // Free the handOff allocation after we're done with it
+        allocator.free(result_slice);
+    }
+
+    // Build output JSON
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"resolved\":[");
+    try out.appendSlice(allocator, resolved.items);
+    try out.appendSlice(allocator, "],\"missing\":[");
+    try out.appendSlice(allocator, missing.items);
+    try out.appendSlice(allocator, "]}");
+    return handOff(try allocator.dupe(u8, out.items));
+}
+
+fn jsonEscapeTo2(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, s: []const u8) !void {
+    try out.append(alloc, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try out.appendSlice(alloc, "\\\""),
+            '\\' => try out.appendSlice(alloc, "\\\\"),
+            '\n' => try out.appendSlice(alloc, "\\n"),
+            '\r' => try out.appendSlice(alloc, "\\r"),
+            '\t' => try out.appendSlice(alloc, "\\t"),
+            0...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                var buf: [6]u8 = undefined;
+                const s2 = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                try out.appendSlice(alloc, s2);
+            },
+            else => try out.append(alloc, c),
+        }
+    }
+    try out.append(alloc, '"');
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.4 T5.4.4 — Async fetch protocol
+//
+// The host drives the install loop; WASM manages a pending-fetch queue.
+// Protocol:
+//   1. Host calls bun_npm_install_begin(deps_json) → returns request_id for first fetch
+//   2. Host fetches the URL, calls bun_npm_feed_response(req_id, data_ptr, data_len)
+//   3. Host calls bun_npm_need_fetch() to check for more pending fetches
+//      Returns packed (ptr<<32|len) → JSON {id,url,type:"metadata"|"tarball",name,range}
+//      Returns 0 when no more fetches are pending.
+//   4. Repeat until bun_npm_need_fetch() returns 0.
+//   5. Call bun_npm_install_result() → JSON {resolved:[...],missing:[...],lockfile:"..."}
+//
+// Error codes: packError(1)=OOM, packError(2)=bad JSON, packError(3)=bad req_id.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const FetchType = enum { metadata, tarball };
+
+const PendingFetch = struct {
+    id: u32,
+    url: []u8,
+    fetch_type: FetchType,
+    name: []u8,
+    range: []u8,
+};
+
+const FeedResponse = struct {
+    id: u32,
+    data: []u8,
+};
+
+var g_install_state: ?InstallState = null;
+
+const InstallState = struct {
+    resolved_json: std.ArrayListUnmanaged(u8),
+    resolved_count: usize,
+    missing_json: std.ArrayListUnmanaged(u8),
+    missing_count: usize,
+    fetch_queue: std.ArrayListUnmanaged(PendingFetch),
+    seen: std.StringHashMap(void),
+    next_id: u32,
+    meta_responses: std.AutoHashMap(u32, FeedResponse),
+    tarball_responses: std.AutoHashMap(u32, FeedResponse),
+
+    fn deinit(self: *InstallState) void {
+        self.resolved_json.deinit(allocator);
+        self.missing_json.deinit(allocator);
+        var sk = self.seen.keyIterator();
+        while (sk.next()) |k| allocator.free(k.*);
+        self.seen.deinit();
+        for (self.fetch_queue.items) |pf| {
+            allocator.free(pf.url);
+            allocator.free(pf.name);
+            allocator.free(pf.range);
+        }
+        self.fetch_queue.deinit(allocator);
+        var mrit = self.meta_responses.valueIterator();
+        while (mrit.next()) |v| allocator.free(v.data);
+        self.meta_responses.deinit();
+        var trit = self.tarball_responses.valueIterator();
+        while (trit.next()) |v| allocator.free(v.data);
+        self.tarball_responses.deinit();
+    }
+};
+
+/// Begin an async install session.
+/// Input JSON: {"deps":{"name":"range",...},"registry":"https://registry.npmjs.org"}
+/// Returns the first fetch request JSON, or packError on failure.
+export fn bun_npm_install_begin(input_ptr: [*]const u8, input_len: u32) u64 {
+    if (!initialized) return packError(2);
+    // Clean up any previous session
+    if (g_install_state) |*old| {
+        old.deinit();
+        g_install_state = null;
+    }
+
+    const input = input_ptr[0..input_len];
+    return npmInstallBegin(input) catch |e| switch (e) {
+        error.OutOfMemory => packError(1),
+        else => packError(2),
+    };
+}
+
+fn npmInstallBegin(input: []const u8) !u64 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) { .object => |o| o, else => return error.SyntaxError };
+
+    const deps_obj: std.json.ObjectMap = switch (root.get("deps") orelse .null) {
+        .object => |o| o,
+        else => return error.SyntaxError,
+    };
+    const registry: []const u8 = switch (root.get("registry") orelse .null) {
+        .string => |s| s,
+        else => "https://registry.npmjs.org",
+    };
+
+    var state = InstallState{
+        .resolved_json = .empty,
+        .resolved_count = 0,
+        .missing_json = .empty,
+        .missing_count = 0,
+        .seen = std.StringHashMap(void).init(allocator),
+        .fetch_queue = .empty,
+        .next_id = 1,
+        .meta_responses = std.AutoHashMap(u32, FeedResponse).init(allocator),
+        .tarball_responses = std.AutoHashMap(u32, FeedResponse).init(allocator),
+    };
+    errdefer state.deinit();
+
+    // Seed fetch queue with metadata requests for all top-level deps
+    {
+        var it = deps_obj.iterator();
+        while (it.next()) |entry| {
+            const name_dup = try allocator.dupe(u8, entry.key_ptr.*);
+            const rng_str: []const u8 = switch (entry.value_ptr.*) { .string => |s| s, else => "*" };
+            const range_dup = try allocator.dupe(u8, rng_str);
+            // URL: registry + "/" + name
+            const url = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ registry, name_dup });
+            try state.fetch_queue.append(allocator, .{
+                .id = state.next_id,
+                .url = url,
+                .fetch_type = .metadata,
+                .name = name_dup,
+                .range = range_dup,
+            });
+            state.next_id += 1;
+        }
+    }
+
+    g_install_state = state;
+    // Return the first pending fetch (if any)
+    return npmNeedFetchInternal() catch return packError(1);
+}
+
+/// Pop the next pending fetch request.
+/// Returns packed JSON: {"id":N,"url":"...","type":"metadata","name":"...","range":"..."}
+/// Returns 0 (packError sentinel) when queue is empty (install complete or waiting for feeds).
+export fn bun_npm_need_fetch() u64 {
+    return npmNeedFetchInternal() catch packError(1);
+}
+
+fn npmNeedFetchInternal() !u64 {
+    const state = if (g_install_state) |*s| s else return @as(u64, 0);
+    if (state.fetch_queue.items.len == 0) return @as(u64, 0);
+    const pf = state.fetch_queue.items[0]; // Peek, don't pop (host may call multiple times)
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"id\":");
+    var id_buf: [16]u8 = undefined;
+    try out.appendSlice(allocator, std.fmt.bufPrint(&id_buf, "{d}", .{pf.id}) catch unreachable);
+    try out.appendSlice(allocator, ",\"url\":");
+    try jsonEscapeTo(&out, pf.url);
+    try out.appendSlice(allocator, ",\"type\":");
+    try jsonEscapeTo(&out, if (pf.fetch_type == .metadata) "metadata" else "tarball");
+    try out.appendSlice(allocator, ",\"name\":");
+    try jsonEscapeTo(&out, pf.name);
+    try out.appendSlice(allocator, ",\"range\":");
+    try jsonEscapeTo(&out, pf.range);
+    try out.append(allocator, '}');
+    return handOff(try allocator.dupe(u8, out.items));
+}
+
+/// Feed a completed fetch response back to the install state machine.
+/// `req_id` must match a previously returned fetch request id.
+/// `data_ptr/data_len` is the raw response body (metadata JSON or tarball bytes).
+/// Returns 0 on success (packed u64 with ptr=0, len=0).
+/// On success, any newly queued fetches can be retrieved via bun_npm_need_fetch().
+export fn bun_npm_feed_response(req_id: u32, data_ptr: [*]const u8, data_len: u32) u64 {
+    const state = if (g_install_state) |*s| s else return packError(3);
+    const data = data_ptr[0..data_len];
+
+    // Find and remove the matching pending fetch
+    var found: ?PendingFetch = null;
+    for (state.fetch_queue.items, 0..) |pf, i| {
+        if (pf.id == req_id) {
+            found = pf;
+            _ = state.fetch_queue.orderedRemove(i);
+            break;
+        }
+    }
+    const pf = found orelse return packError(3);
+    defer {
+        allocator.free(pf.url);
+        // name and range are kept for use below, freed after processing
+    }
+
+    if (pf.fetch_type == .metadata) {
+        // Parse metadata + resolve version
+        const result = npmParseMetadata(data, pf.range) catch {
+            allocator.free(pf.name);
+            allocator.free(pf.range);
+            return 0; // silently skip bad responses
+        };
+        const out_ptr = @as(u32, @truncate(result >> 32));
+        const out_len = @as(u32, @truncate(result & 0xffffffff));
+
+        if (out_ptr == 0) {
+            // packError → no matching version → record as missing
+            if (state.missing_count > 0) {
+                state.missing_json.append(allocator, ',') catch {};
+            }
+            jsonEscapeTo2(&state.missing_json, allocator, pf.name) catch {};
+            state.missing_count += 1;
+            allocator.free(pf.name);
+            allocator.free(pf.range);
+            return 0;
+        }
+
+        const result_slice = @as([*]const u8, @ptrFromInt(out_ptr))[0..out_len];
+        defer allocator.free(result_slice);
+
+        // Add to resolved list
+        if (state.resolved_count > 0) state.resolved_json.append(allocator, ',') catch {};
+        state.resolved_json.appendSlice(allocator, "{\"name\":") catch {
+            allocator.free(pf.name);
+            allocator.free(pf.range);
+            return packError(1);
+        };
+        jsonEscapeTo2(&state.resolved_json, allocator, pf.name) catch {};
+        if (result_slice.len > 1) {
+            state.resolved_json.append(allocator, ',') catch {};
+            state.resolved_json.appendSlice(allocator, result_slice[1..]) catch {};
+        } else {
+            state.resolved_json.append(allocator, '}') catch {};
+        }
+        state.resolved_count += 1;
+
+        // Queue tarball fetch
+        const tarball_url_val = blk: {
+            var sub = std.json.parseFromSlice(std.json.Value, allocator, result_slice, .{}) catch break :blk null;
+            defer sub.deinit();
+            if (sub.value == .object) {
+                if (sub.value.object.get("tarball")) |tv| {
+                    if (tv == .string) break :blk allocator.dupe(u8, tv.string) catch null;
+                }
+                // Also enqueue transitive deps' metadata
+                if (sub.value.object.get("dependencies")) |dv| {
+                    if (dv == .object) {
+                        var dep_it = dv.object.iterator();
+                        while (dep_it.next()) |dep_entry| {
+                            const dname = dep_entry.key_ptr.*;
+                            if (!state.seen.contains(dname)) {
+                                const registry = "https://registry.npmjs.org";
+                                const url2 = std.fmt.allocPrint(allocator, "{s}/{s}", .{ registry, dname }) catch continue;
+                                const rng2: []const u8 = switch (dep_entry.value_ptr.*) { .string => |s| s, else => "*" };
+                                const nm2 = allocator.dupe(u8, dname) catch continue;
+                                const rng2_dup = allocator.dupe(u8, rng2) catch { allocator.free(nm2); continue; };
+                                state.fetch_queue.append(allocator, .{
+                                    .id = state.next_id,
+                                    .url = url2,
+                                    .fetch_type = .metadata,
+                                    .name = nm2,
+                                    .range = rng2_dup,
+                                }) catch { allocator.free(url2); allocator.free(nm2); allocator.free(rng2_dup); };
+                                state.next_id += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            break :blk null;
+        };
+        if (tarball_url_val) |turl| {
+            const name_dup2 = allocator.dupe(u8, pf.name) catch { allocator.free(turl); allocator.free(pf.name); allocator.free(pf.range); return 0; };
+            const rng_dup2 = allocator.dupe(u8, "") catch { allocator.free(turl); allocator.free(name_dup2); allocator.free(pf.name); allocator.free(pf.range); return 0; };
+            state.fetch_queue.append(allocator, .{
+                .id = state.next_id,
+                .url = turl,
+                .fetch_type = .tarball,
+                .name = name_dup2,
+                .range = rng_dup2,
+            }) catch { allocator.free(turl); allocator.free(name_dup2); allocator.free(rng_dup2); };
+            state.next_id += 1;
+        }
+        allocator.free(pf.name);
+        allocator.free(pf.range);
+    } else {
+        // Tarball: extract into VFS using bun_tgz_extract logic
+        const prefix = std.fmt.allocPrint(allocator, "/node_modules/{s}", .{pf.name}) catch {
+            allocator.free(pf.name);
+            allocator.free(pf.range);
+            return packError(1);
+        };
+        defer allocator.free(prefix);
+
+        // Build packed input for tgzExtract inline logic
+        const prefix_len: u32 = @intCast(prefix.len);
+        var packed_input: std.ArrayList(u8) = .empty;
+        defer packed_input.deinit(allocator);
+        var plen_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &plen_buf, prefix_len, .little);
+        packed_input.appendSlice(allocator, &plen_buf) catch { allocator.free(pf.name); allocator.free(pf.range); return packError(1); };
+        packed_input.appendSlice(allocator, prefix) catch { allocator.free(pf.name); allocator.free(pf.range); return packError(1); };
+        packed_input.appendSlice(allocator, data) catch { allocator.free(pf.name); allocator.free(pf.range); return packError(1); };
+
+        // Decompress + extract (reuse bun_tgz_extract logic)
+        _ = bun_tgz_extract(packed_input.items.ptr, @intCast(packed_input.items.len));
+        allocator.free(pf.name);
+        allocator.free(pf.range);
+    }
+
+    return 0;
+}
+
+/// Mark a package name as seen (already installed from a previous session / cache).
+/// Call before bun_npm_install_begin to skip re-fetching.
+export fn bun_npm_install_mark_seen(name_ptr: [*]const u8, name_len: u32) void {
+    const state = if (g_install_state) |*s| s else return;
+    const name = allocator.dupe(u8, name_ptr[0..name_len]) catch return;
+    state.seen.put(name, {}) catch { allocator.free(name); };
+}
+
+/// Get the current install result.
+/// Call after all fetch responses have been fed (bun_npm_need_fetch returns 0).
+/// Returns JSON: {"resolved":[...],"missing":[...]}
+export fn bun_npm_install_result() u64 {
+    const state = if (g_install_state) |*s| s else return packError(2);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    out.appendSlice(allocator, "{\"resolved\":[") catch return packError(1);
+    out.appendSlice(allocator, state.resolved_json.items) catch return packError(1);
+    out.appendSlice(allocator, "],\"missing\":[") catch return packError(1);
+    out.appendSlice(allocator, state.missing_json.items) catch return packError(1);
+    out.appendSlice(allocator, "]}") catch return packError(1);
+    return handOff(allocator.dupe(u8, out.items) catch return packError(1));
+}
+
+/// Tear down the install session and free all associated memory.
+export fn bun_npm_install_end() void {
+    if (g_install_state) |*s| {
+        s.deinit();
+        g_install_state = null;
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.7 T5.7.2 — bun_sourcemap_lookup
+// Map (generated line, col) back to (source, original line, col).
+//
+// Input JSON:
+//   {
+//     "map": <sourcemap JSON string — standard v3 format>,
+//     "line": <0-based generated line>,
+//     "col": <0-based generated column>
+//   }
+//
+// Returns packed (ptr << 32 | len) → JSON:
+//   {"source":"<file>","line":<orig-line>,"col":<orig-col>,"name":"<sym>"}
+//   or {"source":null} when no mapping found.
+//
+// Error codes: 1=OOM, 2=bad input.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export fn bun_sourcemap_lookup(input_ptr: [*]const u8, input_len: u32) u64 {
+    if (!initialized) return packError(2);
+    const input = input_ptr[0..input_len];
+    return sourcemapLookup(input) catch |e| switch (e) {
+        error.OutOfMemory => packError(1),
+        else => packError(2),
+    };
+}
+
+/// VLQ decode: read one VLQ-encoded value from `data[off..]`, advance `off`, return value.
+fn vlqDecode(data: []const u8, off: *usize) ?i32 {
+    var result: i32 = 0;
+    var shift: u5 = 0;
+    while (off.* < data.len) {
+        const b64c = data[off.*];
+        const digit: u8 = switch (b64c) {
+            'A'...'Z' => b64c - 'A',
+            'a'...'z' => b64c - 'a' + 26,
+            '0'...'9' => b64c - '0' + 52,
+            '+' => 62,
+            '/' => 63,
+            else => return null,
+        };
+        off.* += 1;
+        const cont = (digit & 0x20) != 0;
+        const val: i32 = @intCast(digit & 0x1f);
+        result |= val << shift;
+        shift += 5;
+        if (!cont) {
+            // Last digit: LSB is sign
+            if ((result & 1) != 0) {
+                return -(result >> 1);
+            } else {
+                return result >> 1;
+            }
+        }
+        if (shift >= 30) return null; // overflow guard
+    }
+    return null;
+}
+
+fn sourcemapLookup(input: []const u8) !u64 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) { .object => |o| o, else => return error.SyntaxError };
+
+    const target_line: i64 = if (root.get("line")) |lv| switch (lv) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => 0,
+    } else 0;
+    const target_col: i64 = if (root.get("col")) |cv| switch (cv) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => 0,
+    } else 0;
+
+    const map_val = root.get("map") orelse return error.SyntaxError;
+    const map_json: []const u8 = switch (map_val) {
+        .string => |s| s,
+        else => return error.SyntaxError,
+    };
+
+    // Parse the sourcemap JSON
+    const smap = try std.json.parseFromSlice(std.json.Value, allocator, map_json, .{});
+    defer smap.deinit();
+    const smap_root = switch (smap.value) { .object => |o| o, else => return error.SyntaxError };
+
+    // Extract sources array
+    const sources_arr: []std.json.Value = switch (smap_root.get("sources") orelse .null) {
+        .array => |a| a.items,
+        else => &.{},
+    };
+    const names_arr: []std.json.Value = switch (smap_root.get("names") orelse .null) {
+        .array => |a| a.items,
+        else => &.{},
+    };
+    const mappings_str: []const u8 = switch (smap_root.get("mappings") orelse .null) {
+        .string => |s| s,
+        else => return error.SyntaxError,
+    };
+
+    // Walk the VLQ mappings to find (target_line, target_col)
+    var gen_line: i64 = 0;
+    var src_idx: i32 = 0;
+    var orig_line: i32 = 0;
+    var orig_col: i32 = 0;
+    var name_idx: i32 = 0;
+
+    // Best match tracking
+    var best_src_idx: i32 = -1;
+    var best_orig_line: i32 = 0;
+    var best_orig_col: i32 = 0;
+    var best_name_idx: i32 = -1;
+    var best_gen_col: i64 = -1;
+
+    var off: usize = 0;
+    var seg_col: i32 = 0; // resets per line
+
+    while (off < mappings_str.len) {
+        const c = mappings_str[off];
+        if (c == ';') {
+            // New generated line
+            gen_line += 1;
+            seg_col = 0;
+            off += 1;
+            continue;
+        }
+        if (c == ',') {
+            off += 1;
+            continue;
+        }
+        // Decode segment: 1, 4, or 5 VLQ fields
+        const gen_col_delta = vlqDecode(mappings_str, &off) orelse { off += 1; continue; };
+        seg_col += gen_col_delta;
+        const cur_gen_col: i64 = seg_col;
+
+        // Try to read 3 more fields (source, origLine, origCol)
+        const saved_off = off;
+        const si_delta = vlqDecode(mappings_str, &off);
+        const ol_delta = if (si_delta != null) vlqDecode(mappings_str, &off) else null;
+        const oc_delta = if (ol_delta != null) vlqDecode(mappings_str, &off) else null;
+        const ni_delta = if (oc_delta != null) vlqDecode(mappings_str, &off) else null;
+
+        if (si_delta != null and ol_delta != null and oc_delta != null) {
+            src_idx += si_delta.?;
+            orig_line += ol_delta.?;
+            orig_col += oc_delta.?;
+            if (ni_delta != null) name_idx += ni_delta.?;
+        } else {
+            off = saved_off;
+        }
+
+        // Check if this segment is our best match for (target_line, target_col)
+        if (gen_line == target_line and cur_gen_col <= target_col and cur_gen_col > best_gen_col) {
+            if (si_delta != null) {
+                best_gen_col = cur_gen_col;
+                best_src_idx = src_idx;
+                best_orig_line = orig_line;
+                best_orig_col = orig_col;
+                best_name_idx = if (ni_delta != null) name_idx else -1;
+            }
+        }
+    }
+
+    // Build result JSON
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    if (best_src_idx < 0 or best_src_idx >= @as(i32, @intCast(sources_arr.len))) {
+        try out.appendSlice(allocator, "{\"source\":null}");
+    } else {
+        const src_str: []const u8 = switch (sources_arr[@as(usize, @intCast(best_src_idx))]) {
+            .string => |s| s,
+            else => "",
+        };
+        try out.appendSlice(allocator, "{\"source\":");
+        try jsonEscapeTo(&out, src_str);
+        var line_buf: [16]u8 = undefined;
+        var col_buf: [16]u8 = undefined;
+        try out.appendSlice(allocator, ",\"line\":");
+        try out.appendSlice(allocator, std.fmt.bufPrint(&line_buf, "{d}", .{best_orig_line}) catch unreachable);
+        try out.appendSlice(allocator, ",\"col\":");
+        try out.appendSlice(allocator, std.fmt.bufPrint(&col_buf, "{d}", .{best_orig_col}) catch unreachable);
+        if (best_name_idx >= 0 and best_name_idx < @as(i32, @intCast(names_arr.len))) {
+            const name_str: []const u8 = switch (names_arr[@as(usize, @intCast(best_name_idx))]) {
+                .string => |s| s,
+                else => "",
+            };
+            try out.appendSlice(allocator, ",\"name\":");
+            try jsonEscapeTo(&out, name_str);
+        }
+        try out.append(allocator, '}');
+    }
+
+    return handOff(try allocator.dupe(u8, out.items));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.7 T5.7.3 — bun_html_rewrite
+// Minimal HTML element text/attribute rewriter.
+//
+// Input JSON:
+//   {
+//     "html": "<the html string>",
+//     "rules": [
+//       { "selector": "script[src]", "attr": "src", "replace": "https://cdn.example.com/a.js" },
+//       { "selector": "title", "text": "My App" },
+//       { "selector": "meta[charset]", "remove": true }
+//     ]
+//   }
+//
+// Supported selectors (subset): "tag", "tag[attr]", "tag[attr=val]"
+// Supported operations: set/replace `attr`, set inner `text`, `remove` element.
+//
+// Returns packed (ptr << 32 | len) → rewritten HTML string.
+// Error codes: 1=OOM, 2=bad input.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export fn bun_html_rewrite(input_ptr: [*]const u8, input_len: u32) u64 {
+    if (!initialized) return packError(2);
+    const input = input_ptr[0..input_len];
+    return htmlRewrite(input) catch |e| switch (e) {
+        error.OutOfMemory => packError(1),
+        else => packError(2),
+    };
+}
+
+const HtmlRule = struct {
+    tag: []const u8,
+    attr_filter: ?[]const u8, // attr name in selector (e.g. "src" from "script[src]")
+    attr_val_filter: ?[]const u8, // expected attr value in selector (null = any)
+    /// Operation: set_attr | set_text | remove
+    op: enum { set_attr, set_text, remove },
+    attr_target: []const u8, // attr name to set (for set_attr)
+    value: []const u8, // new value (for set_attr / set_text)
+};
+
+/// Parse a simple CSS selector: "tag", "tag[attr]", "tag[attr=val]"
+fn parseSelector(sel: []const u8, rule: *HtmlRule) void {
+    if (std.mem.indexOfScalar(u8, sel, '[')) |bracket| {
+        rule.tag = sel[0..bracket];
+        const inner = if (sel[sel.len - 1] == ']') sel[bracket + 1 .. sel.len - 1] else sel[bracket + 1 ..];
+        if (std.mem.indexOfScalar(u8, inner, '=')) |eq| {
+            rule.attr_filter = inner[0..eq];
+            var val = inner[eq + 1 ..];
+            // Strip quotes
+            if (val.len >= 2 and (val[0] == '"' or val[0] == '\'') and val[val.len - 1] == val[0]) {
+                val = val[1 .. val.len - 1];
+            }
+            rule.attr_val_filter = val;
+        } else {
+            rule.attr_filter = inner;
+            rule.attr_val_filter = null;
+        }
+    } else {
+        rule.tag = sel;
+        rule.attr_filter = null;
+        rule.attr_val_filter = null;
+    }
+}
+
+fn htmlRewrite(input: []const u8) !u64 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) { .object => |o| o, else => return error.SyntaxError };
+
+    const html: []const u8 = switch (root.get("html") orelse .null) {
+        .string => |s| s,
+        else => return error.SyntaxError,
+    };
+    const rules_arr: []std.json.Value = switch (root.get("rules") orelse .null) {
+        .array => |a| a.items,
+        else => &.{},
+    };
+
+    // Parse rules
+    var rules = try allocator.alloc(HtmlRule, rules_arr.len);
+    defer allocator.free(rules);
+    var rule_count: usize = 0;
+    for (rules_arr) |rv| {
+        if (rv != .object) continue;
+        const ro = rv.object;
+        const sel: []const u8 = switch (ro.get("selector") orelse .null) { .string => |s| s, else => continue };
+        var rule: HtmlRule = .{
+            .tag = "",
+            .attr_filter = null,
+            .attr_val_filter = null,
+            .op = .remove,
+            .attr_target = "",
+            .value = "",
+        };
+        parseSelector(sel, &rule);
+        if (ro.get("remove")) |rv2| {
+            if (rv2 == .bool and rv2.bool) {
+                rule.op = .remove;
+                rules[rule_count] = rule;
+                rule_count += 1;
+                continue;
+            }
+        }
+        if (ro.get("attr")) |av| {
+            if (av == .string) {
+                rule.op = .set_attr;
+                rule.attr_target = av.string;
+                rule.value = switch (ro.get("replace") orelse .null) { .string => |s| s, else => "" };
+                rules[rule_count] = rule;
+                rule_count += 1;
+                continue;
+            }
+        }
+        if (ro.get("text")) |tv| {
+            if (tv == .string) {
+                rule.op = .set_text;
+                rule.value = tv.string;
+                rules[rule_count] = rule;
+                rule_count += 1;
+            }
+        }
+    }
+    rules = rules[0..rule_count];
+
+    // Walk HTML string character by character; process tags.
+    // This is a simple, non-validating HTML rewriter — good enough for common cases.
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < html.len) {
+        if (html[i] != '<') {
+            try out.append(allocator, html[i]);
+            i += 1;
+            continue;
+        }
+        // Start of a tag. Find the end.
+        const tag_start = i;
+        i += 1; // skip '<'
+        const is_close = i < html.len and html[i] == '/';
+        if (is_close) i += 1;
+
+        // Read tag name
+        const tag_name_start = i;
+        while (i < html.len and html[i] != ' ' and html[i] != '>' and html[i] != '/') i += 1;
+        const tag_name = html[tag_name_start..i];
+
+        // Find the end of the tag ('>')
+        while (i < html.len and html[i] != '>') i += 1;
+        const tag_end = if (i < html.len) i + 1 else html.len;
+        const tag_str = html[tag_start..tag_end]; // full "<tag ...>" string
+        if (i < html.len) i += 1;
+
+        if (tag_name.len == 0 or is_close) {
+            try out.appendSlice(allocator, tag_str);
+            continue;
+        }
+
+        // Find a matching rule
+        var matched_rule: ?*const HtmlRule = null;
+        for (rules) |*rule| {
+            if (!std.mem.eql(u8, rule.tag, tag_name)) continue;
+            if (rule.attr_filter) |af| {
+                // Check that this attribute exists in the tag
+                if (std.mem.indexOf(u8, tag_str, af) == null) continue;
+                if (rule.attr_val_filter) |avf| {
+                    if (std.mem.indexOf(u8, tag_str, avf) == null) continue;
+                }
+            }
+            matched_rule = rule;
+            break;
+        }
+
+        const rule = matched_rule orelse {
+            try out.appendSlice(allocator, tag_str);
+            continue;
+        };
+
+        switch (rule.op) {
+            .remove => {
+                // Skip the element entirely: skip open tag, inner content, close tag.
+                const close_prefix = try std.fmt.allocPrint(allocator, "</{s}>", .{tag_name});
+                defer allocator.free(close_prefix);
+                if (std.mem.indexOf(u8, html[i..], close_prefix)) |close_rel| {
+                    i += close_rel + close_prefix.len;
+                }
+                // else: no close tag — element already ended (self-closing or missing)
+            },
+            .set_attr => {
+                // Rewrite the tag: replace the target attribute value.
+                const needle = try std.fmt.allocPrint(allocator, "{s}=\"", .{rule.attr_target});
+                defer allocator.free(needle);
+                if (std.mem.indexOf(u8, tag_str, needle)) |attr_pos| {
+                    const val_start = attr_pos + needle.len;
+                    const val_end = std.mem.indexOfScalarPos(u8, tag_str, val_start, '"') orelse tag_str.len;
+                    try out.appendSlice(allocator, tag_str[0..val_start]);
+                    try out.appendSlice(allocator, rule.value);
+                    try out.appendSlice(allocator, tag_str[val_end..]);
+                } else {
+                    try out.appendSlice(allocator, tag_str);
+                }
+            },
+            .set_text => {
+                // Output the open tag, replace inner text, then write close tag.
+                try out.appendSlice(allocator, tag_str);
+                const close_prefix = try std.fmt.allocPrint(allocator, "</{s}>", .{tag_name});
+                defer allocator.free(close_prefix);
+                if (std.mem.indexOf(u8, html[i..], close_prefix)) |close_rel| {
+                    // Skip original inner content
+                    try out.appendSlice(allocator, rule.value);
+                    try out.appendSlice(allocator, close_prefix);
+                    i += close_rel + close_prefix.len;
+                }
+            },
+        }
+    }
+
+    return handOff(try allocator.dupe(u8, out.items));
 }

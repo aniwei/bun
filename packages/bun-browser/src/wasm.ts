@@ -147,6 +147,144 @@ export interface WasmRuntime {
    * 若 WASM 不导出 `bun_transform`，返回 null。
    */
   transform(source: string, filename: string, opts?: TransformOptions): TransformResult | null;
+  /**
+   * T5.3.3：调用 `bun_bundle2`，支持 externals 和 define 配置。
+   *
+   * - `external`：跳过这些包的递归打包，改用 `globalThis.require(spec)` 委托给宿主
+   * - `define`：源码中的文本替换，如 `process.env.NODE_ENV` → `"production"`
+   *
+   * 返回与 `bundle()` 相同格式的 IIFE 代码。
+   */
+  bundle2(config: BundleConfig): string;
+  /**
+   * Phase 5.4 T5.4.3：将 .tgz tarball 解压并直接写入 WASM VFS。
+   *
+   * - `prefix`：安装前缀，如 `"/node_modules/react"`
+   * - `tgz`：原始 gzip 压缩的 tarball 字节
+   *
+   * Tarball 内的 `package/` 根目录会被自动剥离（npm 标准布局）。
+   * 解压结果直接写入 WASM 内部 VFS，调用方无需额外调用 `bun_vfs_load_snapshot`。
+   *
+   * 返回解压的文件数量。若 WASM 不导出 `bun_tgz_extract`，返回 null（调用方应回退到 JS 实现）。
+   * 解压失败时抛 Error。
+   */
+  extractTgz(prefix: string, tgz: Uint8Array): number | null;
+  /**
+   * Phase 5.4 T5.4.1：解析 npm registry metadata JSON，选出最佳匹配版本。
+   *
+   * - `json`：npm GET `/<pkgname>` 原始响应 JSON 字符串
+   * - `range`：semver range 或 dist-tag（如 `"^1.0.0"`、`"latest"`、`"1.2.3"`）
+   *
+   * 内部使用 Zig 真实 semver + dist-tags 解析，无需 TS 侧逻辑。
+   * 返回已解析的版本信息；无匹配版本时返回 `null`。
+   * 若 WASM 不导出 `bun_npm_parse_metadata`，返回 `null`（调用方回退到 TS 实现）。
+   */
+  parseNpmMetadata(json: string, range: string): NpmResolvedVersion | null;
+  /**
+   * Phase 5.4 T5.4.5：将已解析的包列表序列化为 bun.lock 文本（JSON 格式）。
+   *
+   * - `packages`：已解析的包信息列表
+   * - `workspaceCount`：workspace 数量（默认为 1）
+   *
+   * 返回 bun.lock 文本，若 WASM 不导出则返回 null。
+   */
+  writeLockfile(data: { packages: Array<{key: string; name: string; version: string}>; workspaceCount?: number }): string | null;
+  /**
+   * Phase 5.4 T5.4.2：WASM 内部 BFS，从 npm registry metadata 解析完整依赖图。
+   *
+   * - `deps`：顶层依赖 `{name: range}`
+   * - `metadata`：每个包的 npm registry 响应 JSON 字符串（用于 BFS 展开）
+   *
+   * 返回 `{ resolved, missing }`；若 WASM 不导出则返回 null。
+   */
+  resolveGraph(deps: Record<string, string>, metadata: Record<string, string>): ResolveGraphResult | null;
+  /**
+   * Phase 5.4 T5.4.4（异步 fetch 协议）步骤1：开始安装，返回第一个 fetch 请求。
+   *
+   * 若无需 fetch（无顶层依赖），返回 null。
+   */
+  npmInstallBegin(deps: Record<string, string>, registry?: string): NpmFetchRequest | null;
+  /** 步骤2：轮询下一个待 fetch 的请求（peek，不弹出）。 */
+  npmNeedFetch(): NpmFetchRequest | null;
+  /** 步骤3：喂入 fetch 响应。调用后内部会处理响应并可能入队新请求。 */
+  npmFeedResponse(reqId: number, data: Uint8Array): void;
+  /** 将包名标记为已见（跳过重复下载）。 */
+  npmInstallMarkSeen(name: string): void;
+  /** 步骤4：获取最终安装结果（resolved + missing）。 */
+  npmInstallResult(): ResolveGraphResult | null;
+  /** 步骤5：清理安装状态。 */
+  npmInstallEnd(): void;
+  /**
+   * Phase 5.7 T5.7.2：Source map 位置查找（`bun_sourcemap_lookup`）。
+   *
+   * - `map`：sourcemap JSON 字符串（v3 格式）
+   * - `line`：生成代码中的 0-based 行号
+   * - `col`：生成代码中的 0-based 列号
+   *
+   * 返回原始位置；若 WASM 不导出则返回 null。
+   */
+  sourcemapLookup(map: string, line: number, col: number): SourcemapPosition | null;
+  /**
+   * Phase 5.7 T5.7.3：HTML 重写（`bun_html_rewrite`）。
+   *
+   * - `html`：输入 HTML 字符串
+   * - `rules`：重写规则列表
+   *
+   * 返回重写后的 HTML；若 WASM 不导出则返回 null。
+   */
+  htmlRewrite(html: string, rules: HtmlRewriteRule[]): string | null;
+}
+
+/** Phase 5.4 T5.4.2 / T5.4.4 返回结构。 */
+export interface ResolveGraphResult {
+  resolved: Array<{
+    name: string;
+    version: string;
+    tarball: string;
+    integrity?: string;
+    shasum?: string;
+    dependencies: Record<string, string>;
+  }>;
+  missing: string[];
+}
+
+/** Phase 5.4 T5.4.4 异步 fetch 协议请求结构。 */
+export interface NpmFetchRequest {
+  id: number;
+  url: string;
+  type: "metadata" | "tarball";
+  name: string;
+  range: string;
+}
+
+/** Phase 5.7 T5.7.2 Source map 位置。 */
+export interface SourcemapPosition {
+  source: string | null;
+  line?: number;
+  col?: number;
+  name?: string;
+}
+
+/** Phase 5.7 T5.7.3 HTML 重写规则。 */
+export interface HtmlRewriteRule {
+  selector: string;
+  /** set_attr 操作：目标属性名 */
+  attr?: string;
+  /** set_attr 操作：替换值 */
+  replace?: string;
+  /** set_text 操作：新文本内容 */
+  text?: string;
+  /** remove 操作：为 true 时移除匹配的标签 */
+  remove?: boolean;
+}
+
+/** Phase 5.4 T5.4.1：`parseNpmMetadata` 返回结构。 */
+export interface NpmResolvedVersion {
+  version: string;
+  tarball: string;
+  integrity?: string;
+  shasum?: string;
+  dependencies: Record<string, string>;
 }
 
 /** Phase 1 T1.1：bun_resolve 返回结构。 */
@@ -163,15 +301,37 @@ export interface ResolveResult {
  *   - `"react-jsx"`：React 17+ automatic runtime，顶部自动 `import { jsx, jsxs, Fragment } from 'react/jsx-runtime'`
  *   - `"preserve"`：保留 JSX 原样
  *   - `"none"`：.ts 文件禁用 JSX 处理
+ *
+ * `esmToCjs` (T5.2.6)：将 ESM import/export 转换为 CommonJS require/module.exports。
+ * `sourceMap` (T5.2.7)：生成 sourcemap v3 JSON，结果存入 `TransformResult.map`。
  */
 export interface TransformOptions {
   jsx?: "react" | "react-jsx" | "preserve" | "none";
+  /** T5.2.6: 将 ESM import/export 转换为 CommonJS require/module.exports */
+  esmToCjs?: boolean;
+  /** T5.2.7: 生成 sourcemap v3 JSON */
+  sourceMap?: boolean;
 }
 
 /** Phase 5.2：`transform` 返回结构。 */
 export interface TransformResult {
   code: string | null;
   errors: string[];
+  /** T5.2.7: sourcemap v3 JSON 字符串（仅在 opts.sourceMap=true 时非 null） */
+  map?: string | null;
+}
+
+/**
+ * T5.3.3：`bundle2` 配置对象。
+ *
+ * `entrypoint`：VFS 绝对路径，作为打包入口（必填）。
+ * `external`：不打包进 bundle 的包名列表，运行时委托给 `globalThis.require`。
+ * `define`：源码文本替换表，键为被替换的 JS 表达式，值为替换后的 JS 表达式字符串。
+ */
+export interface BundleConfig {
+  entrypoint: string;
+  external?: string[];
+  define?: Record<string, string>;
 }
 
 /** Phase 5.1 T5.1.4：bun_url_parse 返回结构（与 node:url.parse 对齐）。 */
@@ -623,6 +783,10 @@ export async function createWasmRuntime(
           code: source,
           filename,
           jsx: opts?.jsx ?? "react",
+          // T5.2.6: ESM→CJS conversion (opt-in)
+          ...(opts?.esmToCjs ? { esm_to_cjs: true } : {}),
+          // T5.2.7: sourcemap generation (opt-in)
+          ...(opts?.sourceMap ? { source_map: true } : {}),
         }),
       );
       const r = callPackedRaw("bun_transform", payload, undefined, false);
@@ -636,7 +800,268 @@ export async function createWasmRuntime(
         r.free_(r.ptr);
       }
     },
+
+    // ── T5.3.3 — bundle2: externals + define ───────────────────────────────
+
+    bundle2(config: BundleConfig): string {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const bundle2Fn = exports_.bun_bundle2 as
+        | ((p: number, l: number) => bigint)
+        | undefined;
+      const alloc = exports_.bun_malloc as (n: number) => number;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      if (!bundle2Fn) throw new Error("bun-core.wasm does not export bun_bundle2");
+      const mem = () => (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      const payload = enc.encode(JSON.stringify(config));
+      const ptr = alloc(Math.max(1, payload.byteLength));
+      if (ptr === 0) throw new Error("bun_malloc returned null");
+      if (payload.byteLength > 0)
+        new Uint8Array(mem(), ptr, payload.byteLength).set(payload);
+      let packed: bigint;
+      try {
+        packed = bundle2Fn(ptr, payload.byteLength);
+      } finally {
+        free_(ptr);
+      }
+      const outPtr = Number(packed >> 32n) >>> 0;
+      const outLen = Number(packed & 0xffffffffn) >>> 0;
+      if (outPtr === 0) {
+        const codes: Record<number, string> = {
+          1: "OOM or parse error",
+          2: "entry not found",
+          3: "module graph too deep",
+          4: "transpile failed",
+          5: "missing entrypoint in config",
+        };
+        throw new Error(`bun_bundle2 failed: ${codes[outLen] ?? `code=${outLen}`}`);
+      }
+      try {
+        return dec.decode(new Uint8Array(mem(), outPtr, outLen));
+      } finally {
+        free_(outPtr);
+      }
+    },
+
+    extractTgz(prefix: string, tgz: Uint8Array): number | null {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const extractFn = exports_.bun_tgz_extract as
+        | ((p: number, l: number) => bigint)
+        | undefined;
+      if (!extractFn) return null; // export not present — caller falls back to JS
+
+      const alloc = exports_.bun_malloc as (n: number) => number;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      const mem = () => (_instance!.exports.memory as WebAssembly.Memory).buffer;
+
+      // Packed input: [prefix_len: u32 LE][prefix bytes][tgz bytes]
+      const prefixBytes = enc.encode(prefix);
+      const totalLen = 4 + prefixBytes.byteLength + tgz.byteLength;
+      const inputPtr = alloc(Math.max(1, totalLen));
+      if (inputPtr === 0) throw new Error("bun_malloc returned null");
+
+      try {
+        const view = new DataView(mem(), inputPtr, totalLen);
+        const bytes = new Uint8Array(mem(), inputPtr, totalLen);
+        view.setUint32(0, prefixBytes.byteLength, true);
+        bytes.set(prefixBytes, 4);
+        bytes.set(tgz, 4 + prefixBytes.byteLength);
+      } catch {
+        free_(inputPtr);
+        throw new Error("extractTgz: failed to write input into WASM memory");
+      }
+
+      let packed: bigint;
+      try {
+        packed = extractFn(inputPtr, totalLen);
+      } finally {
+        free_(inputPtr);
+      }
+
+      const outPtr = Number(packed >> 32n) >>> 0;
+      const outLen = Number(packed & 0xffffffffn) >>> 0;
+      if (outPtr === 0) {
+        const codes: Record<number, string> = { 1: "OOM", 2: "decompress failed", 3: "bad input" };
+        throw new Error(`bun_tgz_extract failed: ${codes[outLen] ?? `code=${outLen}`}`);
+      }
+      try {
+        const json = dec.decode(new Uint8Array(mem(), outPtr, outLen));
+        const result = JSON.parse(json) as { extracted: number };
+        return result.extracted;
+      } finally {
+        free_(outPtr);
+      }
+    },
+
+    parseNpmMetadata(json: string, range: string): NpmResolvedVersion | null {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const parseFn = exports_.bun_npm_parse_metadata as
+        | ((jp: number, jl: number, rp: number, rl: number) => bigint)
+        | undefined;
+      if (!parseFn) return null; // export not present — caller falls back to TS
+
+      const alloc = exports_.bun_malloc as (n: number) => number;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      const mem = () => (_instance!.exports.memory as WebAssembly.Memory).buffer;
+
+      const jsonBytes = enc.encode(json);
+      const rangeBytes = enc.encode(range);
+
+      const jPtr = alloc(Math.max(1, jsonBytes.byteLength));
+      if (jPtr === 0) throw new Error("bun_malloc returned null");
+      const rPtr = alloc(Math.max(1, rangeBytes.byteLength));
+      if (rPtr === 0) { free_(jPtr); throw new Error("bun_malloc returned null"); }
+
+      try {
+        new Uint8Array(mem(), jPtr, jsonBytes.byteLength).set(jsonBytes);
+        new Uint8Array(mem(), rPtr, rangeBytes.byteLength).set(rangeBytes);
+      } catch {
+        free_(jPtr);
+        free_(rPtr);
+        throw new Error("parseNpmMetadata: failed to write into WASM memory");
+      }
+
+      let packed: bigint;
+      try {
+        packed = parseFn(jPtr, jsonBytes.byteLength, rPtr, rangeBytes.byteLength);
+      } finally {
+        free_(jPtr);
+        free_(rPtr);
+      }
+
+      const outPtr = Number(packed >> 32n) >>> 0;
+      const outLen = Number(packed & 0xffffffffn) >>> 0;
+      if (outPtr === 0) {
+        if (outLen === 3) return null; // no matching version — not an error
+        const codes: Record<number, string> = { 1: "OOM", 2: "invalid JSON" };
+        throw new Error(`bun_npm_parse_metadata failed: ${codes[outLen] ?? `code=${outLen}`}`);
+      }
+      try {
+        const resultJson = dec.decode(new Uint8Array(mem(), outPtr, outLen));
+        return JSON.parse(resultJson) as NpmResolvedVersion;
+      } finally {
+        free_(outPtr);
+      }
+    },
+
+    // ── Phase 5.4 T5.4.5 — bun_lockfile_write ──────────────────────────────
+
+    writeLockfile(data): string | null {
+      const r = callPackedRaw("bun_lockfile_write", enc.encode(JSON.stringify(data)), undefined, false);
+      if (!r) return null;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      try { return dec.decode(new Uint8Array(mem2, r.ptr, r.len)); } finally { r.free_(r.ptr); }
+    },
+
+    // ── Phase 5.4 T5.4.2 — bun_npm_resolve_graph ───────────────────────────
+
+    resolveGraph(deps, metadata): ResolveGraphResult | null {
+      const payload = enc.encode(JSON.stringify({ deps, metadata }));
+      const r = callPackedRaw("bun_npm_resolve_graph", payload, undefined, false);
+      if (!r) return null;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      try {
+        return JSON.parse(dec.decode(new Uint8Array(mem2, r.ptr, r.len))) as ResolveGraphResult;
+      } finally { r.free_(r.ptr); }
+    },
+
+    // ── Phase 5.4 T5.4.4 — async fetch protocol ────────────────────────────
+
+    npmInstallBegin(deps, registry): NpmFetchRequest | null {
+      const payload = enc.encode(JSON.stringify({ deps, registry: registry ?? "https://registry.npmjs.org" }));
+      const r = callPackedRaw("bun_npm_install_begin", payload, undefined, false);
+      if (!r) return null;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      try {
+        return JSON.parse(dec.decode(new Uint8Array(mem2, r.ptr, r.len))) as NpmFetchRequest;
+      } finally { r.free_(r.ptr); }
+    },
+
+    npmNeedFetch(): NpmFetchRequest | null {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const fn_ = exports_.bun_npm_need_fetch as (() => bigint) | undefined;
+      if (!fn_) return null;
+      const packed = fn_();
+      const outPtr = Number(packed >> 32n) >>> 0;
+      const outLen = Number(packed & 0xffffffffn) >>> 0;
+      if (outPtr === 0) return null;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      try {
+        return JSON.parse(dec.decode(new Uint8Array(mem2, outPtr, outLen))) as NpmFetchRequest;
+      } finally { free_(outPtr); }
+    },
+
+    npmFeedResponse(reqId, data): void {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const fn_ = exports_.bun_npm_feed_response as ((id: number, p: number, l: number) => bigint) | undefined;
+      if (!fn_) return;
+      const alloc = exports_.bun_malloc as (n: number) => number;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      const ptr = alloc(Math.max(1, data.byteLength));
+      if (ptr === 0) return;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      if (data.byteLength > 0) new Uint8Array(mem2, ptr, data.byteLength).set(data);
+      try { fn_(reqId, ptr, data.byteLength); } finally { free_(ptr); }
+    },
+
+    npmInstallMarkSeen(name): void {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const fn_ = exports_.bun_npm_install_mark_seen as ((p: number, l: number) => void) | undefined;
+      if (!fn_) return;
+      const alloc = exports_.bun_malloc as (n: number) => number;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      const bytes = enc.encode(name);
+      const ptr = alloc(Math.max(1, bytes.byteLength));
+      if (ptr === 0) return;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      new Uint8Array(mem2, ptr, bytes.byteLength).set(bytes);
+      try { fn_(ptr, bytes.byteLength); } finally { free_(ptr); }
+    },
+
+    npmInstallResult(): ResolveGraphResult | null {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const fn_ = exports_.bun_npm_install_result as (() => bigint) | undefined;
+      if (!fn_) return null;
+      const packed = fn_();
+      const outPtr = Number(packed >> 32n) >>> 0;
+      const outLen = Number(packed & 0xffffffffn) >>> 0;
+      if (outPtr === 0) return null;
+      const free_ = exports_.bun_free as (ptr: number) => void;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      try {
+        return JSON.parse(dec.decode(new Uint8Array(mem2, outPtr, outLen))) as ResolveGraphResult;
+      } finally { free_(outPtr); }
+    },
+
+    npmInstallEnd(): void {
+      const exports_ = _instance!.exports as Record<string, unknown>;
+      const fn_ = exports_.bun_npm_install_end as (() => void) | undefined;
+      fn_?.();
+    },
+
+    // ── Phase 5.7 T5.7.2 — bun_sourcemap_lookup ────────────────────────────
+
+    sourcemapLookup(map, line, col): SourcemapPosition | null {
+      const payload = enc.encode(JSON.stringify({ map, line, col }));
+      const r = callPackedRaw("bun_sourcemap_lookup", payload, undefined, false);
+      if (!r) return null;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      try {
+        return JSON.parse(dec.decode(new Uint8Array(mem2, r.ptr, r.len))) as SourcemapPosition;
+      } finally { r.free_(r.ptr); }
+    },
+
+    // ── Phase 5.7 T5.7.3 — bun_html_rewrite ────────────────────────────────
+
+    htmlRewrite(html, rules): string | null {
+      const payload = enc.encode(JSON.stringify({ html, rules }));
+      const r = callPackedRaw("bun_html_rewrite", payload, undefined, false);
+      if (!r) return null;
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer;
+      try { return dec.decode(new Uint8Array(mem2, r.ptr, r.len)); } finally { r.free_(r.ptr); }
+    },
   };
 
   return rt;
 }
+

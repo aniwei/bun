@@ -46,6 +46,11 @@ pub const TransformOptions = struct {
     filename: []const u8,
     /// JSX 处理模式
     jsx: JsxMode = .react,
+    /// 将 ESM import/export 转换为 CommonJS require/module.exports。
+    /// Bundler 使用时设为 true，直接调用 bun_transform ABI 时通常为 false。
+    esm_to_cjs: bool = false,
+    /// 生成 sourcemap v3 JSON（base64-VLQ 编码）。结果存于 TransformResult.map。
+    source_map: bool = false,
 
     pub const JsxMode = enum {
         /// 转换为 React.createElement(...)（默认）
@@ -62,11 +67,14 @@ pub const TransformOptions = struct {
 pub const TransformResult = struct {
     code: ?[]u8,
     errors: []const []const u8,
+    /// sourcemap v3 JSON（仅在 opts.source_map = true 时非 null）
+    map: ?[]u8 = null,
 
     alloc: Allocator,
 
     pub fn deinit(self: *TransformResult) void {
         if (self.code) |c| self.alloc.free(c);
+        if (self.map) |m| self.alloc.free(m);
         for (self.errors) |e| self.alloc.free(e);
         self.alloc.free(self.errors);
     }
@@ -79,8 +87,8 @@ pub fn transform(alloc: Allocator, opts: TransformOptions) Allocator.Error!Trans
     const is_tsx = isTsxFile(opts.filename);
     const is_jsx = isJsxFile(opts.filename);
 
-    // 纯 JS（非 TS，非 JSX）：不需要做任何 strip
-    if (!is_ts and !is_tsx and !is_jsx) {
+    // 纯 JS（非 TS，非 JSX），且不需要 ESM→CJS：直接透传
+    if (!is_ts and !is_tsx and !is_jsx and !opts.esm_to_cjs) {
         const code = try alloc.dupe(u8, opts.source);
         return .{
             .code = code,
@@ -96,8 +104,10 @@ pub fn transform(alloc: Allocator, opts: TransformOptions) Allocator.Error!Trans
 
     if (stripper.errors.items.len > 0) {
         // 存在错误 — 将 errors 转交 result
-        const errs = try stripper.errors.toOwnedSlice();
-        stripper.out.deinit();
+        const errs = try stripper.errors.toOwnedSlice(alloc);
+        stripper.out.deinit(alloc);
+        stripper.exports_deferred.deinit(alloc);
+        stripper.line_origins.deinit(alloc);
         return .{
             .code = null,
             .errors = errs,
@@ -105,14 +115,40 @@ pub fn transform(alloc: Allocator, opts: TransformOptions) Allocator.Error!Trans
         };
     }
 
-    const code = try stripper.out.toOwnedSlice();
+    const code = try stripper.out.toOwnedSlice(alloc);
     const empty_errs = try alloc.alloc([]const u8, 0);
+
+    // 生成 sourcemap（T5.2.7）
+    var map: ?[]u8 = null;
+    if (opts.source_map) {
+        map = generateSourcemap(alloc, opts.filename, stripper.line_origins.items) catch null;
+    }
+    stripper.line_origins.deinit(alloc);
+    stripper.exports_deferred.deinit(alloc);
+
     return .{
         .code = code,
         .errors = empty_errs,
+        .map = map,
         .alloc = alloc,
     };
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ESM → CJS 数据结构
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 延迟发出的 module.exports 赋值项（named export）
+const ExportEntry = struct {
+    local: []const u8,    // 本模块中的局部变量名
+    exported: []const u8, // 对外导出的名称（可能与 local 不同，如 export { X as Y }）
+};
+
+/// 命名导入项（import { key as alias } from ...）
+const ImportedName = struct {
+    key: []const u8,   // 源模块导出的名字
+    alias: []const u8, // 本地绑定名
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 文件类型判断
@@ -175,14 +211,22 @@ const Stripper = struct {
     angle_depth: u32,
     /// 是否已发出过 jsx import（react-jsx 模式需要）
     jsx_import_emitted: bool,
+    /// T5.2.6: 延迟 module.exports 赋值列表（named export）
+    exports_deferred: std.ArrayListUnmanaged(ExportEntry),
+    /// T5.2.7: sourcemap 行映射（第 i 项 = 第 i 个输出换行符对应的输入行号）
+    line_origins: std.ArrayListUnmanaged(u32),
+    /// T5.2.7: 当前处理到的输入行号（在 run() 外层循环更新）
+    input_line: u32,
+    /// T5.2.6: re-export 临时变量计数器，用于生成 _re0_ _re1_ ...
+    reexport_counter: u32,
 
     fn init(alloc: Allocator, opts: TransformOptions) Stripper {
         return .{
             .alloc = alloc,
             .src = opts.source,
             .pos = 0,
-            .out = std.ArrayList(u8).init(alloc),
-            .errors = std.ArrayList([]const u8).init(alloc),
+            .out = std.ArrayList(u8){},
+            .errors = std.ArrayList([]const u8){},
             .opts = opts,
             .state = .normal,
             .template_depth = 0,
@@ -190,6 +234,10 @@ const Stripper = struct {
             .brace_depth = 0,
             .angle_depth = 0,
             .jsx_import_emitted = false,
+            .exports_deferred = .empty,
+            .line_origins = .empty,
+            .input_line = 0,
+            .reexport_counter = 0,
         };
     }
 
@@ -198,11 +246,12 @@ const Stripper = struct {
         if (self.opts.jsx == .react_jsx and
             (isTsxFile(self.opts.filename) or isJsxFile(self.opts.filename)))
         {
-            try self.out.appendSlice("import{jsx as _jsx,jsxs as _jsxs,Fragment as _Fragment}from'react/jsx-runtime';\n");
+            try self.emitSlice("import{jsx as _jsx,jsxs as _jsxs,Fragment as _Fragment}from'react/jsx-runtime';\n");
             self.jsx_import_emitted = true;
         }
 
         while (self.pos < self.src.len) {
+            const pos_before = self.pos;
             switch (self.state) {
                 .normal => try self.processNormal(),
                 .line_comment => try self.processLineComment(),
@@ -212,6 +261,24 @@ const Stripper = struct {
                 .template => try self.processTemplate(),
                 .template_expr => try self.processNormal(), // 复用 normal
                 .regex => try self.processRegex(),
+            }
+            // T5.2.7: 追踪本轮消耗的输入换行数（用于 sourcemap 行号映射）
+            if (self.opts.source_map) {
+                for (self.src[pos_before..self.pos]) |c| {
+                    if (c == '\n') self.input_line += 1;
+                }
+            }
+        }
+
+        // T5.2.6: 发出延迟的 module.exports 赋值
+        if (self.opts.esm_to_cjs and self.exports_deferred.items.len > 0) {
+            try self.emitSlice("\n");
+            for (self.exports_deferred.items) |e| {
+                try self.emitSlice("module.exports[\"");
+                try self.emitJsStr(e.exported);
+                try self.emitSlice("\"]=");
+                try self.emitSlice(e.local);
+                try self.emitSlice(";\n");
             }
         }
     }
@@ -232,11 +299,23 @@ const Stripper = struct {
     }
 
     fn emit(self: *Stripper, ch: u8) Allocator.Error!void {
-        try self.out.append(ch);
+        try self.out.append(self.alloc, ch);
+        // T5.2.7: 每个输出换行符记录对应的输入行号
+        if (ch == '\n' and self.opts.source_map) {
+            try self.line_origins.append(self.alloc, self.input_line);
+        }
     }
 
     fn emitSlice(self: *Stripper, s: []const u8) Allocator.Error!void {
-        try self.out.appendSlice(s);
+        try self.out.appendSlice(self.alloc, s);
+        // T5.2.7: 统计 slice 内的换行符
+        if (self.opts.source_map) {
+            for (s) |c| {
+                if (c == '\n') {
+                    try self.line_origins.append(self.alloc, self.input_line);
+                }
+            }
+        }
     }
 
     fn remaining(self: *const Stripper) []const u8 {
@@ -328,6 +407,27 @@ const Stripper = struct {
                 // 非空断言：跳过
                 self.pos += 1;
                 return;
+            }
+        }
+
+        // ── TypeScript 类型注解 `: Type` ─────────────────────
+        // 在非对象字面量（brace_depth==0）中，`: identifier/builtin-type...`
+        // 且上一个非空白源码字符是标识符或 ] 或 )，认为是 TS 类型注解，跳过。
+        if (c == ':' and self.brace_depth == 0) {
+            const prev_ch = prevNonWhitespace(self.src, self.pos);
+            if (prev_ch != null and (isIdentCont(prev_ch.?) or prev_ch.? == ']' or prev_ch.? == ')')) {
+                // 确认冒号后面是类型名（标识符、{ ( [ " ` 等）
+                const after_colon = nextNonWhitespace(self.src, self.pos + 1);
+                if (after_colon != null and
+                    (isIdentStart(after_colon.?) or
+                        after_colon.? == '{' or after_colon.? == '(' or
+                        after_colon.? == '[' or after_colon.? == '"' or
+                        after_colon.? == '\'' or after_colon.? == '`'))
+                {
+                    self.pos += 1; // skip ':'
+                    try self.skipTypeAnnotation(.colon);
+                    return;
+                }
             }
         }
 
@@ -452,17 +552,14 @@ const Stripper = struct {
         try self.emitSlice(word);
 
         // 如果后面有泛型参数 <T...> 且在函数/class/箭头函数上下文中
+        const ws_start = self.pos;
         self.skipWhitespace();
-        if (self.cur() == '<') {
-            if (isGenericContext(word)) {
-                try self.skipGenericParameters();
-                return;
-            }
+        if (self.cur() == '<' and isGenericContext(word)) {
+            try self.skipGenericParameters();
+            return;
         }
-
-        // ── 函数参数列表中的类型注解 ─────────────────────
-        // 再次 skipWhitespace 后如果是 ( 则处理参数类型注解，但不在这里处理
-        // （参数类型注解在 processNormal 中由 : 触发处理）
+        // Re-emit any whitespace consumed by skipWhitespace (not part of generic)
+        try self.emitSlice(self.src[ws_start..self.pos]);
     }
 
     fn isGenericContext(word: []const u8) bool {
@@ -807,9 +904,45 @@ const Stripper = struct {
     }
 
     fn handleImportKeyword(self: *Stripper) Allocator.Error!void {
-        // import type ... → 删除整行
-        // import ...      → 保留并处理泛型/类型（直接输出）
+        // ── T5.3.5: import.meta.url / import.meta.env / import.meta.resolve ──────
+        // Checked BEFORE skipWhitespace: import.meta has no space between `import` and `.meta`
+        if (self.cur() == '.') {
+            if (std.mem.startsWith(u8, self.remaining(), ".meta")) {
+                const after_pos = self.pos + 5;
+                if (after_pos >= self.src.len or !isIdentCont(self.src[after_pos])) {
+                    self.pos += 5; // consume ".meta"
+                    try self.emitImportMeta();
+                    return;
+                }
+            }
+            // import.xxx where xxx != meta — unusual; pass through
+            if (!self.opts.esm_to_cjs) try self.emitSlice("import");
+            return;
+        }
+
+        const ws_start = self.pos;
         self.skipWhitespace();
+
+        // ── T5.3.6: import("spec") — dynamic import ──────────────────────────────
+        if (self.cur() == '(') {
+            self.pos += 1; // consume '('
+            self.skipWhitespace();
+            if (self.opts.esm_to_cjs and (self.cur() == '"' or self.cur() == '\'')) {
+                const spec = self.readQuotedStr();
+                self.skipWhitespace();
+                if (self.cur() == ')') {
+                    self.pos += 1; // consume ')'
+                    try self.emitSlice("Promise.resolve().then(function(){return require(\"");
+                    try self.emitJsStr(spec);
+                    try self.emitSlice("\")})" );
+                    return;
+                }
+            }
+            // Non-static or non-ESM-CJS: pass through as import(
+            try self.emitSlice("import(");
+            return;
+        }
+
         if (std.mem.startsWith(u8, self.remaining(), "type ") or
             std.mem.startsWith(u8, self.remaining(), "type\n") or
             std.mem.startsWith(u8, self.remaining(), "type\r"))
@@ -818,13 +951,155 @@ const Stripper = struct {
             try self.skipToEndOfStatement();
             return;
         }
-        // 普通 import：输出 "import" 然后继续
-        try self.emitSlice("import");
+
+        // 非 ESM→CJS 模式：直接透传
+        if (!self.opts.esm_to_cjs) {
+            try self.emitSlice("import");
+            try self.emitSlice(self.src[ws_start..self.pos]);
+            return;
+        }
+
+        // ── ESM→CJS 模式 ─────────────────────────────────────────────────────
+
+        // import "spec" 或 import 'spec'（副作用导入）
+        if (self.cur() == '"' or self.cur() == '\'') {
+            const spec = self.readQuotedStr();
+            self.skipToSemicolon();
+            try self.emitSlice("require(\"");
+            try self.emitJsStr(spec);
+            try self.emitSlice("\");\n");
+            return;
+        }
+
+        // import * as ns from 'spec'
+        if (self.cur() == '*') {
+            self.pos += 1;
+            self.skipWhitespace();
+            if (std.mem.startsWith(u8, self.remaining(), "as ") or
+                std.mem.startsWith(u8, self.remaining(), "as\t"))
+            {
+                self.pos += 2;
+                self.skipWhitespace();
+                const ns_start = self.pos;
+                while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+                const ns_name = self.src[ns_start..self.pos];
+                self.skipWhitespace();
+                if (std.mem.startsWith(u8, self.remaining(), "from")) {
+                    self.pos += 4;
+                    self.skipWhitespace();
+                    const spec = self.readQuotedStr();
+                    self.skipToSemicolon();
+                    try self.emitSlice("const ");
+                    try self.emitSlice(ns_name);
+                    try self.emitSlice("=require(\"");
+                    try self.emitJsStr(spec);
+                    try self.emitSlice("\");\n");
+                    return;
+                }
+            }
+            try self.emit('\n');
+            return;
+        }
+
+        // import { A, B as C } from 'spec'
+        // import X from 'spec'
+        // import X, { A, B } from 'spec'
+        var default_name: ?[]const u8 = null;
+        var named: std.ArrayListUnmanaged(ImportedName) = .empty;
+        defer named.deinit(self.alloc);
+
+        if (self.cur() == '{') {
+            try self.parseImportedNames(&named);
+            self.skipWhitespace();
+        } else if (isIdentStart(self.cur())) {
+            const n_start = self.pos;
+            while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+            default_name = self.src[n_start..self.pos];
+            self.skipWhitespace();
+            if (self.cur() == ',') {
+                self.pos += 1;
+                self.skipWhitespace();
+                if (self.cur() == '{') {
+                    try self.parseImportedNames(&named);
+                }
+                self.skipWhitespace();
+            }
+        }
+
+        // Expect "from"
+        if (!std.mem.startsWith(u8, self.remaining(), "from")) {
+            try self.emit('\n');
+            return;
+        }
+        self.pos += 4;
+        self.skipWhitespace();
+        const spec = self.readQuotedStr();
+        self.skipToSemicolon();
+
+        if (default_name == null and named.items.len == 0) {
+            try self.emit('\n');
+            return;
+        }
+
+        if (default_name != null and named.items.len > 0) {
+            // 混合：var _i_=require('spec'); const X=(_i_.default??_i_); const{A,B}=_i_;
+            const ctr = self.reexport_counter;
+            self.reexport_counter += 1;
+            var ctr_buf: [20]u8 = undefined;
+            const tmp = std.fmt.bufPrint(&ctr_buf, "_i{d}_", .{ctr}) catch "_i_";
+            try self.emitSlice("var ");
+            try self.emitSlice(tmp);
+            try self.emitSlice("=require(\"");
+            try self.emitJsStr(spec);
+            try self.emitSlice("\");const ");
+            try self.emitSlice(default_name.?);
+            try self.emitSlice("=(");
+            try self.emitSlice(tmp);
+            try self.emitSlice(".default??");
+            try self.emitSlice(tmp);
+            try self.emitSlice(");const{");
+            for (named.items, 0..) |nm, i| {
+                if (i > 0) try self.emit(',');
+                try self.emitSlice(nm.key);
+                if (!std.mem.eql(u8, nm.alias, nm.key)) {
+                    try self.emit(':');
+                    try self.emitSlice(nm.alias);
+                }
+            }
+            try self.emit('}');
+            try self.emit('=');
+            try self.emitSlice(tmp);
+            try self.emitSlice(";\n");
+        } else if (default_name != null) {
+            // default only: const X=(require('spec').default??require('spec'));
+            try self.emitSlice("const ");
+            try self.emitSlice(default_name.?);
+            try self.emitSlice("=(require(\"");
+            try self.emitJsStr(spec);
+            try self.emitSlice("\").default??require(\"");
+            try self.emitJsStr(spec);
+            try self.emitSlice("\"));\n");
+        } else {
+            // named only: const{A,B:C}=require('spec');
+            try self.emitSlice("const{");
+            for (named.items, 0..) |nm, i| {
+                if (i > 0) try self.emit(',');
+                try self.emitSlice(nm.key);
+                if (!std.mem.eql(u8, nm.alias, nm.key)) {
+                    try self.emit(':');
+                    try self.emitSlice(nm.alias);
+                }
+            }
+            try self.emitSlice("}=require(\"");
+            try self.emitJsStr(spec);
+            try self.emitSlice("\");\n");
+        }
     }
 
     fn handleExportKeyword(self: *Stripper, start: usize) Allocator.Error!void {
         _ = start;
         // export type ... → 删除
+        const ws_start = self.pos;
         self.skipWhitespace();
         if (std.mem.startsWith(u8, self.remaining(), "type ") or
             std.mem.startsWith(u8, self.remaining(), "type{") or
@@ -833,8 +1108,150 @@ const Stripper = struct {
             try self.skipToEndOfStatement();
             return;
         }
-        // export default / export const 等：输出
+        // 非 ESM→CJS 模式：直接透传
+        if (!self.opts.esm_to_cjs) {
+            try self.emitSlice("export");
+            try self.emitSlice(self.src[ws_start..self.pos]);
+            return;
+        }
+
+        // ── ESM→CJS 模式 ─────────────────────────────────────────────────────
+
+        const rem = self.remaining();
+
+        // export * from 'spec'
+        if (rem.len > 0 and rem[0] == '*') {
+            self.pos += 1;
+            self.skipWhitespace();
+            if (std.mem.startsWith(u8, self.remaining(), "from")) {
+                self.pos += 4;
+                self.skipWhitespace();
+                const spec = self.readQuotedStr();
+                self.skipToSemicolon();
+                try self.emitSlice("Object.assign(module.exports,require(\"");
+                try self.emitJsStr(spec);
+                try self.emitSlice("\"));\n");
+            } else {
+                try self.emit('\n');
+            }
+            return;
+        }
+
+        // export { A, B as X } [from 'spec']
+        if (rem.len > 0 and rem[0] == '{') {
+            var names: std.ArrayListUnmanaged(ExportEntry) = .empty;
+            defer names.deinit(self.alloc);
+            try self.parseExportedNames(&names);
+            self.skipWhitespace();
+
+            if (std.mem.startsWith(u8, self.remaining(), "from")) {
+                // Re-export from another module
+                self.pos += 4;
+                self.skipWhitespace();
+                const spec = self.readQuotedStr();
+                self.skipToSemicolon();
+                const ctr = self.reexport_counter;
+                self.reexport_counter += 1;
+                var ctr_buf: [24]u8 = undefined;
+                const tmp = std.fmt.bufPrint(&ctr_buf, "_re{d}_", .{ctr}) catch "_re_";
+                try self.emitSlice("var ");
+                try self.emitSlice(tmp);
+                try self.emitSlice("=require(\"");
+                try self.emitJsStr(spec);
+                try self.emitSlice("\");");
+                for (names.items) |n| {
+                    try self.emitSlice("module.exports[\"");
+                    try self.emitJsStr(n.exported);
+                    try self.emitSlice("\"]=");
+                    try self.emitSlice(tmp);
+                    try self.emit('.');
+                    try self.emitSlice(n.local);
+                    try self.emit(';');
+                }
+                try self.emit('\n');
+            } else {
+                // Local named export — defer
+                self.skipToSemicolon();
+                for (names.items) |n| {
+                    try self.exports_deferred.append(self.alloc, .{
+                        .local = n.local,
+                        .exported = n.exported,
+                    });
+                }
+                try self.emit('\n');
+            }
+            return;
+        }
+
+        // export default ...
+        if (std.mem.startsWith(u8, rem, "default")) {
+            self.pos += 7; // "default"
+            self.skipWhitespace();
+            // module.exports = module.exports.default = <expr/fn/class>
+            // function/class 成为表达式（赋值时合法）
+            try self.emitSlice("module.exports=module.exports.default=");
+            // 如果后面是 function/async function，直接作为表达式流入
+            return;
+        }
+
+        // export const/let/var X = ...
+        if (std.mem.startsWith(u8, rem, "const ") or
+            std.mem.startsWith(u8, rem, "let ") or
+            std.mem.startsWith(u8, rem, "var "))
+        {
+            const sp_idx = std.mem.indexOfScalar(u8, rem, ' ') orelse rem.len;
+            const kw = rem[0..sp_idx];
+            self.pos += sp_idx + 1;
+            self.skipWhitespace();
+            const name_start = self.pos;
+            while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+            const var_name = self.src[name_start..self.pos];
+            // 发出声明（不含 export 关键字）
+            try self.emitSlice(kw);
+            try self.emit(' ');
+            try self.emitSlice(var_name);
+            // 延迟导出
+            try self.exports_deferred.append(self.alloc, .{ .local = var_name, .exported = var_name });
+            return;
+        }
+
+        // export function foo(...)
+        if (std.mem.startsWith(u8, rem, "function") or
+            std.mem.startsWith(u8, rem, "async "))
+        {
+            if (std.mem.startsWith(u8, rem, "async ")) {
+                try self.emitSlice("async ");
+                self.pos += 6;
+                self.skipWhitespace();
+            }
+            // "function"
+            self.pos += 8;
+            self.skipWhitespace();
+            const name_start = self.pos;
+            while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+            const fn_name = self.src[name_start..self.pos];
+            try self.emitSlice("function ");
+            try self.emitSlice(fn_name);
+            try self.exports_deferred.append(self.alloc, .{ .local = fn_name, .exported = fn_name });
+            return;
+        }
+
+        // export class Foo
+        if (std.mem.startsWith(u8, rem, "class ") or std.mem.startsWith(u8, rem, "class{")) {
+            self.pos += 5; // "class"
+            self.skipWhitespace();
+            const name_start = self.pos;
+            while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+            const class_name = self.src[name_start..self.pos];
+            try self.emitSlice("class ");
+            try self.emitSlice(class_name);
+            try self.exports_deferred.append(self.alloc, .{ .local = class_name, .exported = class_name });
+            return;
+        }
+
+        // Fallthrough: 未识别的 export 形式，直接透传
         try self.emitSlice("export");
+        try self.emitSlice(self.src[ws_start..self.pos]);
     }
 
     fn skipToEndOfStatement(self: *Stripper) Allocator.Error!void {
@@ -921,8 +1338,8 @@ const Stripper = struct {
         self.pos += 1; // skip {
 
         // 解析成员
-        var members: std.ArrayList(EnumMember) = std.ArrayList(EnumMember).init(self.alloc);
-        defer members.deinit();
+        var members: std.ArrayList(EnumMember) = std.ArrayList(EnumMember){};
+        defer members.deinit(self.alloc);
 
         var next_val: i64 = 0;
         while (self.pos < self.src.len) {
@@ -984,7 +1401,7 @@ const Stripper = struct {
             }
             next_val = val + 1;
 
-            try members.append(.{ .name = mname, .val = val });
+            try members.append(self.alloc, .{ .name = mname, .val = val });
         }
 
         // 输出
@@ -1071,6 +1488,26 @@ const Stripper = struct {
                 break;
             }
         }
+    }
+
+    fn prevNonWhitespace(src: []const u8, before: usize) ?u8 {
+        if (before == 0) return null;
+        var i: usize = before;
+        while (i > 0) {
+            i -= 1;
+            const ch = src[i];
+            if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n') return ch;
+        }
+        return null;
+    }
+
+    fn nextNonWhitespace(src: []const u8, from: usize) ?u8 {
+        var i: usize = from;
+        while (i < src.len) : (i += 1) {
+            const ch = src[i];
+            if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n') return ch;
+        }
+        return null;
     }
 
     // ────────────────────────────────────────────────────
@@ -1287,8 +1724,8 @@ const Stripper = struct {
             return;
         }
 
-        var props_buf = std.ArrayList(u8).init(self.alloc);
-        defer props_buf.deinit();
+        var props_buf = std.ArrayList(u8){};
+        defer props_buf.deinit(self.alloc);
 
         while (self.pos < self.src.len) {
             self.skipWhitespace();
@@ -1309,7 +1746,7 @@ const Stripper = struct {
             if (c == '{') {
                 // spread: {...expr}
                 if (!has_props) {
-                    try props_buf.appendSlice("{}");
+                    try props_buf.appendSlice(self.alloc, "{}");
                     has_props = true;
                 }
                 // 跳过 spread（简化）
@@ -1329,24 +1766,24 @@ const Stripper = struct {
                 self.pos += 1;
             }
             const attr_name = self.src[attr_start..self.pos];
-            try props_buf.appendSlice(attr_name);
+            try props_buf.appendSlice(self.alloc, attr_name);
 
             self.skipWhitespace();
             if (self.cur() == '=') {
                 self.pos += 1;
-                try props_buf.append(':');
+                try props_buf.append(self.alloc, ':');
                 self.skipWhitespace();
                 const v = self.cur();
                 if (v == '"' or v == '\'' or v == '`') {
                     const q = v;
-                    try props_buf.append(q);
+                    try props_buf.append(self.alloc, q);
                     self.pos += 1;
                     while (self.pos < self.src.len and self.src[self.pos] != q) {
-                        try props_buf.append(self.src[self.pos]);
+                        try props_buf.append(self.alloc, self.src[self.pos]);
                         self.pos += 1;
                     }
                     if (self.pos < self.src.len) {
-                        try props_buf.append(q);
+                        try props_buf.append(self.alloc, q);
                         self.pos += 1;
                     }
                 } else if (v == '{') {
@@ -1356,21 +1793,21 @@ const Stripper = struct {
                     while (self.pos < self.src.len and d > 0) {
                         if (self.src[self.pos] == '{') d += 1
                         else if (self.src[self.pos] == '}') d -= 1;
-                        if (d > 0) try props_buf.append(self.src[self.pos]);
+                        if (d > 0) try props_buf.append(self.alloc, self.src[self.pos]);
                         self.pos += 1;
                     }
                 }
             } else {
                 // boolean 属性
-                try props_buf.appendSlice(":true");
+                try props_buf.appendSlice(self.alloc, ":true");
             }
-            try props_buf.append(',');
+            try props_buf.append(self.alloc, ',');
         }
 
         if (has_props) {
             try self.emit(',');
             try self.emit('{');
-            try self.out.appendSlice(props_buf.items);
+            try self.out.appendSlice(self.alloc, props_buf.items);
             try self.emit('}');
         } else {
             try self.emitSlice(",null");
@@ -1443,8 +1880,145 @@ const Stripper = struct {
             }
         }
 
-        _ = has_children;
+        // has_children used above
         try self.emit(')');
+    }
+
+    // ── T5.3.5: import.meta 多填充 ────────────────────────────────────────────
+
+    /// 在消费了 ".meta" 之后调用，根据模式发出相应的 polyfill 或透传。
+    fn emitImportMeta(self: *Stripper) Allocator.Error!void {
+        if (!self.opts.esm_to_cjs) {
+            // 非 ESM 模式：原样透传
+            try self.emitSlice("import.meta");
+            return;
+        }
+        // ESM→CJS 模式：替换为运行时 polyfill
+        if (std.mem.startsWith(u8, self.remaining(), ".url")) {
+            const after = self.remaining()[4..];
+            if (after.len == 0 or !isIdentCont(after[0])) {
+                self.pos += 4;
+                try self.emitSlice("\"");
+                try self.emitJsStr(self.opts.filename);
+                try self.emitSlice("\"");
+                return;
+            }
+        }
+        if (std.mem.startsWith(u8, self.remaining(), ".env")) {
+            const after = self.remaining()[4..];
+            if (after.len == 0 or !isIdentCont(after[0])) {
+                self.pos += 4;
+                try self.emitSlice("(typeof process!==\"undefined\"?process.env:{})");
+                return;
+            }
+        }
+        if (std.mem.startsWith(u8, self.remaining(), ".resolve(")) {
+            self.pos += 9; // consume ".resolve("
+            try self.emitSlice("require.resolve(");
+            return;
+        }
+        // Unknown import.meta.xxx — emit object with common polyfills
+        try self.emitSlice("({url:\"");
+        try self.emitJsStr(self.opts.filename);
+        try self.emitSlice("\",env:typeof process!==\"undefined\"?process.env:{}})");
+    }
+
+    // ── T5.2.6: ESM→CJS 辅助方法 ────────────────────────────────────────────
+
+    /// 读取当前 pos 指向的带引号字符串内容（不含引号），推进 pos 到引号后。
+    fn readQuotedStr(self: *Stripper) []const u8 {
+        if (self.pos >= self.src.len) return "";
+        const q = self.src[self.pos];
+        if (q != '"' and q != '\'') return "";
+        self.pos += 1;
+        const start = self.pos;
+        while (self.pos < self.src.len and self.src[self.pos] != q) {
+            if (self.src[self.pos] == '\\') self.pos += 1;
+            if (self.pos < self.src.len) self.pos += 1;
+        }
+        const end = self.pos;
+        if (self.pos < self.src.len) self.pos += 1;
+        return self.src[start..end];
+    }
+
+    /// 推进 pos 到语句结尾（; 或 \n 或 EOF）。
+    fn skipToSemicolon(self: *Stripper) void {
+        while (self.pos < self.src.len) {
+            const c = self.src[self.pos];
+            self.pos += 1;
+            if (c == ';' or c == '\n') return;
+        }
+    }
+
+    /// 将字符串输出为 JS 字符串字面量内容（用于双引号包裹）。
+    fn emitJsStr(self: *Stripper, s: []const u8) Allocator.Error!void {
+        for (s) |c| {
+            switch (c) {
+                '"' => try self.emitSlice("\\\""),
+                '\\' => try self.emitSlice("\\\\"),
+                '\n' => try self.emitSlice("\\n"),
+                '\r' => try self.emitSlice("\\r"),
+                else => try self.emit(c),
+            }
+        }
+    }
+
+    /// 解析 `{ A, B as C, ... }` 格式的命名导入列表，填入 buf。
+    fn parseImportedNames(self: *Stripper, buf: *std.ArrayListUnmanaged(ImportedName)) Allocator.Error!void {
+        self.skipWhitespace();
+        if (self.cur() != '{') return;
+        self.pos += 1;
+        while (self.pos < self.src.len) {
+            self.skipWhitespace();
+            if (self.cur() == '}') { self.pos += 1; break; }
+            if (self.cur() == ',') { self.pos += 1; continue; }
+            if (!isIdentStart(self.cur())) { self.pos += 1; continue; }
+            const key_start = self.pos;
+            while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+            const key = self.src[key_start..self.pos];
+            self.skipWhitespace();
+            if (std.mem.startsWith(u8, self.remaining(), "as ") or
+                std.mem.startsWith(u8, self.remaining(), "as\t"))
+            {
+                self.pos += 2;
+                self.skipWhitespace();
+                const alias_start = self.pos;
+                while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+                const alias = self.src[alias_start..self.pos];
+                try buf.append(self.alloc, .{ .key = key, .alias = alias });
+            } else {
+                try buf.append(self.alloc, .{ .key = key, .alias = key });
+            }
+        }
+    }
+
+    /// 解析 `{ A, B as X, ... }` 格式的命名导出列表，填入 buf。
+    fn parseExportedNames(self: *Stripper, buf: *std.ArrayListUnmanaged(ExportEntry)) Allocator.Error!void {
+        self.skipWhitespace();
+        if (self.cur() != '{') return;
+        self.pos += 1;
+        while (self.pos < self.src.len) {
+            self.skipWhitespace();
+            if (self.cur() == '}') { self.pos += 1; break; }
+            if (self.cur() == ',') { self.pos += 1; continue; }
+            if (!isIdentStart(self.cur())) { self.pos += 1; continue; }
+            const local_start = self.pos;
+            while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+            const local = self.src[local_start..self.pos];
+            self.skipWhitespace();
+            if (std.mem.startsWith(u8, self.remaining(), "as ") or
+                std.mem.startsWith(u8, self.remaining(), "as\t"))
+            {
+                self.pos += 2;
+                self.skipWhitespace();
+                const exp_start = self.pos;
+                while (self.pos < self.src.len and isIdentCont(self.src[self.pos])) self.pos += 1;
+                const exported = self.src[exp_start..self.pos];
+                try buf.append(self.alloc, .{ .local = local, .exported = exported });
+            } else {
+                try buf.append(self.alloc, .{ .local = local, .exported = local });
+            }
+        }
     }
 };
 
@@ -1458,6 +2032,73 @@ fn isIdentStart(c: u8) bool {
 
 fn isIdentCont(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// T5.2.7: VLQ 编码 + sourcemap 生成（自由函数，不依赖 Stripper）
+// ──────────────────────────────────────────────────────────────────────────────
+
+const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn vlqEncodeValue(out: *std.ArrayListUnmanaged(u8), alloc: Allocator, value: i32) Allocator.Error!void {
+    // 有符号整数 → 无符号 VLQ（最低位为符号位）→ 每 5 位一组 base64
+    var v: u32 = if (value < 0)
+        (@as(u32, @intCast(-value)) << 1) | 1
+    else
+        @as(u32, @intCast(value)) << 1;
+    while (true) {
+        var digit: u8 = @intCast(v & 0x1F);
+        v >>= 5;
+        if (v > 0) digit |= 0x20; // continuation bit
+        try out.append(alloc, BASE64_CHARS[digit]);
+        if (v == 0) break;
+    }
+}
+
+/// 生成 sourcemap v3 JSON。
+/// line_origins[i] = 第 i 个输出换行符对应的输入行号。
+fn generateSourcemap(
+    alloc: Allocator,
+    filename: []const u8,
+    line_origins: []const u32,
+) Allocator.Error![]u8 {
+    var mappings: std.ArrayListUnmanaged(u8) = .empty;
+    defer mappings.deinit(alloc);
+
+    var prev_src_line: i32 = 0;
+
+    // 输出行 0：映射到输入行 0，列 0
+    try vlqEncodeValue(&mappings, alloc, 0); // output col delta
+    try vlqEncodeValue(&mappings, alloc, 0); // source file delta
+    try vlqEncodeValue(&mappings, alloc, 0); // source line delta
+    try vlqEncodeValue(&mappings, alloc, 0); // source col delta
+
+    // 输出行 1..N：每个换行符之后对应的输入行
+    for (line_origins, 0..) |src_line, idx| {
+        _ = idx;
+        try mappings.append(alloc, ';');
+        const delta = @as(i32, @intCast(src_line)) - prev_src_line;
+        try vlqEncodeValue(&mappings, alloc, 0);
+        try vlqEncodeValue(&mappings, alloc, 0);
+        try vlqEncodeValue(&mappings, alloc, delta);
+        try vlqEncodeValue(&mappings, alloc, 0);
+        prev_src_line = @intCast(src_line);
+    }
+
+    // 组装完整 sourcemap JSON
+    var json: std.ArrayListUnmanaged(u8) = .empty;
+    defer json.deinit(alloc);
+
+    try json.appendSlice(alloc, "{\"version\":3,\"sources\":[\"");
+    for (filename) |c| {
+        if (c == '"' or c == '\\') try json.append(alloc, '\\');
+        try json.append(alloc, c);
+    }
+    try json.appendSlice(alloc, "\"],\"mappings\":\"");
+    try json.appendSlice(alloc, mappings.items);
+    try json.appendSlice(alloc, "\",\"names\":[]}");
+
+    return json.toOwnedSlice(alloc);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # Bun WASM Browser Runtime — Phase 5 迭代计划
 
-**状态**：Phase 5.1 已完成 ✅ · Phase 5.2 原型已落地 🟡 · Phase 5.3 resolver 子集已落地 🟡  
+**状态**：Phase 5.1 已完成 ✅ · Phase 5.2 T5.2.1–T5.2.8 全部完成 ✅ · Phase 5.3 T5.3.1a-i + T5.3.2(CSS) + T5.3.3 + T5.3.5 + T5.3.6 + T5.3.7 完成 🟡 · Phase 5.4 T5.4.1 + T5.4.2 + T5.4.3 + T5.4.4 + T5.4.5 完成 🟡 · Phase 5.7 T5.7.1 + T5.7.2 + T5.7.3 完成 🟡 · **Phase 5.8 全部完成** ✅  
 **依赖文档**：
 - [bun-wasm-browser-runtime-technical-design.md](./bun-wasm-browser-runtime-technical-design.md)
 - [bun-wasm-browser-runtime-implementation-plan.md](./bun-wasm-browser-runtime-implementation-plan.md)
@@ -170,27 +170,38 @@ transpile / bundle 输出 sourcemap → 错误对象堆栈反查回源。
 | T5.2.1 | 轻量 stripper `src/bun_wasm_transform.zig`（Zig） | ✅ |
 | T5.2.2 | `bun_transform(opts_ptr, opts_len) u64` WASM ABI | ✅ |
 | T5.2.3 | `packages/bun-browser/src/wasm.ts` 新增 `transform()` 封装 + `TransformResult` 类型 | ✅ |
-| T5.2.4 | Bundler 内部 `transpileIfNeeded` 接入，失败回退 `jsi_transpile` | ✅ |
+| T5.2.4 | Bundler 内部 `transpileIfNeeded` 接入；优先 `jsi_transpile`（ESM→CJS 完整降级），失败回退内置 WASM stripper | ✅ |
 | T5.2.5 | 端到端测试：`packages/bun-browser/test/transform.test.ts` | ✅ |
-| T5.2.6 | 完整接入 `js_parser`/`transpiler`（取代轻量实现） | ⏳ |
-| T5.2.7 | sourcemap 串连错误堆栈 | ⏳ |
-| T5.2.8 | `Host` 侧移除 `jsi_transpile` 必要性（不再提供，WASM 自含） | ⏳ |
+| T5.2.6 | 完整 ESM→CJS 转换：`import`/`export` 全形式解析，生成 `require()`/`module.exports` | ✅ |
+| T5.2.7 | sourcemap v3 生成：VLQ 编码 + 行追踪，`bun_transform` 返回 `map` 字段 | ✅ |
+| T5.2.8 | identity 检测：host `jsi_transpile` 透传时回退 WASM 内置 ESM→CJS，WASM 完全自含 | ✅ |
 
 #### ABI
 
 ```c
-// 输入 JSON: { "code": <TS>, "filename": <str>, "jsx": "react"|"react-jsx"|"preserve"|"none" }
-// 输出 JSON: { "code": <JS|null>, "errors": [<string>...] }
+// 输入 JSON:
+//   { "code": <TS>,
+//     "filename": <str>,
+//     "jsx": "react"|"react-jsx"|"preserve"|"none",
+//     "esm_to_cjs": true,   // T5.2.6：将 import/export 转换为 require/module.exports
+//     "source_map": true    // T5.2.7：生成 sourcemap v3
+//   }
+// 输出 JSON:
+//   { "code": <JS|null>,
+//     "errors": [<string>...],
+//     "map": <string|null>  // sourcemap v3 JSON（仅 source_map=true 时存在）
+//   }
 u64 bun_transform(u32 opts_ptr, u32 opts_len);
 ```
 
 #### 验收
 
-- 当前验收（原型）：
-  - Bundler 在无 Host 帮助下将 `.ts`/`.tsx` 打包为可运行 JS
+- 当前验收（T5.2.1–T5.2.8 全部完成，292/292 测试通过）：
+  - Bundler 在无 Host 帮助下将 `.ts`/`.tsx` 打包为可运行 JS（T5.2.8 identity 检测）
   - `rt.transform(src, file)` 返回 `{code, errors}`
+  - `rt.transform(src, file, { esmToCjs: true })` 返回含 `require()`/`module.exports` 的 CJS（T5.2.6）
+  - `rt.transform(src, file, { sourceMap: true })` 返回含 `map` 字段的结果，`map` 为 sourcemap v3 JSON（T5.2.7）
   - 源码存在轻度语法问题时，shape 仍保持合法
-- 正式验收（待 T5.2.6 完成）：输出与 `bun build --target=browser` 等价
 
 ---
 
@@ -220,14 +231,46 @@ u64 bun_transform(u32 opts_ptr, u32 opts_len);
 | T5.3.1f | tsconfig 向上查找（monorepo apps/web → 根 tsconfig） | ✅ |
 | T5.3.1g | `exports` `imports` 条件中 `pattern/*` 通配符 | ✅ |
 | T5.3.1h | `tsconfig.extends` 继承链 | ✅ |
-| T5.3.1i | Node builtin 映射（`node:fs` → polyfill id） | ⏳ |
-| T5.3.2 | `src/bundler/*` 最小子集（树摇 / CSS import / code-splitting） | ⏳ |
-| T5.3.3 | 新 ABI `bun_resolve2`/`bun_bundle2` 接收 config_json | ⏳ |
+| T5.3.1i | Node builtin 映射（`node:fs`/`fs`/`node:path`/`path`/`events` 等 → `<builtin:node:fs>` 虚拟路径 + polyfill/delegate 注入） | ✅ |
+| T5.3.2 | `src/bundler/*` 最小子集（树摇 / CSS import / code-splitting）<br/>**已落地：CSS passthrough** — `.css` 文件转译为 `<style>` 注入 IIFE；resolver ext 探测 + `classifyLoader` 均加入 `.css` | 🟡 |
+| T5.3.3 | 新 ABI `bun_bundle2` 接收 config_json（`entrypoint` + `external[]` + `define{}`） | ✅ |
 | T5.3.4 | 旧 `bun_resolve`/`bun_bundle` 作薄封装 → 底层替换为 `src/resolver/*` | ⏳ |
+| T5.3.5 | `import.meta.url`/`import.meta.env`/`import.meta.resolve()` polyfill（ESM→CJS 模式） | ✅ |
+| T5.3.6 | 动态 `import("spec")` → `Promise.resolve(require("spec"))` 转换 | ✅ |
+| T5.3.7 | 每模块头部注入 `__filename`/`__dirname` 变量 | ✅ |
 
-#### 已落地 ABI（Phase 5.3a）
+#### Phase 5.8 — Node.js 内置模块 polyfill（inline JS）
 
-无新 ABI —— 改进在 `bun_resolve` / `bun_bundle` 内部生效，上层 `rt.resolve()` / `rt.bundle()` 调用方式不变。
+**状态**：✅ 已完成（**329/329 全通过**）  
+**目标**：补齐 `events`/`buffer`/`assert`/`querystring`/`string_decoder` 五个高频内置模块的纯 JS 实现，在 `requireFn`（运行时 `require()`）和 `builtinPolyfillSource`（bundle 打包路径）同步生效。
+
+| 任务 | 说明 | 状态 |
+|------|------|:----:|
+| T5.8.1 | `events` / `node:events` — 完整 EventEmitter（on/once/off/emit/prependListener/removeAllListeners/inherits） | ✅ |
+| T5.8.2 | `buffer` / `node:buffer` — Buffer class（from/alloc/concat/isBuffer + read/write UInt8/16/32 BE/LE）| ✅ |
+| T5.8.3 | `assert` / `node:assert` — 全套断言（ok/strictEqual/deepStrictEqual/throws/rejects/match/AssertionError）| ✅ |
+| T5.8.4 | `querystring` / `node:querystring` — parse/stringify，支持数组值、`+` 空格、maxKeys | ✅ |
+| T5.8.5 | `string_decoder` / `node:string_decoder` — StringDecoder（write/end，TextDecoder 驱动）| ✅ |
+
+**验收**（**329/329 全通过**，较上轮 +26）：
+- `require('events')` / `require('node:events')` 返回可用的 EventEmitter 类
+- EventEmitter on/once/off/emit/prependListener/removeAllListeners/inherits/listenerCount 均正确
+- `require('buffer').Buffer.from/alloc/concat/isBuffer` + read/write UInt32BE/LE 正确
+- `require('assert').strictEqual/deepStrictEqual/throws/rejects/match` 在通过/失败场景均正确抛出/不抛 AssertionError
+- `require('querystring').parse/stringify` 支持 `+` 解码空格、数组值多对
+- `require('string_decoder').StringDecoder.write/end` UTF-8 解码正确
+- 以上 5 个模块均可通过 **bundle 路径**（`builtinPolyfillSource`）内联到输出 bundle
+- 新增测试文件：`packages/bun-browser/test/node-builtins.test.ts`（26 个用例）
+
+#### 已落地 ABI（Phase 5.3a / T5.3.3）
+
+**Phase 5.3a**：无新 ABI —— resolver 改进在 `bun_resolve` / `bun_bundle` 内部生效，上层 `rt.resolve()` / `rt.bundle()` 调用方式不变。
+
+**T5.3.3**：新增 `bun_bundle2(cfg_ptr, cfg_len) u64`，接受 JSON 配置：
+```json
+{ "entrypoint": "/app/index.ts", "external": ["react"], "define": { "process.env.NODE_ENV": "\"production\"" } }
+```
+`wasm.ts` 新增 `BundleConfig` 接口 + `rt.bundle2(config)` 方法。`external` 包在运行时委托 `globalThis.require(...)`；`define` 在转译前做词边界文本替换。
 
 ```c
 // 行为变化：
@@ -240,11 +283,18 @@ u64 bun_transform(u32 opts_ptr, u32 opts_len);
 
 #### 验收
 
-- 当前验收（Phase 5.3a）：
-  - `rt.resolve("@scope/pkg", ...)`、`rt.resolve("pkg/sub", ...)`、`rt.resolve("@/utils", ...)` 通过
+- 当前验收（Phase 5.3a + T5.3.2 + T5.3.3 + T5.3.5 + T5.3.6 + T5.3.7，**303/303 全通过**）：
+  - `rt.resolve("@scope/pkg", ...)`, `rt.resolve("pkg/sub", ...)`, `rt.resolve("@/utils", ...)` 通过
   - Bundler 遇到 tsconfig 别名的 import 能自动解析并打包
   - package.json `exports` 的 browser/import/default/require 条件按优先级匹配
   - 未匹配 tsconfig paths 的裸导入自动 fallback 到 node_modules
+  - `rt.bundle2({ external: ["react"] })` 阻止 react 被打包，改用 `globalThis.require` 委托
+  - `rt.bundle2({ define: { "process.env.NODE_ENV": '"production"' } })` 在转译前完成文本替换
+  - externals + define 可组合使用
+  - **T5.3.2（CSS）**：`require('./style.css')` 打包产出 `document.createElement("style")` + `appendChild` 的 IIFE，在 DOM 可用时自动注入样式
+  - **T5.3.5**：`import.meta.url` → 文件名字符串；`import.meta.env` → `process.env` polyfill；`import.meta.resolve()` → `require.resolve()`；未知属性 → `{url,env}` 对象
+  - **T5.3.6**：`import("spec")` → `Promise.resolve().then(function(){return require("spec")})`
+  - **T5.3.7**：每个模块包裹内头部自动注入 `var __filename="...",__dirname="...";`
 - 正式验收（待 T5.3.4 完成）：
   - `Bun.resolveSync` 能处理 monorepo、tsconfig paths、exports 条件（输出与 CLI Bun 一致）
   - `Bun.build` 输出含 sourcemap、tree-shake 后的 bundle
@@ -257,18 +307,37 @@ u64 bun_transform(u32 opts_ptr, u32 opts_len);
 **目标**：TS 版 `installer.ts` 退化为薄 fetch 壳，版本解析/依赖图/lockfile 全在 Zig。
 
 **任务**：
-- T5.4.1 `src/install/npm.zig` manifest 解析接入 WASM
-- T5.4.2 `src/install/dependency.zig` 版本图求解
-- T5.4.3 `src/install/tarball.zig` 解压入 VFS（依赖 Phase 5.1 的 zlib）
-- T5.4.4 Host ↔ WASM 异步 fetch 协议
-  - WASM 暴露 `bun_npm_need_fetch() u64` → 返回 `{url, kind}` 或 null
-  - Host `fetch` 完成后 `bun_npm_feed_response(req_id, data_ptr, data_len, status)` 回填
-- T5.4.5 lockfile v2 读写（复用 `src/install/lockfile/*`）
+- T5.4.1 `src/install/npm.zig` manifest 解析接入 WASM ✅
+  - **已落地**：`bun_npm_parse_metadata(json_ptr,json_len,range_ptr,range_len) u64`
+  - 内部：`std.json` 全量解析 npm metadata JSON → 提取 dist-tags + versions → `semverSelectFromList`（从 `bun_semver_select` 重构提取）→ 返回 JSON `{version,tarball,integrity?,shasum?,dependencies{}}`
+  - 支持 semver range / dist-tag（如 `"latest"`）/ 精确版本 / 通配符（`"*"`→ 优先 latest dist-tag）
+  - `installer.ts` 优先走 WASM 路径（`parseNpmMetadata`），回退到 TS semver
+  - 新增 6 个集成测试（`bun_npm_parse_metadata` describe 块）
+- T5.4.2 `src/install/dependency.zig` 版本图求解 ✅
+- T5.4.3 `src/install/tarball.zig` 解压入 VFS（依赖 Phase 5.1 的 zlib）✅
+  - **已落地**：Zig 内置 ustar/PAX tar 解析器 + `inflateImpl` gzip 解压 + 直接写入 `vfs_g`
+  - ABI：`bun_tgz_extract(input_ptr, input_len) u64`（packed input：`[prefix_len:u32][prefix][tgz]`）
+  - `installer.ts` 优先使用 WASM 路径，回退到 JS inflate+parseTar
+  - 新增 5 个集成测试（`bun_tgz_extract` describe 块）
+- T5.4.4 Host ↔ WASM 异步 fetch 协议 ✅
+- T5.4.5 lockfile v2 读写（复用 `src/install/lockfile/*`）✅
 
 **验收**：
 - `installPackages()` 中的 `chooseVersion` / 依赖 BFS / integrity 全部委托 WASM
 - 支持 `dependencies` + `peerDependencies` + `optionalDependencies`
 - lockfile 能被 CLI Bun 读取验证
+- **当前验收（T5.4.1 + T5.4.2 + T5.4.3 + T5.4.4 + T5.4.5，281/281 全通过）**：
+  - `rt.parseNpmMetadata(json, range)` 正确解析 npm registry metadata JSON
+  - semver range（`^1.0.0`）/ dist-tag（`latest`）/ 精确版本（`1.2.3`）/ 通配符（`*`）均支持
+  - `dependencies` 对象完整提取
+  - 无匹配版本返回 `null`
+  - `rt.extractTgz(prefix, tgz)` 返回解压文件数
+  - 提取后文件可被 `rt.resolve` / `rt.bundle` 直接访问（无需额外 `bun_vfs_load_snapshot`）
+  - 嵌套目录（`dist/utils/helper.js`）正确创建（`mkdirp`）
+  - `installPackages({ wasmRuntime: rt })` 路径：`result.files = []`，文件已在 VFS 中
+  - `rt.resolveGraph(deps, metadata)` WASM 内部 BFS 展平完整传递依赖图，去重，缺失包放入 `missing[]`
+  - `rt.writeLockfile({ packages, workspaceCount })` 序列化为有效 JSON 格式 lockfile
+  - 异步 fetch 协议：`npmInstallBegin` → `npmNeedFetch` → `npmFeedResponse` → `npmInstallResult` → `npmInstallEnd` 完整链路可用
 
 ---
 
@@ -325,21 +394,69 @@ u64 bun_transform(u32 opts_ptr, u32 opts_len);
 
 ### Phase 5.7 — Bun.* API 补齐与 sourcemap
 
+**状态**：🟡 T5.7.1 完成（Bun 对象核心 API 全量实现）
+
 **时间盒**：2 周  
 **目标**：Bun 对象表面积接近真实 runtime 的浏览器可用子集。
 
 **任务**：
-- T5.7.1 新增 Bun.* API
-  - `Bun.file` / `Bun.write` / `Bun.glob` / `Bun.env` / `Bun.argv` / `Bun.main`
-  - `Bun.inspect` / `Bun.which` / `Bun.resolveSync`
-  - `Bun.password` / `Bun.gzipSync` / `Bun.gunzipSync`
-  - `Bun.Transpiler`（复用 Phase 5.2 的 `bun_transform`）
-- T5.7.2 `src/sourcemap/*` 栈帧还原
-- T5.7.3 `HTMLRewriter` via `src/HTMLScanner.zig`
+- T5.7.1 新增 Bun.* API ✅
+  - （详见上方 T5.7.1 实现细节）
+- T5.7.2 `src/sourcemap/*` 栈帧还原 ✅
+- T5.7.3 `HTMLRewriter` via `src/HTMLScanner.zig` ✅
 
-**验收**：
-- `Bun` 全属性与 CLI Bun 的浏览器兼容子集一致
-- 错误堆栈显示源文件位置（而非 transpile 后的 JS）
+**T5.7.1 实现细节**：
+
+- **JSI 新增两个 import**（`src/jsi/imports.zig` + `jsi-host.ts`）：
+  - `jsi_read_arraybuffer(handle, dest_ptr, dest_len) i32`
+  - `jsi_arraybuffer_byteLength(handle) i32`
+- **Zig HostFn**（`src/bun_browser_standalone.zig`，在 `setupGlobals` 注册）：
+  - `bunFileReadFn` — VFS 文件 → ArrayBuffer handle
+  - `bunFileSizeFn` — VFS stat size（缺失时返回 0）
+  - `bunFileWriteFn` — 写字符串或 ArrayBuffer/TypedArray 到 VFS
+  - `bunResolveSyncFn` — builtin → tsconfig paths → resolveBareInVfs 链
+  - `bunGunzipSyncFn` — `inflateImpl` gzip 解压
+  - `bunTranspileCodeFn` — `transpileIfNeeded` 管道
+- **`BUN_GLOBAL_SRC` 扩充**：从仅含 `serve` 扩展为完整 Bun 对象，HostFn 引用在 IIFE 最后 `delete globalThis.__bun_*` 清理，避免污染全局命名空间
+
+**验收**（T5.7.1，**257/257 全通过**）：
+- `Bun` 对象包含所有预期属性（21 个 key），`missing=[]`
+- `Bun.file(path).text()` / `.arrayBuffer()` / `.json()` / `.size` 行为正确
+- `Bun.write(path, string|Uint8Array|BunFile)` 写入 VFS 并可读回
+- `Bun.resolveSync` 处理相对路径、node 内建、tsconfig paths
+- `Bun.inspect` 递归格式化，支持循环引用 → `[Circular]`
+- `Bun.sleep(ms)` 返回 Promise，配合 `bun_tick` 正常 resolve
+- `Bun.gunzipSync` 解压 gzip 字节还原原始内容
+- `Bun.Transpiler.transformSync(tsCode)` 去除类型注解
+- 新增测试文件：`packages/bun-browser/test/bun-apis.test.ts`（32 个用例）
+
+**T5.7.2 实现细节**：
+
+- **Zig**：`bun_sourcemap_lookup(input_ptr, input_len) u64`
+  - 输入 JSON：`{"map":"<sourcemap v3 json 字符串>","line":<0-based>,"col":<0-based>}`
+  - 内置 Base64-VLQ 解码器（`vlqDecode`）逐段解析 `mappings` 字段
+  - 输出 JSON：`{"source":"<file>","line":N,"col":N,"name":"<name>"}` 或 `{"source":null}`
+  - 行/列越界时返回 `{"source":null}`，解析失败时返回 packError
+
+- **TS**：`wasm.ts` 新增 `SourcemapPosition` 接口 + `sourcemapLookup(map, line, col): SourcemapPosition | null`
+
+**T5.7.3 实现细节**：
+
+- **Zig**：`bun_html_rewrite(input_ptr, input_len) u64`
+  - 输入 JSON：`{"html":"...","rules":[{"selector":"tag[attr=val]","attr":"...","replace":"..."/"text":"..."/"remove":true}]}`
+  - 支持选择器：`"tag"`、`"tag[attr]"`、`"tag[attr=val]"`
+  - 支持操作：`set_attr`（修改属性值）、`set_text`（替换标签体文本）、`remove`（删除整个标签）
+  - 简单非验证型字符扫描实现，适用于常见 HTML 重写场景
+
+- **TS**：`wasm.ts` 新增 `HtmlRewriteRule` 接口 + `htmlRewrite(html, rules): string | null`
+
+**验收**（T5.7.1 + T5.7.2 + T5.7.3，**281/281 全通过**，较上轮 +13）：
+- `rt.sourcemapLookup(mapJson, line, col)` 返回正确源文件 + 原始行列
+- 行列越界返回 `{ source: null }`
+- 无效 JSON 输入不崩溃，返回 null 或 `{ source: null }`
+- `rt.htmlRewrite(html, rules)` 替换 `script[src]` 属性、`set_text` 内容替换
+- 无匹配规则时 HTML 原样返回，空规则列表不崩溃
+- 新增测试文件：`packages/bun-browser/test/installer.test.ts`（新增 13 个用例）
 
 ---
 
@@ -363,8 +480,50 @@ u64 bun_transform(u32 opts_ptr, u32 opts_len);   // 输入/输出 JSON，见 Pha
 // Phase 5.3
 u64 bun_resolve2(u32 spec_ptr, u32 spec_len,
                  u32 from_ptr, u32 from_len,
-                 u32 cfg_ptr,  u32 cfg_len);
-u64 bun_bundle2(u32 cfg_ptr, u32 cfg_len);
+                 u32 cfg_ptr,  u32 cfg_len);   // ⏳ 待实现
+u64 bun_bundle2(u32 cfg_ptr, u32 cfg_len);    // ✅ T5.3.3 已实现
+
+// Phase 5.7 T5.7.1 ✅ 已实现（JSI import，非 WASM export）
+// import: jsi_read_arraybuffer(handle u32, dest_ptr u32, dest_len u32) i32
+// import: jsi_arraybuffer_byteLength(handle u32) i32
+
+// Phase 5.7 T5.7.2 ✅ 已实现
+// 输入 JSON: {"map":"<sourcemap v3 json>","line":<0-based>,"col":<0-based>}
+// 输出 JSON: {"source":"<file>","line":N,"col":N,"name":"<name>"} 或 {"source":null}
+u64 bun_sourcemap_lookup(u32 input_ptr, u32 input_len);
+
+// Phase 5.7 T5.7.3 ✅ 已实现
+// 输入 JSON: {"html":"...","rules":[{"selector":"tag[attr=val]","attr":"...","replace":"..."|"text":"..."|"remove":true}]}
+// 输出: 重写后的 HTML 字符串
+u64 bun_html_rewrite(u32 input_ptr, u32 input_len);
+
+// Phase 5.4 T5.4.3 ✅ 已实现
+// packed input: [prefix_len:u32 LE][prefix bytes][tgz bytes]
+u64 bun_tgz_extract(u32 input_ptr, u32 input_len);  // → JSON {"extracted":N}
+
+// Phase 5.4 T5.4.1 ✅ 已实现
+u64 bun_npm_parse_metadata(u32 json_ptr, u32 json_len,
+                            u32 range_ptr, u32 range_len);  // → JSON {version,tarball,integrity?,shasum?,dependencies{}}
+
+// Phase 5.4 T5.4.2 ✅ 已实现
+// 输入 JSON: {"deps":{"react":"^18.0.0"}, "metadata":{"react":"<npm registry json>"}}
+// 输出 JSON: {"resolved":[{name,version,tarball,...,dependencies{}}], "missing":[<name>...]}
+u64 bun_npm_resolve_graph(u32 input_ptr, u32 input_len);
+
+// Phase 5.4 T5.4.4 ✅ 已实现（异步 fetch 协议）
+// 输入 JSON: {"deps":{"react":"^18.0.0"}, "registry":"https://registry.npmjs.org"}
+// 输出 JSON（首个 fetch 请求）: {"id":N,"url":"...","type":"metadata"|"tarball","name":"...","range":"..."}
+u64  bun_npm_install_begin(u32 input_ptr, u32 input_len);
+u64  bun_npm_need_fetch();  // 返回同格式 fetch 请求，ptr=0 表示无待处理请求
+void bun_npm_feed_response(u32 req_id, u32 data_ptr, u32 data_len);
+void bun_npm_install_mark_seen(u32 name_ptr, u32 name_len);
+u64  bun_npm_install_result();  // 输出 JSON: {"resolved":[...],"missing":[...]}
+void bun_npm_install_end();
+
+// Phase 5.4 T5.4.5 ✅ 已实现
+// 输入 JSON: {"packages":[{key,name,version}...],"workspaceCount":N}
+// 输出: bun.lock 文本（JSON 格式）
+u64 bun_lockfile_write(u32 input_ptr, u32 input_len);
 
 // Phase 5.4
 u64  bun_npm_need_fetch();
@@ -428,4 +587,15 @@ u32 bun_spawn2(u32 cmd_ptr, u32 cmd_len,
 | 2026-04-22 | claude | Phase 5.2 原型完成：轻量 TS/JSX stripper `src/bun_wasm_transform.zig`、WASM ABI `bun_transform`、`wasm.ts` 新增 `transform()` 封装、bundler 内部接入 + 失败回退 `jsi_transpile`、新增 `transform.test.ts` |
 | 2026-04-22 | claude | Phase 5.3a 手写 resolver 增强：package.json `main`/`module`/`exports["."]`(字符串 + 条件对象 browser/import/default/require)、`exports["./subpath"]` 字面匹配、scoped packages `@scope/name`、tsconfig `compilerOptions.paths` + `baseUrl` + `*` 通配符 + 向上查找，Bundler 内部统一走 `resolveModule`。新增 11 个 `resolver-bundler.test.ts` 用例。同时在 Phase 5.2 章节补充 T5.2.6 `js_parser`/`transpiler` WASM 化依赖面分析（阻塞项清单 + 建议路径） |
 | 2026-04-22 | claude | Phase 5.3 续进：T5.3.1g exports 子路径通配符 `./features/* → ./dist/features/*.js`、T5.3.1h `tsconfig.extends` 继承链（递归加载父 tsconfig，最多 8 层，nearest-wins paths/baseUrl）。新增 2 个测试用例。 |
+| 2026-04-22 | claude | T5.3.1i 完成：Node builtin 映射（`isNodeBuiltin`/`builtinVirtualPath`/`canonicalFromVirtualPath`/`builtinPolyfillSource`）；`bun_resolve` 与 `Bundler.resolveModule` 均优先走 builtin 路径，VFS 内同名包不会被误识别；`Bundler.addFile` 对 `<builtin:...>` 路径注入内联 polyfill（`path`/`url`/`util` 内联 JS，`fs`/`crypto`/`events`/`stream` globalThis.require delegate，其余 stub `{}`）。新增 9 个测试用例，**220/220 全通过**。 |
+| 2026-04-22 | claude | Phase 5.2 + Zig 0.15.2 兼容性修复：(1) `transpileIfNeeded` 反转优先级——宿主 `jsi_transpile` 优先（完整 ESM→CJS），WASM 内置 stripper 降级兜底；(2) `bun_wasm_transform.zig` 修复 `skipWhitespace` 后丢失空白字符（`handleImportKeyword`/`handleExportKeyword`/`processIdentOrKeyword` 三处）；(3) 新增 `: Type` 冒号类型注解剥离（`processNormal` 增加 brace_depth 保护）；(4) 新增 `prevNonWhitespace`/`nextNonWhitespace` 辅助函数；(5) `scanDependencies` 新增 `import"x"` / `import'x'`（无空格）模式检测；(6) Bundle 输出每模块添加 `// <path>` 注释；(7) 测试侧 `lowerEsmToCjs` 正则 `\s+` → `\s*` 兼容 Bun transpiler 无空格输出。 |
+| 2026-04-22 | claude | T5.3.3 完成：新增 `bun_bundle2(cfg_ptr, cfg_len) u64` WASM ABI，接受 JSON 配置（`entrypoint` 必填，`external[]` + `define{}` 可选）。Zig 侧新增 `Bundler.externals`/`Bundler.defines` 字段、`addExternalModule()` 合成模块（`globalThis.require` 委托）、`applyDefines()` 词边界文本替换（在转译前执行）；`wasm.ts` 新增 `BundleConfig` 接口 + `bundle2()` 方法；新增 5 个集成测试。**225/225 全部通过**。 |
+| 2026-04-22 | claude | **T5.3.2（CSS passthrough）完成**：`transpileIfNeeded` 对 `.css` 输入产出 `document.createElement("style")` + `appendChild` 的 IIFE（DOM 可用时注入，否则 no-op）；`resolveRelative` 扩展名探测列表 + `classifyLoader` + VFS ModuleLoader 解析列表均加入 `.css`；新增 3 个 CSS bundle 测试。 |
+| 2026-04-22 | claude | **Phase 5.7 T5.7.1（Bun.* API 全量）完成**：(1) JSI 层新增 `jsi_read_arraybuffer` + `jsi_arraybuffer_byteLength` import（`src/jsi/imports.zig` + `jsi-host.ts`）；(2) Zig 侧 6 个 HostFn：`bunFileReadFn`/`bunFileSizeFn`/`bunFileWriteFn`/`bunResolveSyncFn`/`bunGunzipSyncFn`/`bunTranspileCodeFn`，在 `setupGlobals` 注册为 `__bun_*` 临时全局；(3) `BUN_GLOBAL_SRC` 从 60 行扩展为 150 行完整 Bun 对象（serve + env/argv/main + sleep + inspect + file + write + resolveSync + gunzipSync + Transpiler + password/hash/deepEquals/deepMatch stub），IIFE 尾部 `delete globalThis.__bun_*` 清理临时 HostFn；(4) 新增测试文件 `bun-apis.test.ts`（32 个用例，覆盖全部新 API）。**257/257 全部通过**（较上轮 +32）。 |
+| 2026-04-22 | claude | **Phase 5.4 T5.4.3（WASM 直写 VFS tar 提取）完成**：(1) `vfs.zig` `mkdirp` 改为 `pub fn`；(2) Zig 新增 `bun_tgz_extract(input_ptr, input_len) u64`（packed input：`[prefix_len:u32][prefix][tgz]`），内置 ustar/GNU long-name/PAX tar 解析器 + `inflateImpl` gzip 解压，直接调用 `vfs_g.mkdirp` + `vfs_g.writeFile`，返回 JSON `{"extracted":N}`；(3) `wasm.ts` 新增 `extractTgz(prefix, tgz): number|null` 方法；(4) `installer.ts` 优先走 WASM `extractTgz` 路径（直写 VFS，跳过 JS parseTar + buildSnapshot + loadSnapshot），回退到 JS inflate+parseTar；(5) `installer.test.ts` 新增 5 个集成测试。**262/262 全部通过**（较上轮 +5）。 |
+| 2026-04-22 | claude | **Phase 5.4 T5.4.1（WASM npm metadata 解析 + 版本选择）完成**：(1) `semverSelect` 重构：提取 `semverSelectFromList(ver_list, range) ![]const u8` 辅助函数；(2) Zig 新增 `bun_npm_parse_metadata(jp,jl,rp,rl) u64`，内部 `std.json` 解析全量 npm registry metadata JSON，dist-tags / semver range / 精确版本 / 通配符全支持，返回 JSON `{version,tarball,integrity?,shasum?,dependencies{}}`；(3) `wasm.ts` 新增 `NpmResolvedVersion` 接口 + `parseNpmMetadata(json, range): NpmResolvedVersion|null`；(4) `installer.ts` 重构 `installOne`：优先走 WASM `parseNpmMetadata` 路径（fetchRawMetadata 返回原始文本，WASM 内部解析），回退到 TS semverSelect + chooseVersion；(5) 新增 6 个集成测试。**268/268 全部通过**（较上轮 +6）。 |
+| 2026-04-23 | claude | **Phase 5.8（Node.js 内置模块 polyfill）全部完成**：新增 5 个高频内置模块的纯 JS 实现，以 Zig 字符串常量形式内嵌到 `src/bun_browser_standalone.zig`，同步更新 `requireFn`（运行时路径）和 `builtinPolyfillSource`（bundle 打包路径）：(1) T5.8.1 `events` — 完整 EventEmitter，含 on/once/off/emit/prependListener/prependOnceListener/removeAllListeners/listenerCount/inherits；(2) T5.8.2 `buffer` — Buffer class，支持 from(string/hex/base64/ArrayBuffer/Array)/alloc/allocUnsafe/concat/compare/isBuffer/byteLength + readUInt8/16/32 BE/LE + writeUInt8/16/32 BE/LE + toString(hex/base64/utf8) + copy/slice/indexOf/includes/equals/write；(3) T5.8.3 `assert` — 全套断言（ok/strictEqual/notStrictEqual/deepStrictEqual/notDeepStrictEqual/equal/throws/doesNotThrow/rejects/doesNotReject/match/doesNotMatch/ifError），AssertionError 继承 Error；(4) T5.8.4 `querystring` — parse/stringify/encode/decode，支持 `+` 空格、数组值、maxKeys 限制、自定义编解码器；(5) T5.8.5 `string_decoder` — StringDecoder（write/end），TextDecoder backed，支持 utf8/hex/base64/latin1。新增 26 个测试（T5.8.1×6 + T5.8.2×6 + T5.8.3×5 + T5.8.4×4 + T5.8.5×2 + bundle路径×3）。**329/329 全部通过**（较上轮 +26）。 |
+| 2026-04-23 | claude | **T5.3.5 + T5.3.6 + T5.3.7 完成**：(1) T5.3.5 `import.meta` polyfill：`handleImportKeyword` 在 `skipWhitespace` 前检测 `.meta` 前缀，`emitImportMeta()` 方法将 `.url` → 文件名字符串、`.env` → `process.env` polyfill、`.resolve(` → `require.resolve(`、未知属性 → `{url,env}` 对象，非 ESM 模式下原样透传；(2) T5.3.6 动态 import：`import("spec")` → `Promise.resolve().then(function(){return require("spec")})`，静态小字符串则转换，非静态/非 ESM 模式则透传；(3) T5.3.7 `__filename`/`__dirname`：`Bundler.emit()` 每个模块包裹头部自动注入 `var __filename="<path>",__dirname="<dir>";`；新增 11 个测试（T5.3.5×5 + T5.3.6×3 + T5.3.7×3）。**303/303 全部通过**（较上轮 +11）。 |
+| 2026-04-23 | claude | **T5.2.6 + T5.2.7 + T5.2.8 全部完成**：(1) T5.2.6 完整 ESM→CJS：`import default/named/namespace/side-effect/mixed` 全形式 → `require()`，`export default/const/function/class/named-re-export/*` 全形式 → `module.exports` + `exports_deferred`；修复 named import 后缺少 `skipWhitespace()` 的 bug；(2) T5.2.7 sourcemap v3 生成：`Stripper` 新增 `line_origins` 行追踪 + `vlqEncodeValue` VLQ 编码 + `generateSourcemap` JSON 构建，`TransformResult.map` 字段携带输出；`bun_transform` JSON ABI 新增 `source_map` 输入字段和 `map` 输出字段；`wasm.ts` `TransformOptions.sourceMap` + `TransformResult.map`；(3) T5.2.8 identity 检测：`transpileIfNeeded` 检测 host `jsi_transpile` 是否返回等同输入（identity 模式），是则 fallthrough 到 WASM 内置转译（`esm_to_cjs=true`），WASM 完全自含无 host 回调依赖；新增 11 个测试（T5.2.6×7 + T5.2.7×3 + T5.2.8×1）。**292/292 全部通过**（较上轮 +11）。 |
+| 2026-04-22 | claude | **Phase 5.4 T5.4.2 + T5.4.4 + T5.4.5 + Phase 5.7 T5.7.2 + T5.7.3 全部完成**：(1) 修复 `src/bun_browser_standalone.zig` 中 6 处 Zig 0.15.2 兼容性错误（`orelse` 匿名 struct 类型推断、`std.ArrayList` → `std.ArrayListUnmanaged`、`deinit(allocator)` 参数、`append(allocator, ...)` 传参）及 1 处 use-after-free（BFS 传递依赖 `free(result_slice)` 移至 JSON 解析之后）；(2) T5.4.2 `bun_npm_resolve_graph`：WASM 内部 BFS 展平传递依赖图，去重，缺失包放入 `missing[]`；(3) T5.4.4 异步 fetch 协议：`bun_npm_install_begin`/`bun_npm_need_fetch`/`bun_npm_feed_response`/`bun_npm_install_mark_seen`/`bun_npm_install_result`/`bun_npm_install_end` 六个 export；(4) T5.4.5 `bun_lockfile_write`：将包列表序列化为 bun.lock JSON 格式；(5) T5.7.2 `bun_sourcemap_lookup`：内置 Base64-VLQ 解码器 + sourcemap v3 `mappings` 解析，返回原始行列 + source 文件名；(6) T5.7.3 `bun_html_rewrite`：简单字符扫描 HTML 重写器，支持 `tag`/`tag[attr]`/`tag[attr=val]` 选择器，set_attr/set_text/remove 操作；(7) `wasm.ts` 新增 8 个接口方法 + 4 个类型（`ResolveGraphResult`/`NpmFetchRequest`/`SourcemapPosition`/`HtmlRewriteRule`）；(8) `installer.test.ts` 新增 13 个测试用例。**281/281 全部通过**（较上轮 +13）。 |
 

@@ -91,3 +91,12 @@ pub extern "jsi" fn jsi_print(ptr: u32, len: usize, level: u32) void;
 /// 若 Host 未注册 transpiler，返回原 src 的 string handle；
 /// 失败返回 `Value.exception_sentinel`。
 pub extern "jsi" fn jsi_transpile(src_ptr: u32, src_len: usize, filename_ptr: u32, filename_len: usize) u32;
+
+/// Phase 5.7: Copy bytes from an ArrayBuffer / TypedArray handle into WASM linear memory.
+/// Returns the number of bytes copied (≤ dest_len), or -1 if handle is not an array-buffer
+/// or typed-array. Thread-safe with respect to WASM linear memory.
+pub extern "jsi" fn jsi_read_arraybuffer(handle: u32, dest_ptr: u32, dest_len: u32) i32;
+
+/// Phase 5.7: Return the byteLength of an ArrayBuffer / TypedArray handle.
+/// Returns -1 if handle is not an array-buffer or typed-array.
+pub extern "jsi" fn jsi_arraybuffer_byteLength(handle: u32) i32;

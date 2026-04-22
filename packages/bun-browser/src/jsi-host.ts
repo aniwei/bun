@@ -428,6 +428,37 @@ export class JsiHost {
           return EXCEPTION_SENTINEL;
         }
       },
+
+      // ── Phase 5.7: ArrayBuffer I/O ───────────────
+      /**
+       * Copy bytes from an ArrayBuffer/TypedArray handle into WASM linear memory.
+       * Returns bytes copied, or -1 if handle is not a buffer.
+       */
+      jsi_read_arraybuffer: (handle: number, destPtr: number, destLen: number): number => {
+        const v = self.deref(handle);
+        let bytes: Uint8Array;
+        if (v instanceof ArrayBuffer) {
+          bytes = new Uint8Array(v);
+        } else if (ArrayBuffer.isView(v)) {
+          bytes = new Uint8Array(
+            (v as ArrayBufferView).buffer,
+            (v as ArrayBufferView).byteOffset,
+            (v as ArrayBufferView).byteLength,
+          );
+        } else {
+          return -1;
+        }
+        const count = Math.min(bytes.byteLength, destLen);
+        self.memBytes().subarray(destPtr, destPtr + count).set(bytes.subarray(0, count));
+        return count;
+      },
+      /** Return byteLength of an ArrayBuffer/TypedArray handle, or -1. */
+      jsi_arraybuffer_byteLength: (handle: number): number => {
+        const v = self.deref(handle);
+        if (v instanceof ArrayBuffer) return v.byteLength;
+        if (ArrayBuffer.isView(v)) return (v as ArrayBufferView).byteLength;
+        return -1;
+      },
     };
   }
 }
@@ -467,4 +498,6 @@ export interface JsiImportsTyped {
   jsi_schedule_microtask: () => void;
   jsi_print: (ptr: number, len: number, level: number) => void;
   jsi_transpile: (srcPtr: number, srcLen: number, filenamePtr: number, filenameLen: number) => number;
+  jsi_read_arraybuffer: (handle: number, destPtr: number, destLen: number) => number;
+  jsi_arraybuffer_byteLength: (handle: number) => number;
 }

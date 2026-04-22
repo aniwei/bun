@@ -233,7 +233,7 @@ pub const VFS = struct {
     }
 
     /// 确保路径的父目录均存在，类似 `mkdir -p` 的内部版本。
-    fn mkdirp(self: *VFS, path: []const u8) Error!void {
+    pub fn mkdirp(self: *VFS, path: []const u8) Error!void {
         if (path.len == 0 or path[0] != '/') return error.InvalidPath;
         var current = self.root_ino;
         var it = std.mem.tokenizeScalar(u8, path, '/');

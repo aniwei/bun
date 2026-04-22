@@ -163,16 +163,42 @@ class Installer {
     dependencies: Record<string, string>;
   }> {
     this.onProgress?.({ name, phase: "metadata" });
-    const meta = await this.fetchMetadata(name);
-    const available = meta.versions ? Object.keys(meta.versions) : [];
-    // 优先使用 WASM 的真实 Zig semver；若不可用则回退到 JS 子集实现。
-    const version = this.wasmRuntime
-      ? (this.wasmRuntime.semverSelect(JSON.stringify(available), range) ??
-          chooseVersion(available, range, meta["dist-tags"]))
-      : chooseVersion(available, range, meta["dist-tags"]);
-    if (!version) throw new Error(`Installer: 未找到匹配 ${name}@${range}`);
-    const versionMeta = meta.versions![version]!;
-    const tarballUrl = versionMeta.dist?.tarball;
+
+    let version: string;
+    let tarballUrl: string;
+    let integrityStr = "";
+    let shasumStr = "";
+    let dependencies: Record<string, string> = {};
+
+    // T5.4.1: Prefer WASM for metadata parsing + version resolution.
+    // WASM receives raw JSON, internally resolves dist-tags + semver, returns result.
+    if (this.wasmRuntime?.parseNpmMetadata) {
+      const rawJson = await this.fetchRawMetadata(name);
+      const resolved = this.wasmRuntime.parseNpmMetadata(rawJson, range);
+      if (!resolved) throw new Error(`Installer: 未找到匹配 ${name}@${range}`);
+      version = resolved.version;
+      tarballUrl = resolved.tarball;
+      integrityStr = resolved.integrity ?? "";
+      shasumStr = resolved.shasum ?? "";
+      dependencies = resolved.dependencies;
+    } else {
+      // Fallback: TS-side metadata parsing + version resolution.
+      const meta = await this.fetchMetadata(name);
+      const available = meta.versions ? Object.keys(meta.versions) : [];
+      // 优先使用 WASM 的真实 Zig semver；若不可用则回退到 JS 子集实现。
+      const chosen = this.wasmRuntime
+        ? (this.wasmRuntime.semverSelect(JSON.stringify(available), range) ??
+            chooseVersion(available, range, meta["dist-tags"]))
+        : chooseVersion(available, range, meta["dist-tags"]);
+      if (!chosen) throw new Error(`Installer: 未找到匹配 ${name}@${range}`);
+      version = chosen;
+      const versionMeta = meta.versions![version]!;
+      tarballUrl = versionMeta.dist?.tarball ?? "";
+      integrityStr = versionMeta.dist?.integrity ?? "";
+      shasumStr = versionMeta.dist?.shasum ?? "";
+      dependencies = versionMeta.dependencies ?? {};
+    }
+
     if (!tarballUrl) throw new Error(`Installer: ${name}@${version} 缺少 dist.tarball`);
 
     this.onProgress?.({ name, version, phase: "tarball" });
@@ -181,7 +207,7 @@ class Installer {
     // 完整性校验：用 WASM Zig 实现验证 SRI 值，防止 supply-chain 篡改。
     // 优先取 `integrity`（SRI，sha512）；若缺则取 `shasum`（sha1 hex）。
     if (this.wasmRuntime) {
-      const sri = versionMeta.dist?.integrity ?? versionMeta.dist?.shasum ?? "";
+      const sri = integrityStr || shasumStr;
       if (sri) {
         const result = this.wasmRuntime.integrityVerify(tgz, sri);
         if (result === "fail") throw new Error(`Installer: ${name}@${version} 完整性校验失败`);
@@ -190,7 +216,23 @@ class Installer {
     }
 
     this.onProgress?.({ name, version, phase: "extract" });
-    // Phase 5.1: prefer synchronous WASM inflate over async DecompressionStream.
+
+    // Phase 5.4 T5.4.3: prefer direct WASM VFS extraction (inflate + tar parse in Zig).
+    // When extractTgz is available, files are written directly into WASM VFS — no
+    // snapshot round-trip needed. Return empty files[] to signal this to the caller.
+    const prefix = `${this.installRoot}/${name}`;
+    if (this.wasmRuntime?.extractTgz) {
+      this.wasmRuntime.extractTgz(prefix, tgz);
+      this.onProgress?.({ name, version, phase: "done" });
+      return {
+        name,
+        version,
+        files: [], // already written to WASM VFS directly
+        dependencies,
+      };
+    }
+
+    // Fallback: Phase 5.1 WASM inflate + JS tar parse (for environments without extractTgz)
     let tarBytes: Uint8Array;
     const wasmInflated = this.wasmRuntime?.inflate(tgz, "gzip") ?? null;
     if (wasmInflated !== null) {
@@ -203,7 +245,6 @@ class Installer {
     const entries = parseTar(tarBytes);
 
     // npm tarball 的所有文件都在 "package/" 前缀下；剥掉并挂到 installRoot/<name>/。
-    const prefix = `${this.installRoot}/${name}`;
     const files: VfsFile[] = [];
     for (const e of entries) {
       if (e.type !== "file") continue;
@@ -217,8 +258,18 @@ class Installer {
       name,
       version,
       files,
-      dependencies: versionMeta.dependencies ?? {},
+      dependencies,
     };
+  }
+
+  /** Fetch npm registry metadata as raw JSON text (for WASM-side parsing). */
+  private async fetchRawMetadata(name: string): Promise<string> {
+    const url = `${this.registry}/${encodeURIComponent(name)}`;
+    const res = await this.fetchFn(url, {
+      headers: { accept: "application/vnd.npm.install-v1+json,application/json" },
+    });
+    if (!res.ok) throw new Error(`Installer: GET ${url} → ${res.status}`);
+    return res.text();
   }
 
   private async fetchMetadata(name: string): Promise<NpmPackageMetadata> {

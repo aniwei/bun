@@ -64,8 +64,8 @@ async function makeRuntime(): Promise<WasmRuntime> {
         /^import\s+\*\s+as\s+([a-zA-Z_$][\w$]*)\s+from\s+(['"][^'"]+['"]);?/gm,
         'const $1 = require($2);',
       )
-      // import "spec";
-      .replace(/^import\s+(['"][^'"]+['"]);?/gm, "require($1);");
+      // import "spec"; (side-effect) — also handles no-space: import"spec" (Bun transpiler output)
+      .replace(/^import\s*(['"][^'"]+['"]);?/gm, "require($1);");
   const transpile = (src: string, filename: string): string => {
     const t = filename.endsWith(".tsx") ? tsxTranspiler : tsTranspiler;
     let out = t.transformSync(src);
@@ -450,5 +450,232 @@ describe("Phase 5.3 · tsconfig paths", () => {
     ]);
     const result = rt.resolve("@shared/util", "/repo/apps/web/main.ts");
     expect(result.path).toBe("/repo/packages/shared/src/util.ts");
+  });
+});
+
+// Phase 5.3 T5.3.1i: Node builtin mapping
+describe("Phase 5.3 · T5.3.1i node builtin mapping", () => {
+  test("node:fs → virtual builtin path", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [{ path: "/app/main.ts", data: "" }]);
+    const result = rt.resolve("node:fs", "/app/main.ts");
+    expect(result.path).toBe("<builtin:node:fs>");
+    expect(result.loader).toBe("js");
+  });
+
+  test("bare 'fs' → virtual builtin path (同 node:fs)", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [{ path: "/app/main.ts", data: "" }]);
+    const result = rt.resolve("fs", "/app/main.ts");
+    expect(result.path).toBe("<builtin:node:fs>");
+    expect(result.loader).toBe("js");
+  });
+
+  test("node:path → virtual builtin path", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [{ path: "/app/main.ts", data: "" }]);
+    const result = rt.resolve("node:path", "/app/main.ts");
+    expect(result.path).toBe("<builtin:node:path>");
+    expect(result.loader).toBe("js");
+  });
+
+  test("bare 'path' → virtual builtin path", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [{ path: "/app/main.ts", data: "" }]);
+    const result = rt.resolve("path", "/app/main.ts");
+    expect(result.path).toBe("<builtin:node:path>");
+    expect(result.loader).toBe("js");
+  });
+
+  test("events → virtual builtin path", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [{ path: "/app/main.ts", data: "" }]);
+    const result = rt.resolve("events", "/app/main.ts");
+    expect(result.path).toBe("<builtin:node:events>");
+    expect(result.loader).toBe("js");
+  });
+
+  test("node: prefix 的任意模块 → virtual builtin path", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [{ path: "/app/main.ts", data: "" }]);
+    const result = rt.resolve("node:worker_threads", "/app/main.ts");
+    expect(result.path).toBe("<builtin:node:worker_threads>");
+    expect(result.loader).toBe("js");
+  });
+
+  test("Bundler: import from 'path' 内联 polyfill — join 可用", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/app/entry.ts",
+        data: `import path from 'path';\nmodule.exports = path.join('/a', 'b');`,
+      },
+    ]);
+    const js = rt.bundle("/app/entry.ts");
+    const out = runInContext(js, createContext({}), { filename: "/bundle.js" });
+    expect(out).toBe("/a/b");
+  });
+
+  test("Bundler: import from 'node:fs' 不崩溃 (stub/delegate)", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/app/entry.ts",
+        data: `import fs from 'node:fs';\nmodule.exports = typeof fs === 'object' ? 'ok' : 'fail';`,
+      },
+    ]);
+    // 必须不抛出；结果可以是委托对象或空 stub 对象
+    const js = rt.bundle("/app/entry.ts");
+    expect(js).toContain("__modules__");
+    const sandbox = createContext({ globalThis: { require: undefined } });
+    const out = runInContext(js, sandbox, { filename: "/bundle.js" });
+    expect(out).toBe("ok");
+  });
+
+  test("Bundler: node builtin 不会把 node_modules/fs 误识别", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/entry.ts", data: `import 'fs';\nmodule.exports = 1;` },
+      // 即使 VFS 里有同名包，也应走 builtin 路径
+      { path: "/app/node_modules/fs/index.js", data: "throw new Error('should not use nm/fs');" },
+    ]);
+    // 不应抛出 "should not use nm/fs"
+    const js = rt.bundle("/app/entry.ts");
+    expect(js).toContain("<builtin:node:fs>");
+    const sandbox = createContext({ globalThis: { require: undefined } });
+    const out = runInContext(js, sandbox, { filename: "/bundle.js" });
+    expect(out).toBe(1);
+  });
+});
+
+// ─── Phase 5.3 T5.3.3: bun_bundle2 (externals + define) ─────────────────────
+describe("Phase 5.3 · T5.3.3 bun_bundle2 (externals + define)", () => {
+  test("externals: 外部包不被打包进 bundle，改用 globalThis.require 委托", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/app/entry.ts",
+        data: `import React from 'react';\nmodule.exports = typeof React;`,
+      },
+      // 即使 VFS 里有 react，也不应被打包
+      { path: "/app/node_modules/react/index.js", data: `module.exports = { version: '18' };` },
+    ]);
+    const js = rt.bundle2({ entrypoint: "/app/entry.ts", external: ["react"] });
+    // bundle 里不应含有 node_modules/react 的源码路径
+    expect(js).not.toContain("node_modules/react");
+    // 应含有 globalThis.require 的委托
+    expect(js).toContain("globalThis.require");
+    // 用真实 require 委托跑起来
+    const fakeReact = { version: "external" };
+    const sandbox = createContext({ globalThis: { require: () => fakeReact } });
+    const out = runInContext(js, sandbox, { filename: "/bundle.js" });
+    expect(out).toBe("object");
+  });
+
+  test("define: process.env.NODE_ENV 替换为字面量 production", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/app/entry.ts",
+        data: `module.exports = process.env.NODE_ENV;`,
+      },
+    ]);
+    const js = rt.bundle2({
+      entrypoint: "/app/entry.ts",
+      define: { "process.env.NODE_ENV": '"production"' },
+    });
+    // 源码中 process.env.NODE_ENV 已被替换掉
+    expect(js).not.toContain("process.env.NODE_ENV");
+    expect(js).toContain('"production"');
+    const sandbox = createContext({});
+    const out = runInContext(js, sandbox, { filename: "/bundle.js" });
+    expect(out).toBe("production");
+  });
+
+  test("externals + define 组合", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      {
+        path: "/app/entry.ts",
+        data: `import React from 'react';\nmodule.exports = [typeof React, process.env.NODE_ENV];`,
+      },
+      { path: "/app/node_modules/react/index.js", data: `module.exports = {};` },
+    ]);
+    const js = rt.bundle2({
+      entrypoint: "/app/entry.ts",
+      external: ["react"],
+      define: { "process.env.NODE_ENV": '"test"' },
+    });
+    expect(js).toContain("globalThis.require");
+    expect(js).not.toContain("process.env.NODE_ENV");
+    const fakeReact = {};
+    const sandbox = createContext({ globalThis: { require: () => fakeReact } });
+    const out = runInContext(js, sandbox, { filename: "/bundle.js" }) as [string, string];
+    expect(out[0]).toBe("object");
+    expect(out[1]).toBe("test");
+  });
+
+  test("无 externals/define 时，bundle2 等价于 bundle", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/entry.ts", data: `module.exports = 42;` },
+    ]);
+    const a = rt.bundle("/app/entry.ts");
+    const b = rt.bundle2({ entrypoint: "/app/entry.ts" });
+    // 两者应产出相同结果（功能等价，不一定字节完全相同）
+    const sandbox = createContext({});
+    const outA = runInContext(a, sandbox, { filename: "/bundle-a.js" });
+    const sandboxB = createContext({});
+    const outB = runInContext(b, sandboxB, { filename: "/bundle-b.js" });
+    expect(outA).toBe(42);
+    expect(outB).toBe(42);
+  });
+
+  test("entrypoint 不存在时 bundle2 抛出 entry not found", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, []);
+    expect(() => rt.bundle2({ entrypoint: "/no/such/file.ts" })).toThrow("entry not found");
+  });
+});
+
+// ── T5.3.7: __filename / __dirname injection ────────────────────────────────
+describe("Phase 5.3 · T5.3.7 __filename/__dirname injection", () => {
+  test("bundle output injects __filename var per module", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/index.js", data: "module.exports = __filename;" },
+    ]);
+    const code = rt.bundle("/app/index.js");
+    // __filename= must appear in the bundle
+    expect(code).toContain("__filename=");
+    // Execute and check value
+    const sandbox = createContext({});
+    const result = runInContext(code, sandbox, { filename: "/bundle.js" });
+    expect(result).toBe("/app/index.js");
+  });
+
+  test("__dirname equals directory of the module", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/sub/mod.js", data: "module.exports = __dirname;" },
+    ]);
+    const code = rt.bundle("/app/sub/mod.js");
+    expect(code).toContain("__dirname=");
+    const sandbox = createContext({});
+    const result = runInContext(code, sandbox, { filename: "/bundle.js" });
+    expect(result).toBe("/app/sub");
+  });
+
+  test("multi-module bundle: each module gets own __filename", async () => {
+    const rt = await makeRuntime();
+    loadFiles(rt, [
+      { path: "/app/index.js", data: `const util = require('./util.js'); module.exports = [__filename, util];` },
+      { path: "/app/util.js", data: "module.exports = __filename;" },
+    ]);
+    const code = rt.bundle("/app/index.js");
+    const sandbox = createContext({});
+    const result = runInContext(code, sandbox, { filename: "/bundle.js" }) as string[];
+    expect(result[0]).toBe("/app/index.js");
+    expect(result[1]).toBe("/app/util.js");
   });
 });
