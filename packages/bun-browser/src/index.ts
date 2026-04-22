@@ -1,4 +1,5 @@
-export { Kernel, type KernelOptions } from './kernel'
+export { Kernel, ProcessHandle, type KernelOptions, type KernelPortEvent, type KernelPreviewMessageEvent } from './kernel'
+export { WebContainer, type WebContainerBootOptions, type WebContainerProcess, type FileSystemAPI } from './webcontainer-compat'
 export { JsiHost, EXCEPTION_SENTINEL, ReservedHandle } from './jsi-host'
 export type { HostFnImpl, JsiHostOptions } from './jsi-host'
 export { buildSnapshot, parseSnapshot, snapshotSize, type VfsFile } from './vfs-client'

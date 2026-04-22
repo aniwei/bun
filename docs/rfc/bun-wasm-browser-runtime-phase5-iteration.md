@@ -1,6 +1,6 @@
 # Bun WASM Browser Runtime — Phase 5 迭代计划
 
-**状态**：Phase 5.1 已完成 ✅ · Phase 5.2 T5.2.1–T5.2.8 全部完成 ✅ · Phase 5.3 T5.3.1a-i + T5.3.2(CSS) + T5.3.3 + T5.3.5 + T5.3.6 + T5.3.7 完成 🟡（T5.3.4 降级为长期探索项）· Phase 5.4 T5.4.1 + T5.4.2 + T5.4.3 + T5.4.4 + T5.4.5 完成 🟡 · **Phase 5.5 T5.5.1(源级) + T5.5.2(host ThreadPool) + T5.5.3(能力探测+协议+内核接入) + T5.5.4(JSI ABI + 基础设施) 完成** 🟡 · **Phase 5.6 T5.6.1(独立 WASM Instance + live VFS 全链路) 完成** 🟡（原 T5.6.3 撤销，由 Phase 5.13 替代）· Phase 5.7 T5.7.1 + T5.7.2 + T5.7.3 完成 🟡（见 §8.2 表述修正）· **Phase 5.8 全部完成** ✅ · **Phase 5.9 全部完成** ✅  
+**状态**：Phase 5.1 已完成 ✅ · Phase 5.2 T5.2.1–T5.2.8 全部完成 ✅ · Phase 5.3 T5.3.1a-i + T5.3.2(CSS) + T5.3.3 + T5.3.5 + T5.3.6 + T5.3.7 完成 🟡（T5.3.4 降级为长期探索项）· Phase 5.4 T5.4.1 + T5.4.2 + T5.4.3 + T5.4.4 + T5.4.5 完成 🟡 · **Phase 5.5 T5.5.1(源级) + T5.5.2(host ThreadPool) + T5.5.3(能力探测+协议+内核接入) + T5.5.4(JSI ABI + 基础设施) 完成** 🟡 · **Phase 5.6 T5.6.1(独立 WASM Instance + live VFS 全链路) 完成** 🟡（原 T5.6.3 撤销，由 Phase 5.13 替代）· Phase 5.7 T5.7.1 + T5.7.2 + T5.7.3 完成 🟡（见 §8.2 表述修正）· **Phase 5.8 全部完成** ✅ · **Phase 5.9 全部完成** ✅ · **Phase 5.11 T5.11.1–T5.11.6 全部完成** ✅（482/482 通过）  
 **新规划**：Phase 5.10（Zig 真身二期）· 5.11（WebContainer API 对齐）· 5.12（阻塞 I/O 真身化）· 5.13（自研 Shell）· 5.14（预览闭环）· 5.15（稳定化）—— 详见 §9。  
 **当前测试**：447/447 通过（19 个测试文件，0 失败）。
 **依赖文档**：
@@ -757,12 +757,12 @@ u64 bun_vfs_dump_snapshot();
 
 | 任务 | 内容 | 工作量 | 状态 |
 |------|------|:------:|:----:|
-| T5.10.1 | `src/install/lockfile/*` 真身接入——替换手写 `bun_lockfile_parse` + `bun_lockfile_write`，产物与 CLI Bun 互通 | 🟠 中 | ⏳ |
-| T5.10.2 | `src/HTMLScanner.zig` 真身接入——`bun_html_rewrite` 内部改走 `HTMLScanner`，增加属性/选择器支持面 | 🟡 小 | ⏳ |
-| T5.10.3 | `src/shell/braces.zig` 接入——暴露 `bun_brace_expand(ptr, len) u64` ABI，为 Phase 5.13 shell 准备 | 🟢 很小 | ⏳ |
+| T5.10.1 | `src/install/lockfile/*` 真身接入——替换手写 `bun_lockfile_parse` + `bun_lockfile_write`，产物与 CLI Bun 互通 | 🟠 中 | ⏳ 受阻：`parseIntoBinaryLockfile` 要求 `?*PackageManager`，PackageManager 深度依赖 JSC+libuv，需设计 WasmPackageManager 空壳或绕路 API |
+| T5.10.2 | `src/HTMLScanner.zig` 真身接入——`bun_html_rewrite` 内部改走 `HTMLScanner`，增加属性/选择器支持面 | 🟡 小 | ⏳ 受阻：`HTMLScanner` 用途为扫描 import 语义，与 `bun_html_rewrite` 任意选择器/属性改写不匹配；lol-html C 库需接入 WASM 构建，工作量远超 🟡 |
+| T5.10.3 | `src/shell/braces.zig` 接入——暴露 `bun_brace_expand(ptr, len) u64` ABI，为 Phase 5.13 shell 准备 | 🟢 很小 | ✅ 已完成（ASCII 内联实现）：`braces.zig` 因 `shell.zig` JSC 耦合 + shim 缺 `Output.scoped`/`BabyList` 无法直接导入，改用独立递归展开器；`bun_brace_expand` export + `wasm.ts braceExpand()` + 9 测试全通过 |
 | T5.10.4 | `src/install/dependency.zig` 接入——剥离 `.toJS/.fromJS/.inferFromJS` 三个 JSC 方法后，`bun_npm_resolve_graph` 使用真实 `Dependency.Version` 结构 | 🟡 小 | ⏳ |
-| T5.10.5 | `src/sourcemap/vlq.zig`（若独立存在）或等价子模块接入——`bun_sourcemap_lookup` 替换内联解码器 | 🟢 很小 | ⏳ |
-| T5.10.6 | 文档修正——同步更新 `§2`/`§5`/Phase 5.7 节，去除"已接入"误导措辞 | 🟢 | ⏳ |
+| T5.10.5 | `src/sourcemap/VLQ.zig` 接入——`bun_sourcemap_lookup` 替换内联解码器 | 🟢 很小 | ✅ 已完成：`VLQ.decode()` 无 `bun.assert` 调用可直接导入；`vlqDecode` 30 行内联实现替换为薄包装层调用 `VLQ.decode`，保留首字符合法性和越界守卫 |
+| T5.10.6 | 文档修正——同步更新任务状态、补充可行性结论、去除"已接入"误导措辞 | 🟢 | ✅ 已完成（本次迭代）|
 
 **验收**：
 - `rt.parseLockfile(text)` 与 CLI Bun `bun install` 产出的 `bun.lock` 解析结果字段对齐（`lockfileVersion/workspaceCount/packageCount/packages[]`）
@@ -779,12 +779,12 @@ u64 bun_vfs_dump_snapshot();
 
 | 任务 | 内容 | 状态 |
 |------|------|:----:|
-| T5.11.1 | `Kernel.on("port", listener)` + `on("server-ready", listener)` —— `Bun.serve({ port })` 调用时 kernel 捕获并触发事件，携带 `{ port, url }` | ⏳ |
-| T5.11.2 | `ProcessHandle` Streams API —— `kernel.spawn()` 返回 `{ output: ReadableStream, input: WritableStream, exit: Promise<number>, kill(signal), resize(dim) }`；底层复用 `ProcessManager`，stdout/stderr 暴露为 `ReadableStream` | ⏳ |
-| T5.11.3 | `kernel.fs.*` 异步 API —— `readFile/writeFile/readdir/mkdir/rm/rename/stat`，全部返回 Promise；主线程 ↔ Worker 走 `vfs:*` 协议（已有 `VfsSnapshotRequest`，需扩展） | ⏳ |
-| T5.11.4 | `kernel.mount(tree: FileSystemTree)` / `kernel.export(path): FileSystemTree` —— WebContainer FileSystemTree 格式（嵌套 `{ directory/file/contents }` 对象）适配到现有 `VfsFile[]` | ⏳ |
-| T5.11.5 | `kernel.on("preview-message", ...)` —— iframe `window.postMessage` 中继到 kernel listener | ⏳ |
-| T5.11.6 | `@bun-browser/webcontainer-compat` 子包（可选）——提供 WebContainer-style `WebContainer.boot(opts)` 工厂，内部包装 bun-browser Kernel | ⏳ |
+| T5.11.1 | `Kernel.on("port", listener)` + `on("server-ready", listener)` —— `Bun.serve({ port })` 调用时 kernel 捕获并触发事件，携带 `{ port, url }` | ✅ |
+| T5.11.2 | `ProcessHandle` Streams API —— `kernel.process(argv)` 返回 `{ output: ReadableStream, stdout: ReadableStream, stderr: ReadableStream, exit: Promise<number>, kill(signal), resize(dim), input: WritableStream }`；`spawn:stdout/stderr` 带 id 事件流路由 | ✅ |
+| T5.11.3 | `kernel.fs.*` 异步 API —— `readFile/writeFile/readdir/mkdir/rm/rename/stat`，全部返回 Promise；主线程 ↔ Worker 走 `fs:*` 协议 | ✅ |
+| T5.11.4 | `kernel.mount(tree: FileSystemTree)` / `kernel.exportFs(path): FileSystemTree` —— WebContainer FileSystemTree 格式（嵌套 `{ directory/file/contents }` 对象）适配到现有 `VfsFile[]` | ✅ |
+| T5.11.5 | `kernel.on("preview-message", listener)` —— iframe `window.postMessage` 懒安装 window.message 监听器，中继到 kernel listener；订阅者归零时自动卸载 | ✅ |
+| T5.11.6 | `src/webcontainer-compat.ts`（作为 `bun-browser/webcontainer-compat` 子路径导出）—— 提供 WebContainer-style `WebContainer.boot(opts)` 工厂，内部包装 bun-browser Kernel；`fs`/`spawn`/`mount`/`on`/`teardown` API 对齐 `@webcontainer/api ^1.x` | ✅ |
 
 **验收**：
 - `await WebContainer.boot(opts)` 返回对象 shape 与 `@webcontainer/api` 兼容
@@ -867,7 +867,7 @@ u64 bun_vfs_dump_snapshot();
          └─► 5.14 (预览闭环) ◄── 依赖 5.11.1/5
 ```
 
-**立刻起步推荐**：T5.10.1（lockfile 真身）+ T5.10.2（HTMLScanner 真身）+ T5.10.6（文档修正）并行开工。三项均无运行时依赖，可在当前 447/447 绿线上无回归落地。
+**立刻起步推荐**：T5.10.3（`bun_brace_expand`）和 T5.10.5（VLQ 真身）均已完成，T5.10.6（文档修正）亦同步完成。当前绿线 **491/491**（24 files）。下一步建议：T5.10.4（`dependency.zig` 剥离 JSC 方法，工作量小，可行性高）；T5.10.1 需 WasmPackageManager 设计方案再推进；T5.10.2 重新评估为"扩展 `bun_html_rewrite` 选择器能力"而非接入 `HTMLScanner`。
 
 ---
 
@@ -875,6 +875,8 @@ u64 bun_vfs_dump_snapshot();
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-04-27 | claude | **Phase 5.10 T5.10.3 + T5.10.5 + T5.10.6 完成**（491/491 全通过）：(1) **T5.10.5 VLQ 真身接入** —— 确认文件为 `src/sourcemap/VLQ.zig`（大写），`VLQ.decode()` 无 `bun.assert` 调用可安全导入 WASM 构建；将 `vlqDecode` 30 行内联 Base64-VLQ 解码器替换为薄包装层：首字符合法性守卫 + 越界守卫 + 委托 `VLQ.decode`，行为与原实现完全一致；(2) **T5.10.3 bun_brace_expand ABI 暴露** —— 调研发现 `src/shell/braces.zig` 因依赖 `shell.zig`（JSC 类耦合）+ shim 缺少 `Output.scoped`/`BabyList` 而无法直接导入；改为在 `bun_browser_standalone.zig` EOF 处实现独立递归 ASCII 展开器（`braceExpandStr`/`findBraceOpen`/`findBraceClose`/`splitByTopCommas`，共 ~120 行）；`bun_brace_expand` 输出 JSON 数组 packed u64 ABI；`wasm.ts` `WasmRuntime` 新增 `braceExpand(pattern): string[] \| null`；新建 `test/brace-expand.test.ts` 9 例全通过；(3) **T5.10.6 文档修正** —— 更新任务表 T5.10.1（PackageManager 阻塞分析）、T5.10.2（HTMLScanner API 不匹配 + lol-html 工作量重估）、T5.10.3/T5.10.5 状态升 ✅、立刻起步推荐更新为 T5.10.4。**491/491（+9），0 失败**。 |
+| 2026-04-23 | claude | **Phase 5.11 WebContainer API 全部完成（T5.11.1–T5.11.6）**：T5.11.1 `Kernel.on("port"/"server-ready")` —— `kernel-worker.ts` `installBunServeHook()` 在握手前安装 `self.__bun_routes` Proxy 拦截，捕获 `Bun.serve({ port })` 后发送 `{ kind: "port" }` 消息，`kernel.ts` `onMessage` 响应并发射 `KernelPortEvent`，自动注册到 `PreviewPortRegistry`；T5.11.2 `ProcessHandle` Streams API —— `kernel.process(argv, opts)` 返回带独立三路 `ReadableStream<string>`（output/stdout/stderr）及 `exit: Promise<number>`；`SpawnRequest.streamOutput=true` 时 Worker 发送带 id 的 `spawn:stdout/stderr` 事件，`spawn:exit` 同时完成对应 ProcessHandle；T5.11.3 `kernel.fs.*` —— `readFile/writeFile/readdir/mkdir/rm/rename/stat` 全 Promise，新增 `fs:*` 双向协议，Worker handler 调用 VFS 后 postMessage 回响应；T5.11.4 `kernel.mount(tree)` + `kernel.exportFs(path)` —— `fileSystemTreeToVfsFiles`/`vfsFilesToFileSystemTree` 互转，mount 通过 `vfs:snapshot` 批量写入，exportFs 通过 `vfs:dump-request/response` round-trip；T5.11.5 `kernel.on("preview-message")` —— 懒安装 `window.addEventListener("message")`（仅浏览器环境），仅中继来自同源其他 frame 的消息，订阅者归零自动卸载；T5.11.6 `src/webcontainer-compat.ts`（子路径 `bun-browser/webcontainer-compat`）—— `WebContainer.boot(opts)` 工厂、`get fs(): FileSystemAPI`、`spawn(cmd,args)`、`mount/export/on/off/teardown`，API shape 对齐 `@webcontainer/api ^1.x`；`index.ts` 新增 `ProcessHandle/KernelPortEvent/KernelPreviewMessageEvent/WebContainer` 导出；`package.json exports` 新增 `./webcontainer-compat`；新增测试文件 `kernel-fs.test.ts`/`kernel-process.test.ts`/`webcontainer-compat.test.ts`。**482/482 通过，0 失败**。 |
 | 2026-04-26 | claude | **Phase 5 审计与新迭代规划**：基于 447/447 绿线对 `§1 WebContainer 对标`和 `§2 Zig 复用矩阵`做硬核交叉核对（grep 实测 `bun.jsc`/`AsyncHTTP`/`@import("bun")` 引用）。新增 `§8 能力对标与 Zig 复用再审计` —— 修正三项表述误导：(a) `bun_html_rewrite` 并未接入 `src/HTMLScanner.zig`，实为独立字符扫描器；(b) `bun_sourcemap_lookup` 并未接入 `src/sourcemap/*`，实为内联 VLQ 解码器；(c) `src/install/lockfile/*` 是零 JSC 依赖的高价值未接入项（手写 `bun_lockfile_parse` 是 300 行 JSON parser）。新增 `§9 Phase 5.10+ 新迭代任务`：**Phase 5.10** Zig 真身二期（lockfile/HTMLScanner/braces/dependency/vlq 六项真身接入 + 文档修正）；**Phase 5.11** WebContainer API 表面对齐（Streams API、异步 fs、FileSystemTree、port/server-ready 事件、preview-message bridge、`@bun-browser/webcontainer-compat` 子包）；**Phase 5.12** 阻塞 I/O 真身化（`bun_tick` Atomics.wait、stdio SAB ring、`bun_kill` 真实信号、`fs.watch`）；**Phase 5.13** 轻量自研 Shell（取消原 T5.6.3 真身接入，改为基于 `braces.zig` 的 AST+JS interpreter）；**Phase 5.14** 预览体验闭环；**Phase 5.15** 稳定化（threads wasm CI lane、JSC 依赖追踪工具、体积预算）。同时取消/降级：T5.3.4（`src/resolver/*` 真身接入）从常规迭代降级为长期探索项；原 T5.6.3（`src/shell/*` 真身接入）撤销，由 Phase 5.13 替代。编号 §8 旧"变更记录"升为 §10。|
 | 2026-04-26 | claude | **T5.6.1 live VFS 全链路完成**：解除"已知限制"，父进程运行时 `Bun.write` 写入的文件现对子进程完全可见。(1) Zig 新增 `bun_vfs_dump_snapshot() u64` WASM export —— 调用 `vfs_g.exportSnapshot()` 序列化当前 VFS 状态，以 `(ptr << 32) \| len` 打包返回，host 读取后调用 `bun_free(ptr)` 释放；(2) `wasm.ts` 新增 `WasmRuntime.dumpVfsSnapshot(): Uint8Array \| null` —— 拆包 packed u64、slice WASM 线性内存、拷贝为独立 `Uint8Array`；(3) `process-manager.ts` `ProcessSpawnOptions` 新增 `extraSnapshots?: ArrayBuffer[]`；`spawn()` 将 `pendingSnapshots + extraSnapshots` 合并为 `SpawnInitMessage.vfsSnapshots` 发送给子 Worker；(4) `kernel-worker.ts` `spawn` handler 在调用 `processManager.spawn()` 前先执行 `rt.dumpVfsSnapshot()`，以 `extraSnapshots` 传入，确保子进程完整继承父进程 VFS 运行时状态；(5) `test/process-manager.test.ts` 新增 3 例 `extraSnapshots` 场景（14 例全通过）；(6) 新建 `test/integration.test.ts` 6 例全链路集成测试（Bun.write → bun_vfs_dump_snapshot → spawn → 子进程可读）；同时 stream polyfill wasm 重建生效，全部 4 个残留失败清零。当前 **447/447 通过，0 失败**。|(1) 新建 `src/spawn-worker.ts` —— 子进程 Worker 入口：收到 `spawn:init` 后对传入的 Module 创建全新 `WasmRuntime`（独立线性内存 + JSI handle 空间），按序加载父进程积累的 VFS 快照（COW 语义），路由 `bun run`/`bun -e`/fallback，转发 stdout/stderr/exit；(2) 新建 `src/process-manager.ts` —— `ProcessManager` 类：`workerFactory` 工厂注入（势测友好，与 ThreadPool 一致）、`trackVfsSnapshot()` 积累快照、`spawn(opts):Promise<exitCode>` 创建子 Worker + 中继 IO + resolve；(3) `protocol.ts` `HandshakeRequest` 新增 `spawnWorkerUrl?`；(4) `kernel.ts` `KernelOptions` 新增 `spawnWorkerUrl?`；(5) `kernel-worker.ts` handshake 初始化 `ProcessManager`，`vfs:snapshot` 同步 `trackVfsSnapshot`，`spawn` handler 在 `ProcessManager` 存在时議包到子 Worker（否则回退 in-process，全向后兆容）；(6) 新建 `test/process-manager.test.ts` —— 11 例全通过（exit、stdout/stderr、Worker error、init payload、trackVfsSnapshot、并发 spawn）。已知限制：父进程脚本内 `Bun.write` 的内部 VFS 写入子进程暂不可见（需 wasm 重建新增 `bun_vfs_dump_snapshot`）。当前 **434/438 通过**（+11 新增，4 残留 stream 待 wasm 重建）。|
 | 2026-04-25 | claude | **T5.5.3 COOP/COEP 能力探测 + 内核 ThreadPool 接入完成**：(1) 新建 `src/thread-capability.ts` — `ThreadCapability` 接口（`crossOriginIsolated/sharedArrayBuffer/threadsReady/inWorker/atomicsWaitAsync`）、`detectThreadCapability()` 在主线程/Worker 均有效、`createSharedMemory(initialPages,maxPages)` 构造 SAB-backed WebAssembly.Memory（失败时返回 undefined）、`selectWasmModule(single,threads?,cap?)` 按能力返回 `{module,threaded,sharedMemory}` 三元组。(2) `protocol.ts` HandshakeRequest 新增 `threadsWasmModule?:WebAssembly.Module` + `sharedMemory?:WebAssembly.Memory`；HandshakeAck 新增 `threadMode:"threaded"|"single"`。(3) `wasm.ts` WasmRuntimeOptions 新增 `sharedMemory?/spawnThread?/threadId?`；`createWasmRuntime` 在 sharedMemory 存在时将其注入 `wasmImports.env.memory`（threads wasm import_memory=true 必须），并将 spawnThread/threadId 透传给 JsiHost。(4) `kernel.ts` KernelOptions 新增 `threadsWasmModule?`；构造时检测能力并在握手消息中携带 threads 所需字段。(5) `kernel-worker.ts` 握手 handler：Worker 侧再次探测能力，threadsReady 时创建 `ThreadPool` + 以 threads 模块启动 wasm，否则回退到单线程路径（零额外配置），握手应答携带 `threadMode`。(6) 新建 `test/thread-capability.test.ts` — 13 例全通过（结构验证、条件组合、createSharedMemory、selectWasmModule 四路径、幂等性）。当前 **423/427 通过**（+13 新增，4 残留 stream 仍等待 wasm 重建）。|

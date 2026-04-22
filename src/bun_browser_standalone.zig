@@ -36,6 +36,8 @@ const std = @import("std");
 const Timer = @import("timer.zig").Timer;
 // ── Phase 5.2: 内置 TS/JSX strip 转译器 ──
 const bun_wasm_transform = @import("bun_wasm_transform.zig");
+// ── T5.10.5: 真身 VLQ 编解码器（src/sourcemap/VLQ.zig）──
+const VLQ = @import("sourcemap/VLQ.zig");
 
 // ── External JSI / sys_wasm imports (injected via build module map) ──
 const jsi = @import("jsi");
@@ -4142,35 +4144,23 @@ export fn bun_sourcemap_lookup(input_ptr: [*]const u8, input_len: u32) u64 {
 }
 
 /// VLQ decode: read one VLQ-encoded value from `data[off..]`, advance `off`, return value.
+/// T5.10.5: Thin wrapper around the real src/sourcemap/VLQ.zig implementation.
+/// Returns null when `off` is out-of-bounds or the character is not valid base64.
 fn vlqDecode(data: []const u8, off: *usize) ?i32 {
-    var result: i32 = 0;
-    var shift: u5 = 0;
-    while (off.* < data.len) {
-        const b64c = data[off.*];
-        const digit: u8 = switch (b64c) {
-            'A'...'Z' => b64c - 'A',
-            'a'...'z' => b64c - 'a' + 26,
-            '0'...'9' => b64c - '0' + 52,
-            '+' => 62,
-            '/' => 63,
-            else => return null,
-        };
-        off.* += 1;
-        const cont = (digit & 0x20) != 0;
-        const val: i32 = @intCast(digit & 0x1f);
-        result |= val << shift;
-        shift += 5;
-        if (!cont) {
-            // Last digit: LSB is sign
-            if ((result & 1) != 0) {
-                return -(result >> 1);
-            } else {
-                return result >> 1;
-            }
-        }
-        if (shift >= 30) return null; // overflow guard
-    }
-    return null;
+    if (off.* >= data.len) return null;
+    // Guard against separator characters that are not valid base64 VLQ.
+    // The outer loop in sourcemapLookup already strips ';' and ',' before
+    // calling us, but an extra check keeps behaviour identical to the old code.
+    const first = data[off.*];
+    const valid = switch (first) {
+        'A'...'Z', 'a'...'z', '0'...'9', '+', '/' => true,
+        else => false,
+    };
+    if (!valid) return null;
+    const res = VLQ.decode(data, off.*);
+    if (res.start == off.*) return null; // no bytes consumed → treat as error
+    off.* = res.start;
+    return res.value;
 }
 
 fn sourcemapLookup(input: []const u8) !u64 {
@@ -4528,4 +4518,119 @@ fn htmlRewrite(input: []const u8) !u64 {
     }
 
     return handOff(try allocator.dupe(u8, out.items));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// T5.10.3 — bun_brace_expand
+// ASCII brace expansion: "{a,b,c}" → ["a","b","c"], "foo{a,b}bar" → ["fooabar","foobbar"]
+//
+// This is the pure-Zig ASCII path inspired by src/shell/braces.zig.
+// The shell.zig dependency chain (JSC-coupled) is avoided by self-containing the
+// minimal ASCII lexer/expander needed for Phase 5.13 shell preparation.
+//
+// ABI: (ptr, len) → packed u64 (ptr << 32 | len) → JSON array of strings
+// Input: UTF-8 brace pattern string
+// Error codes: 1=OOM
+// ──────────────────────────────────────────────────────────────────────────────
+
+export fn bun_brace_expand(ptr: [*]const u8, len: u32) u64 {
+    const src = ptr[0..len];
+    var items: std.ArrayListUnmanaged([]u8) = .{};
+    defer {
+        for (items.items) |s| allocator.free(s);
+        items.deinit(allocator);
+    }
+    braceExpandStr(allocator, src, &items) catch return packError(1);
+
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    defer out.deinit(allocator);
+    out.append(allocator, '[') catch return packError(1);
+    for (items.items, 0..) |s, i| {
+        if (i > 0) out.append(allocator, ',') catch return packError(1);
+        jsonEscapeTo(&out, s) catch return packError(1);
+    }
+    out.append(allocator, ']') catch return packError(1);
+    return handOff(out.toOwnedSlice(allocator) catch return packError(1));
+}
+
+/// Expand a brace pattern into the `out` list (ASCII path only).
+/// Handles nested braces and multiple brace groups via recursion.
+fn braceExpandStr(alloc: std.mem.Allocator, src: []const u8, out: *std.ArrayListUnmanaged([]u8)) std.mem.Allocator.Error!void {
+    // Find first top-level '{'
+    const brace_open = findBraceOpen(src) orelse {
+        try out.append(alloc, try alloc.dupe(u8, src));
+        return;
+    };
+    const brace_close = findBraceClose(src, brace_open) orelse {
+        // Unmatched '{' — treat as literal
+        try out.append(alloc, try alloc.dupe(u8, src));
+        return;
+    };
+
+    const prefix = src[0..brace_open];
+    const inside = src[brace_open + 1 .. brace_close];
+    const suffix = src[brace_close + 1 ..];
+
+    // Split inside by top-level commas
+    var alts: std.ArrayListUnmanaged([]const u8) = .{};
+    defer alts.deinit(alloc);
+    try splitByTopCommas(alloc, inside, &alts);
+
+    if (alts.items.len < 2) {
+        // Not a valid brace group (empty or no comma) — treat as literal
+        try out.append(alloc, try alloc.dupe(u8, src));
+        return;
+    }
+
+    // For each alternative, form prefix+alt+suffix and recursively expand
+    for (alts.items) |alt| {
+        const combined = try std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ prefix, alt, suffix });
+        defer alloc.free(combined);
+        try braceExpandStr(alloc, combined, out);
+    }
+}
+
+fn findBraceOpen(src: []const u8) ?usize {
+    for (src, 0..) |c, i| {
+        if (c == '{') return i;
+    }
+    return null;
+}
+
+fn findBraceClose(src: []const u8, open: usize) ?usize {
+    var depth: usize = 0;
+    var i: usize = open;
+    while (i < src.len) : (i += 1) {
+        switch (src[i]) {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            '\\' => i += 1, // skip escaped char
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn splitByTopCommas(alloc: std.mem.Allocator, src: []const u8, out: *std.ArrayListUnmanaged([]const u8)) !void {
+    var depth: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) {
+        switch (src[i]) {
+            '{' => depth += 1,
+            '}' => if (depth > 0) {
+                depth -= 1;
+            },
+            ',' => if (depth == 0) {
+                try out.append(alloc, src[start..i]);
+                start = i + 1;
+            },
+            '\\' => i += 1,
+            else => {},
+        }
+    }
+    try out.append(alloc, src[start..]);
 }

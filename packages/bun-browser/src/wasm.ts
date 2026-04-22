@@ -255,6 +255,17 @@ export interface WasmRuntime {
    */
   htmlRewrite(html: string, rules: HtmlRewriteRule[]): string | null
   /**
+   * T5.10.3：Brace 展开（`bun_brace_expand`）。
+   *
+   * 将 ASCII brace 表达式展开为字符串数组。
+   * - `"{a,b,c}"` → `["a","b","c"]`
+   * - `"foo{a,b}bar"` → `["fooabar","foobbar"]`
+   * - 支持嵌套 brace group
+   *
+   * 若 WASM 不导出 `bun_brace_expand` 则返回 null。
+   */
+  braceExpand(pattern: string): string[] | null
+  /**
    * T5.6.1：将当前 VFS 状态序列化为二进制 snapshot（与 bun_vfs_load_snapshot 使用相同格式）。
    *
    * 返回包含全部 VFS 文件的字节数组；VFS 为空或 WASM 不导出时返回 null。
@@ -1120,6 +1131,20 @@ export async function createWasmRuntime(
         r.free_(r.ptr)
       }
     },
+
+    // ── T5.10.3 — bun_brace_expand ──────────────────────────────────────────
+
+    braceExpand(pattern): string[] | null {
+      const r = callPackedRaw('bun_brace_expand', enc.encode(pattern), undefined, false)
+      if (!r) return null
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer
+      try {
+        return JSON.parse(dec.decode(new Uint8Array(mem2, r.ptr, r.len))) as string[]
+      } finally {
+        r.free_(r.ptr)
+      }
+    },
+
     dumpVfsSnapshot(): Uint8Array | null {
       const fn = _instance!.exports.bun_vfs_dump_snapshot as (() => bigint) | undefined
       if (!fn) return null

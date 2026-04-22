@@ -212,9 +212,27 @@ export interface KernelPortEvent {
   url: string
 }
 
+/**
+ * T5.11.5 — `Kernel.on("preview-message", listener)` 回调参数。
+ *
+ * 当预览 iframe 内的脚本调用 `window.parent.postMessage(data, '*')` 时，
+ * Kernel 的 window.message 监听器捕获后触发此事件。
+ */
+export interface KernelPreviewMessageEvent {
+  /** iframe 通过 `postMessage` 发送的原始数据。 */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: any
+  /** 消息来源（`MessageEventSource`，可用于向 iframe 回复）。 */
+  source: MessageEventSource | null
+  /** 消息来源的 origin。 */
+  origin: string
+}
+
 type KernelEventMap = {
   port: KernelPortEvent
   'server-ready': KernelPortEvent
+  /** T5.11.5 — 来自预览 iframe 的 postMessage 事件。 */
+  'preview-message': KernelPreviewMessageEvent
 }
 
 export class Kernel {
@@ -381,7 +399,7 @@ export class Kernel {
           if (msg.error) {
             pending.reject(Object.assign(new Error(msg.error), { code: msg.error }))
           } else if ('encoding' in pending && pending.encoding === 'utf8') {
-            ;(pending as PendingFsReadText).resolve(msg.text ?? '')
+            ;(pending as unknown as PendingFsReadText).resolve(msg.text ?? '')
           } else if (msg.data !== undefined) {
             ;(pending as PendingFsRead).resolve(msg.data)
           } else if (msg.text !== undefined) {
@@ -603,6 +621,10 @@ export class Kernel {
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     set.add(listener as (ev: any) => void)
+    // T5.11.5：首个 preview-message 订阅时惰性安装 window.message 监听器。
+    if (event === 'preview-message' && set.size === 1) {
+      this._installPreviewMessageListener()
+    }
     return this
   }
 
@@ -610,7 +632,35 @@ export class Kernel {
   off<K extends keyof KernelEventMap>(event: K, listener: (ev: KernelEventMap[K]) => void): this {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.eventListeners.get(event)?.delete(listener as (ev: any) => void)
+    // T5.11.5：最后一个 preview-message 监听器被移除时卸载 window.message 监听器。
+    if (event === 'preview-message' && (this.eventListeners.get(event)?.size ?? 0) === 0) {
+      this._uninstallPreviewMessageListener()
+    }
     return this
+  }
+
+  /** @internal T5.11.5 — window.message 监听器引用（用于 removeEventListener）。 */
+  private _previewMsgHandler: ((ev: MessageEvent) => void) | null = null
+
+  /** @internal 惰性安装 window.message 监听器（仅在浏览器环境下生效）。 */
+  private _installPreviewMessageListener(): void {
+    if (this._previewMsgHandler !== null || typeof window === 'undefined') return
+    const handler = (ev: MessageEvent): void => {
+      // 只中继来自同源其他 frame 的消息（非当前顶层 window）。
+      if (ev.source === window || ev.source === null) return
+      if (ev.origin !== window.location.origin) return
+      const msgEv: KernelPreviewMessageEvent = { data: ev.data, source: ev.source, origin: ev.origin }
+      this._emit('preview-message', msgEv)
+    }
+    this._previewMsgHandler = handler
+    window.addEventListener('message', handler)
+  }
+
+  /** @internal 卸载 window.message 监听器。 */
+  private _uninstallPreviewMessageListener(): void {
+    if (!this._previewMsgHandler || typeof window === 'undefined') return
+    window.removeEventListener('message', this._previewMsgHandler)
+    this._previewMsgHandler = null
   }
 
   private _emit<K extends keyof KernelEventMap>(event: K, data: KernelEventMap[K]): void {
@@ -716,7 +766,7 @@ export class Kernel {
     const id = this.genId()
     return new Promise<void>((resolve, reject) => {
       this.pendingFsRms.set(id, { resolve, reject })
-      const req: FsRmRequest = { kind: 'fs:rm', id, path, recursive: opts.recursive }
+      const req: FsRmRequest = { kind: 'fs:rm', id, path, ...(opts.recursive !== undefined ? { recursive: opts.recursive } : {}) }
       this.post(req)
     })
   }

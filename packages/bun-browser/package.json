@@ -12,7 +12,8 @@
     "./kernel-worker": "./src/kernel-worker.ts",
     "./jsi-host": "./src/jsi-host.ts",
     "./vfs-client": "./src/vfs-client.ts",
-    "./protocol": "./src/protocol.ts"
+    "./protocol": "./src/protocol.ts",
+    "./webcontainer-compat": "./src/webcontainer-compat.ts"
   },
   "files": [
     "src/**/*.ts",
