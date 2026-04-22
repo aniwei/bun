@@ -691,6 +691,9 @@
         <div class="nav-tab" data-tab="bun-apis">
           <span class="tab-icon">🍞</span> Bun API
         </div>
+        <div class="nav-tab" data-tab="webcontainer">
+          <span class="tab-icon">📦</span> WebContainer
+        </div>
       </nav>
       <div class="spacer"></div>
       <div class="status-pill">
@@ -1351,6 +1354,203 @@ Cross-Origin-Embedder-Policy: require-corp</pre>
           </div>
 
         </div>
+      </div>
+
+      <!-- ── Tab: WebContainer ──────────────────────── -->
+      <div class="tab-page" id="tab-webcontainer">
+        <div class="split" style="gap:0;">
+
+          <!-- Left: control panel -->
+          <div class="panel" style="max-width:420px;">
+            <div class="panel-head"><span>⚙️ WebContainer 控制台</span></div>
+            <div class="tool-form">
+
+              <div class="tool-group">
+                <h3>🚀 Boot &amp; Mount</h3>
+                <p style="font-size:0.78rem;color:var(--text-dim);">
+                  实例化 bun-browser <code>WebContainer</code>（内部启动 Kernel Worker），
+                  然后挂载一个示例项目文件树到 VFS。
+                </p>
+                <select id="wc-preset" style="width:100%;">
+                  <option value="hello">Hello World (index.ts)</option>
+                  <option value="server">HTTP 服务器 (server.ts)</option>
+                  <option value="pkg">package.json + deps</option>
+                  <option value="multi">多文件项目</option>
+                </select>
+                <div class="row" style="margin-top:6px;">
+                  <button id="wc-boot" class="primary">⚡ Boot &amp; Mount</button>
+                  <button id="wc-teardown" disabled>🔌 Teardown</button>
+                  <span id="wc-state" style="font-size:0.75rem;color:var(--text-dim);">未启动</span>
+                </div>
+              </div>
+
+              <div class="tool-group">
+                <h3>📁 文件系统 (wc.fs)</h3>
+                <div class="row">
+                  <input type="text" id="wc-fs-path" value="/index.ts" style="flex:1;" placeholder="/path…" />
+                </div>
+                <div class="row" style="margin-top:4px;flex-wrap:wrap;gap:4px;">
+                  <button id="wc-fs-read" disabled>读文件</button>
+                  <button id="wc-fs-readdir" disabled>列目录</button>
+                  <button id="wc-fs-stat" disabled>Stat</button>
+                </div>
+                <div class="row" style="margin-top:4px;">
+                  <textarea id="wc-fs-write-content" rows="2"
+                    style="flex:1;font-family:var(--font-mono);font-size:0.75rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:4px;resize:vertical;"
+                    placeholder="写入内容…">console.log("Updated!");</textarea>
+                  <button id="wc-fs-write" disabled style="align-self:flex-end;">写文件</button>
+                </div>
+                <pre id="wc-fs-result"
+                  style="margin-top:6px;min-height:50px;white-space:pre-wrap;font-size:0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;max-height:150px;overflow-y:auto;"></pre>
+              </div>
+
+              <div class="tool-group">
+                <h3>▶ spawn — 运行命令</h3>
+                <div class="row">
+                  <input type="text" id="wc-spawn-cmd" value="bun" style="width:80px;" placeholder="cmd" />
+                  <input type="text" id="wc-spawn-args" value="run index.ts" style="flex:1;" placeholder="args…" />
+                  <button id="wc-spawn-run" disabled class="primary">运行</button>
+                </div>
+              </div>
+
+              <div class="tool-group" style="margin-top:8px;">
+                <h3>📜 export — 导出 FileSystemTree</h3>
+                <div class="row">
+                  <input type="text" id="wc-export-path" value="/" style="width:100px;" placeholder="prefix" />
+                  <button id="wc-export-run" disabled>导出</button>
+                </div>
+              </div>
+
+              <!-- HTTP 服务器测试 -->
+              <div class="tool-group" style="margin-top:8px;border-top:1px solid var(--border);padding-top:10px;">
+                <h3>🌐 HTTP Server 验证 (Bun.serve)</h3>
+                <p style="font-size:0.78rem;color:var(--text-dim);">
+                  在 Worker 内启动 <code>Bun.serve()</code>，通过
+                  <code>kernel.fetch(port)</code> 从主线程直调 WASM HTTP 处理函数。
+                </p>
+                <textarea id="wc-server-code" class="editor" rows="10" spellcheck="false">const server = Bun.serve({
+  port: 3001,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const path = url.pathname;
+
+    if (path === "/") {
+      return new Response(
+        JSON.stringify({ ok: true, message: "Hello from Bun WASM!" }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (path === "/echo") {
+      const body = req.method === "POST"
+        ? await req.text()
+        : url.searchParams.get("msg") ?? "";
+      return new Response(
+        JSON.stringify({ echo: body, method: req.method }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (path === "/headers") {
+      const hdrs: Record<string, string> = {};
+      req.headers.forEach((v, k) => { hdrs[k] = v; });
+      return new Response(JSON.stringify({ headers: hdrs }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("Not Found", { status: 404 });
+  },
+});
+console.log(`Server listening on port ${server.port}`);</textarea>
+                <div class="row" style="margin-top:6px;">
+                  <button id="wc-server-start" disabled class="primary">🚀 启动服务器</button>
+                  <button id="wc-server-stop" disabled>⏹ 停止</button>
+                  <span id="wc-server-state" style="font-size:0.75rem;color:var(--text-dim);">未运行</span>
+                </div>
+
+                <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px;">
+                  <p style="font-size:0.78rem;font-weight:600;margin:0 0 6px;">📡 发送测试请求</p>
+                  <div class="row" style="flex-wrap:wrap;gap:4px;">
+                    <select id="wc-req-method" style="width:80px;">
+                      <option>GET</option>
+                      <option>POST</option>
+                      <option>PUT</option>
+                      <option>DELETE</option>
+                    </select>
+                    <input type="text" id="wc-req-path" value="/" style="flex:1;min-width:80px;" placeholder="/path" />
+                    <button id="wc-req-send" disabled class="primary">发送</button>
+                  </div>
+                  <div class="row" style="margin-top:4px;">
+                    <input type="text" id="wc-req-headers" value='{"X-Demo": "bun-browser"}' style="flex:1;"
+                      placeholder='{"Header":"value"}' />
+                    <span style="font-size:0.73rem;color:var(--text-dim);padding:0 4px;">headers</span>
+                  </div>
+                  <textarea id="wc-req-body" rows="2"
+                    style="width:100%;margin-top:4px;font-family:var(--font-mono);font-size:0.75rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:4px;resize:vertical;"
+                    placeholder='POST body (optional)…'></textarea>
+                  <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;">
+                    <button id="wc-req-preset-root" disabled style="font-size:0.74rem;">GET /</button>
+                    <button id="wc-req-preset-echo" disabled style="font-size:0.74rem;">POST /echo</button>
+                    <button id="wc-req-preset-headers" disabled style="font-size:0.74rem;">GET /headers</button>
+                    <button id="wc-req-preset-404" disabled style="font-size:0.74rem;">GET /notfound</button>
+                  </div>
+                </div>
+
+                <div style="margin-top:8px;">
+                  <p style="font-size:0.78rem;font-weight:600;margin:0 0 4px;">📩 响应</p>
+                  <pre id="wc-resp-output"
+                    style="min-height:60px;white-space:pre-wrap;font-size:0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;max-height:180px;overflow-y:auto;"></pre>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Right: terminal output -->
+          <div class="panel" style="flex:1;">
+            <div class="panel-head" style="justify-content:space-between;">
+              <span>🖥 终端输出 (wc.spawn output stream)</span>
+              <button id="wc-clear" style="padding:2px 8px;font-size:0.75rem;">清空</button>
+            </div>
+            <pre id="wc-output"
+              style="flex:1;overflow-y:auto;padding:12px;margin:0;font-family:var(--font-mono);font-size:0.8rem;white-space:pre-wrap;background:var(--bg);border:none;border-radius:0;min-height:0;"></pre>
+          </div>
+
+        </div>
+
+        <!-- API Migration guide -->
+        <div style="border-top:1px solid var(--border);padding:16px 20px;background:var(--surface);">
+          <h3 style="margin:0 0 8px;">🔄 从 <code>@webcontainer/api</code> 迁移到 bun-browser</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:0.78rem;">
+            <div>
+              <p style="color:var(--red);margin:0 0 4px;">❌ 原版 @webcontainer/api</p>
+              <pre
+                style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;margin:0;overflow-x:auto;">import { WebContainer }
+  from '@webcontainer/api'
+
+const wc = await WebContainer.boot()
+await wc.mount(tree)
+const p = await wc.spawn('node', ['index.js'])
+p.output.pipeTo(writer)
+const code = await p.exit</pre>
+            </div>
+            <div>
+              <p style="color:var(--green);margin:0 0 4px;">✅ bun-browser 替代</p>
+              <pre
+                style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;margin:0;overflow-x:auto;">import { WebContainer }
+  from 'bun-browser/webcontainer-compat'
+
+const wc = await WebContainer.boot({ wasmModule })
+await wc.mount(tree)
+const p = await wc.spawn('bun', ['run', 'index.ts'])
+p.output.pipeTo(writer)
+const code = await p.exit</pre>
+            </div>
+          </div>
+          <p style="margin:8px 0 0;color:var(--text-dim);font-size:0.75rem;">
+            API 形状与 <code>@webcontainer/api ^1.x</code> 对齐；
+            仅需将 import 替换为 <code>bun-browser/webcontainer-compat</code> 并传入 <code>wasmModule</code>。
+          </p>
+        </div>
+
       </div>
 
     </div><!-- /body -->

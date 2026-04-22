@@ -266,6 +266,17 @@ export interface WasmRuntime {
    */
   braceExpand(pattern: string): string[] | null
   /**
+   * T5.13.1：解析 POSIX-like shell 命令为 JSON AST（`bun_shell_parse`）。
+   *
+   * 返回 ShellAST 对象；若 WASM 不导出 `bun_shell_parse` 则返回 null。
+   *
+   * AST 结构：
+   * - `{ t: "seq", stmts: ShellAST[] }` — 顶层序列（always）
+   * - `{ t: "pipe", cmds: ShellCmd[] }` — 管道（两条及以上命令）
+   * - `{ t: "cmd", argv: string[], redirs: ShellRedir[], bg?: true }` — 单条命令
+   */
+  shellParse(src: string): ShellAST | null
+  /**
    * T5.6.1：将当前 VFS 状态序列化为二进制 snapshot（与 bun_vfs_load_snapshot 使用相同格式）。
    *
    * 返回包含全部 VFS 文件的字节数组；VFS 为空或 WASM 不导出时返回 null。
@@ -273,6 +284,34 @@ export interface WasmRuntime {
    */
   dumpVfsSnapshot(): Uint8Array | null
 }
+
+// ── T5.13.1 Shell AST types ──────────────────────────────────────────────────
+
+export interface ShellRedir {
+  /** Redirect operator: `">"`, `">>"`, or `"<"`. */
+  t: '>' | '>>' | '<'
+  fd: number
+  target: string
+}
+
+export interface ShellCmd {
+  t: 'cmd'
+  argv: string[]
+  redirs: ShellRedir[]
+  bg?: true
+}
+
+export interface ShellPipe {
+  t: 'pipe'
+  cmds: ShellCmd[]
+}
+
+export interface ShellSeq {
+  t: 'seq'
+  stmts: Array<ShellCmd | ShellPipe>
+}
+
+export type ShellAST = ShellSeq
 
 /** Phase 5.4 T5.4.2 / T5.4.4 返回结构。 */
 export interface ResolveGraphResult {
@@ -1158,6 +1197,19 @@ export async function createWasmRuntime(
       const freeFn = _instance!.exports.bun_free as ((p: number) => void) | undefined
       freeFn?.(ptr)
       return copy
+    },
+
+    // ── T5.13.1 — bun_shell_parse ────────────────────────────────────────────
+
+    shellParse(src): ShellAST | null {
+      const r = callPackedRaw('bun_shell_parse', enc.encode(src), undefined, false)
+      if (!r) return null
+      const mem2 = (_instance!.exports.memory as WebAssembly.Memory).buffer
+      try {
+        return JSON.parse(dec.decode(new Uint8Array(mem2, r.ptr, r.len))) as ShellAST
+      } finally {
+        r.free_(r.ptr)
+      }
     },
   }
 

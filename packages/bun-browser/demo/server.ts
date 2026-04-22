@@ -28,7 +28,16 @@ Bun.serve({
     const dot = path.lastIndexOf(".");
     const ext = dot >= 0 ? path.slice(dot) : "";
     const ct = MIME[ext] ?? "application/octet-stream";
-    return new Response(file, { headers: { "Content-Type": ct } });
+    return new Response(file, {
+        headers: {
+          "Content-Type": ct,
+          // Cross-Origin Isolation — required for SharedArrayBuffer / wasm-threads
+          "Cross-Origin-Opener-Policy": "same-origin",
+          "Cross-Origin-Embedder-Policy": "require-corp",
+          // Allow DevTools and same-origin subresource loads under COEP require-corp
+          "Cross-Origin-Resource-Policy": "same-origin",
+        },
+      });
   },
 });
 

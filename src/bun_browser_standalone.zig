@@ -31,6 +31,7 @@
 //!   bun_lockfile_write(ptr, len) u64             — Phase 5.4 T5.4.5: generate bun.lock text
 //!   bun_sourcemap_lookup(ptr, len) u64           — Phase 5.7 T5.7.2: VLQ sourcemap position lookup
 //!   bun_html_rewrite(ptr, len) u64               — Phase 5.7 T5.7.3: minimal HTML element rewriter
+//!   bun_shell_parse(ptr, len) u64                — Phase 5.13 T5.13.1: shell source → JSON AST
 
 const std = @import("std");
 const Timer = @import("timer.zig").Timer;
@@ -4633,4 +4634,296 @@ fn splitByTopCommas(alloc: std.mem.Allocator, src: []const u8, out: *std.ArrayLi
         }
     }
     try out.append(alloc, src[start..]);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// T5.13.1 — bun_shell_parse
+// Tokenise a POSIX-like shell command string and return a JSON AST.
+//
+// ABI: (ptr, len) → packed u64 (ptr<<32|len) → JSON AST string
+//
+// JSON structure (all nodes have a "t" tag field):
+//   Top level is always { "t":"seq", "stmts":[...] }
+//   Statements in stmts are either:
+//     { "t":"pipe", "cmds":[cmd, ...] }    — two or more commands joined by |
+//     { "t":"cmd",  "argv":[...], "redirs":[...], "bg":false }  — single command
+//   Redirect: { "t":">"|">>"|"<", "fd":N, "target":"..." }
+//
+// Quoting: single-quotes suppress all expansion; double-quotes allow $/${}/$().
+// $ expansions ($VAR, ${VAR}, $(cmd), `cmd`) are kept verbatim in argv for the
+// TS runtime to expand at execution time.
+// Background: '&' at end of a statement sets "bg":true on its last cmd.
+// Comments: '#' to end of line.
+//
+// Error codes: 1=OOM, 2=parse error
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Shell token types
+const ShTokTy = enum { word, pipe, semi, amp, redir_out, redir_append, redir_in, newline, eof };
+const ShTok = struct { ty: ShTokTy, val: []const u8 = "" };
+
+/// Tokenise `src` into `out`.  All word .val slices are allocated with `arena`.
+fn shellLex(arena: std.mem.Allocator, src: []const u8, out: *std.ArrayListUnmanaged(ShTok)) !void {
+    var i: usize = 0;
+    while (i < src.len) {
+        const c = src[i];
+        switch (c) {
+            ' ', '\t', '\r' => i += 1,
+            '\n' => { try out.append(arena, .{ .ty = .newline }); i += 1; },
+            '#' => { while (i < src.len and src[i] != '\n') i += 1; },
+            '|' => { try out.append(arena, .{ .ty = .pipe }); i += 1; },
+            ';' => { try out.append(arena, .{ .ty = .semi }); i += 1; },
+            '&' => { try out.append(arena, .{ .ty = .amp }); i += 1; },
+            '>' => {
+                if (i + 1 < src.len and src[i + 1] == '>') {
+                    try out.append(arena, .{ .ty = .redir_append }); i += 2;
+                } else {
+                    try out.append(arena, .{ .ty = .redir_out }); i += 1;
+                }
+            },
+            '<' => { try out.append(arena, .{ .ty = .redir_in }); i += 1; },
+            else => {
+                var word: std.ArrayListUnmanaged(u8) = .{};
+                // Collect word characters (stops at unquoted meta-chars)
+                word_loop: while (i < src.len) {
+                    const ch = src[i];
+                    switch (ch) {
+                        ' ', '\t', '\r', '\n' => break :word_loop,
+                        '|', ';', '&', '>', '<', '#' => break :word_loop,
+                        '\\' => {
+                            i += 1;
+                            if (i < src.len) { try word.append(arena, src[i]); i += 1; }
+                        },
+                        '\'' => {
+                            i += 1;
+                            while (i < src.len and src[i] != '\'') {
+                                try word.append(arena, src[i]); i += 1;
+                            }
+                            if (i < src.len) i += 1; // skip closing '
+                        },
+                        '"' => {
+                            i += 1;
+                            while (i < src.len and src[i] != '"') {
+                                if (src[i] == '\\' and i + 1 < src.len) {
+                                    // Keep escape sequences verbatim inside double-quotes
+                                    try word.append(arena, '\\');
+                                    try word.append(arena, src[i + 1]);
+                                    i += 2;
+                                } else {
+                                    try word.append(arena, src[i]); i += 1;
+                                }
+                            }
+                            if (i < src.len) i += 1; // skip closing "
+                        },
+                        '$' => {
+                            if (i + 1 < src.len and src[i + 1] == '(') {
+                                // $(cmd) — find matching )
+                                const start = i; i += 2;
+                                var depth: usize = 1;
+                                while (i < src.len and depth > 0) : (i += 1) {
+                                    switch (src[i]) {
+                                        '(' => depth += 1,
+                                        ')' => depth -= 1,
+                                        else => {},
+                                    }
+                                }
+                                try word.appendSlice(arena, src[start..i]);
+                            } else if (i + 1 < src.len and src[i + 1] == '{') {
+                                // ${VAR}
+                                const start = i; i += 2;
+                                while (i < src.len and src[i] != '}') i += 1;
+                                if (i < src.len) i += 1;
+                                try word.appendSlice(arena, src[start..i]);
+                            } else {
+                                // $VAR or bare $
+                                const start = i; i += 1;
+                                while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) i += 1;
+                                try word.appendSlice(arena, src[start..i]);
+                            }
+                        },
+                        '`' => {
+                            // Backtick subst — keep verbatim
+                            const start = i; i += 1;
+                            while (i < src.len and src[i] != '`') {
+                                if (src[i] == '\\') i += 1;
+                                if (i < src.len) i += 1;
+                            }
+                            if (i < src.len) i += 1;
+                            try word.appendSlice(arena, src[start..i]);
+                        },
+                        else => { try word.append(arena, ch); i += 1; },
+                    }
+                }
+                try out.append(arena, .{ .ty = .word, .val = try word.toOwnedSlice(arena) });
+            },
+        }
+    }
+    try out.append(arena, .{ .ty = .eof });
+}
+
+/// Write the JSON AST for a parsed shell command into `out`.
+/// Tokens must be the result of shellLex().
+fn shellSerialize(arena: std.mem.Allocator, tokens: []const ShTok, out: *std.ArrayListUnmanaged(u8)) !void {
+    var pos: usize = 0;
+
+    // Helpers
+    const skipSemis = struct {
+        fn run(tk: []const ShTok, p: *usize) void {
+            while (p.* < tk.len and (tk[p.*].ty == .semi or tk[p.*].ty == .newline)) p.* += 1;
+        }
+    }.run;
+
+    const peekTy = struct {
+        fn run(tk: []const ShTok, p: usize) ShTokTy {
+            if (p >= tk.len) return .eof;
+            return tk[p].ty;
+        }
+    }.run;
+
+    // Collect all statements as JSON byte slices
+    var stmts: std.ArrayListUnmanaged([]const u8) = .{};
+    defer {
+        for (stmts.items) |s| arena.free(s);
+        stmts.deinit(arena);
+    }
+
+    skipSemis(tokens, &pos);
+
+    while (peekTy(tokens, pos) != .eof) {
+        // Parse one statement (pipeline optionally followed by &)
+        var stmt_buf: std.ArrayListUnmanaged(u8) = .{};
+        var cmds: std.ArrayListUnmanaged([]const u8) = .{};
+        defer {
+            for (cmds.items) |c| arena.free(c);
+            cmds.deinit(arena);
+        }
+        var bg = false;
+
+        // Parse commands separated by |
+        while (true) {
+            var cmd_buf: std.ArrayListUnmanaged(u8) = .{};
+            var argv: std.ArrayListUnmanaged([]const u8) = .{};
+            defer {
+                for (argv.items) |a| arena.free(a);
+                argv.deinit(arena);
+            }
+            var redirs: std.ArrayListUnmanaged([]const u8) = .{};
+            defer {
+                for (redirs.items) |r| arena.free(r);
+                redirs.deinit(arena);
+            }
+
+            // Collect words and redirects until |, ;, \n, &, eof
+            while (peekTy(tokens, pos) == .word or
+                peekTy(tokens, pos) == .redir_out or
+                peekTy(tokens, pos) == .redir_append or
+                peekTy(tokens, pos) == .redir_in)
+            {
+                const tok = tokens[pos]; pos += 1;
+                switch (tok.ty) {
+                    .word => try argv.append(arena, try arena.dupe(u8, tok.val)),
+                    .redir_out, .redir_append, .redir_in => {
+                        const op_str: []const u8 = switch (tok.ty) {
+                            .redir_out => ">",
+                            .redir_append => ">>",
+                            .redir_in => "<",
+                            else => unreachable,
+                        };
+                        // Check for fd prefix on this op (already consumed as part of prev word)
+                        // and get the target word
+                        if (peekTy(tokens, pos) != .word) break;
+                        const target = tokens[pos].val; pos += 1;
+
+                        // Generate {"t":">>","fd":1,"target":"..."}
+                        var redir_buf: std.ArrayListUnmanaged(u8) = .{};
+                        defer redir_buf.deinit(arena);
+                        try redir_buf.appendSlice(arena, "{\"t\":");
+                        try jsonEscapeTo2(&redir_buf, arena, op_str);
+                        try redir_buf.appendSlice(arena, ",\"fd\":1,\"target\":");
+                        try jsonEscapeTo2(&redir_buf, arena, target);
+                        try redir_buf.append(arena, '}');
+                        try redirs.append(arena, try redir_buf.toOwnedSlice(arena));
+                    },
+                    else => unreachable,
+                }
+            }
+
+            // Serialize command: {"t":"cmd","argv":[...],"redirs":[...]}
+            try cmd_buf.appendSlice(arena, "{\"t\":\"cmd\",\"argv\":[");
+            for (argv.items, 0..) |a, idx| {
+                if (idx > 0) try cmd_buf.append(arena, ',');
+                try jsonEscapeTo2(&cmd_buf, arena, a);
+            }
+            try cmd_buf.appendSlice(arena, "],\"redirs\":[");
+            for (redirs.items, 0..) |r, idx| {
+                if (idx > 0) try cmd_buf.append(arena, ',');
+                try cmd_buf.appendSlice(arena, r);
+            }
+            try cmd_buf.append(arena, ']');
+            // bg is set after the pipeline, handle below
+            try cmd_buf.append(arena, '}');
+            try cmds.append(arena, try cmd_buf.toOwnedSlice(arena));
+
+            if (peekTy(tokens, pos) != .pipe) break;
+            pos += 1; // consume |
+        }
+
+        // Check for & (background)
+        if (peekTy(tokens, pos) == .amp) {
+            bg = true;
+            pos += 1;
+        }
+
+        // Apply bg to last cmd by inserting ,"bg":true before }
+        if (bg and cmds.items.len > 0) {
+            const last_idx = cmds.items.len - 1;
+            const old = cmds.items[last_idx];
+            // old ends with '}', replace with ,"bg":true}
+            const new_cmd = try std.fmt.allocPrint(arena, "{s},\"bg\":true}}", .{old[0 .. old.len - 1]});
+            arena.free(old);
+            cmds.items[last_idx] = new_cmd;
+        }
+
+        // Serialize: single command → use directly; pipeline → wrap
+        if (cmds.items.len == 1) {
+            try stmt_buf.appendSlice(arena, cmds.items[0]);
+        } else {
+            try stmt_buf.appendSlice(arena, "{\"t\":\"pipe\",\"cmds\":[");
+            for (cmds.items, 0..) |cmd_json, idx| {
+                if (idx > 0) try stmt_buf.append(arena, ',');
+                try stmt_buf.appendSlice(arena, cmd_json);
+            }
+            try stmt_buf.appendSlice(arena, "]}");
+        }
+
+        try stmts.append(arena, try stmt_buf.toOwnedSlice(arena));
+
+        skipSemis(tokens, &pos);
+    }
+
+    // Wrap in top-level { "t":"seq", "stmts":[...] }
+    try out.appendSlice(arena, "{\"t\":\"seq\",\"stmts\":[");
+    for (stmts.items, 0..) |s, idx| {
+        if (idx > 0) try out.append(arena, ',');
+        try out.appendSlice(arena, s);
+    }
+    try out.appendSlice(arena, "]}");
+}
+
+export fn bun_shell_parse(ptr: [*]const u8, len: u32) u64 {
+    const src = ptr[0..len];
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tokens: std.ArrayListUnmanaged(ShTok) = .{};
+    shellLex(a, src, &tokens) catch return packError(1);
+
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    shellSerialize(a, tokens.items, &out) catch return packError(1);
+
+    // Copy out of arena into allocator (handOff requires non-arena memory)
+    const result = allocator.dupe(u8, out.items) catch return packError(1);
+    return handOff(result);
 }

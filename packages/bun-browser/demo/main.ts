@@ -10,6 +10,7 @@ import { buildSnapshot, parseSnapshot } from "../src/vfs-client";
 import { installPackages } from "../src/installer";
 import { detectThreadCapability } from "../src/thread-capability";
 import { createSabRing, SabRingProducer, SabRingConsumer } from "../src/sab-ring";
+import { WebContainer } from "../src/webcontainer-compat";
 
 // ── Runtime ────────────────────────────────────────────────────────────────
 
@@ -60,11 +61,13 @@ function setResult(el: HTMLElement, text: string, isErr = false): void {
 async function init(): Promise<void> {
   setStatus("加载 bun-core.wasm…");
   try {
-    const wasmUrl = new URL("../bun-core.wasm", import.meta.url);
+    const wasmUrl = new URL("./bun-core.wasm", window.location.href);
     const resp    = await fetch(wasmUrl);
-    const bytes   = await resp.arrayBuffer();
-    wasmSizeEl.textContent = `wasm ${(bytes.byteLength / 1024).toFixed(1)} KB`;
-    const module  = await WebAssembly.compile(bytes);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching bun-core.wasm`);
+    const cl = resp.headers.get("content-length");
+    if (cl) wasmSizeEl.textContent = `wasm ${(parseInt(cl) / 1024).toFixed(1)} KB`;
+    // compileStreaming preserves the source URL so DevTools can display the binary
+    const module  = await WebAssembly.compileStreaming(resp);
     rt = await createWasmRuntime(module, {
       onPrint(data, kind) {
         // 在代码执行 tab 的输出区拼接文字
@@ -1754,6 +1757,470 @@ resolveGraphRunBtn.addEventListener("click", () => {
   } catch (e) {
     resolveGraphResultEl.textContent = `[错误] ${(e as Error).message}`;
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tab 12: WebContainer
+// ═══════════════════════════════════════════════════════════════════════════
+
+const wcPresetEl       = document.getElementById("wc-preset")!         as HTMLSelectElement;
+const wcBootBtn        = document.getElementById("wc-boot")!            as HTMLButtonElement;
+const wcTeardownBtn    = document.getElementById("wc-teardown")!        as HTMLButtonElement;
+const wcStateEl        = document.getElementById("wc-state")!           as HTMLSpanElement;
+const wcOutput         = document.getElementById("wc-output")!          as HTMLPreElement;
+const wcClearBtn       = document.getElementById("wc-clear")!           as HTMLButtonElement;
+
+const wcFsPathEl       = document.getElementById("wc-fs-path")!        as HTMLInputElement;
+const wcFsReadBtn      = document.getElementById("wc-fs-read")!        as HTMLButtonElement;
+const wcFsReaddirBtn   = document.getElementById("wc-fs-readdir")!     as HTMLButtonElement;
+const wcFsStatBtn      = document.getElementById("wc-fs-stat")!        as HTMLButtonElement;
+const wcFsWriteContent = document.getElementById("wc-fs-write-content")! as HTMLTextAreaElement;
+const wcFsWriteBtn     = document.getElementById("wc-fs-write")!       as HTMLButtonElement;
+const wcFsResultEl     = document.getElementById("wc-fs-result")!      as HTMLPreElement;
+
+const wcSpawnCmdEl     = document.getElementById("wc-spawn-cmd")!      as HTMLInputElement;
+const wcSpawnArgsEl    = document.getElementById("wc-spawn-args")!     as HTMLInputElement;
+const wcSpawnRunBtn    = document.getElementById("wc-spawn-run")!      as HTMLButtonElement;
+
+const wcExportPathEl   = document.getElementById("wc-export-path")!    as HTMLInputElement;
+const wcExportRunBtn   = document.getElementById("wc-export-run")!     as HTMLButtonElement;
+
+// Presets
+const WC_PRESETS: Record<string, Record<string, { file: { contents: string } } | { directory: Record<string, unknown> }>> = {
+  hello: {
+    "index.ts": { file: { contents: `const msg: string = "Hello from bun-browser WebContainer!";\nconsole.log(msg);\nconsole.log("Node.js?", typeof process !== "undefined" ? process.version : "n/a");\nconsole.log("Bun?", typeof Bun !== "undefined" ? Bun.version : "n/a");\n` } },
+  },
+  server: {
+    "server.ts": { file: { contents: `const server = Bun.serve({\n  port: 3000,\n  fetch(req) {\n    const url = new URL(req.url);\n    return new Response(\`Hello from bun WebContainer! Path: \${url.pathname}\`, {\n      headers: { "Content-Type": "text/plain" },\n    });\n  },\n});\nconsole.log(\`Server running on http://localhost:\${server.port}\`);\n` } },
+  },
+  pkg: {
+    "package.json": { file: { contents: `{\n  "name": "wc-demo",\n  "version": "1.0.0",\n  "dependencies": { "ms": "^2.1.0" }\n}\n` } },
+    "index.ts": { file: { contents: `// Note: in full WebContainer mode, 'bun install' would fetch real packages.\n// In this WASM demo, we demonstrate the fs.readFile API.\nconst pkg = await Bun.file("./package.json").json();\nconsole.log("Project:", pkg.name, "v" + pkg.version);\nconsole.log("Dependencies:", Object.keys(pkg.dependencies ?? {}).join(", "));\n` } },
+  },
+  multi: {
+    "src": { directory: {} },
+    "src/greet.ts": { file: { contents: `export function greet(name: string): string {\n  return \`Hello, \${name}! Running in bun-browser WebContainer.\`;\n}\n` } },
+    "src/main.ts": { file: { contents: `import { greet } from "./greet";\n\nconst names = ["Alice", "Bob", "WebContainer"];\nfor (const name of names) {\n  console.log(greet(name));\n}\n\nconsole.log("\\nFiles written by Kernel Worker VFS:");\nconsole.log("- src/greet.ts");\nconsole.log("- src/main.ts");\n` } },
+    "README.md": { file: { contents: `# bun-browser WebContainer demo\n\nA multi-file project mounted onto the WASM VFS.\n` } },
+  },
+};
+
+let wcInstance: WebContainer | null = null;
+
+function wcLog(text: string, cls?: "stdout" | "stderr" | "info" | "warn"): void {
+  const colors: Record<string, string> = {
+    stdout: "var(--text)",
+    stderr: "var(--red)",
+    info:   "var(--blue)",
+    warn:   "var(--yellow)",
+  };
+  const span = document.createElement("span");
+  span.style.color = colors[cls ?? "stdout"] ?? "var(--text)";
+  span.textContent = text;
+  wcOutput.appendChild(span);
+  wcOutput.scrollTop = wcOutput.scrollHeight;
+}
+
+function wcSetState(state: "off" | "booting" | "ready" | "error", msg?: string): void {
+  const labels: Record<string, string> = {
+    off:     "未启动",
+    booting: "⏳ 启动中…",
+    ready:   "✅ 就绪",
+    error:   "❌ 错误",
+  };
+  const colors: Record<string, string> = {
+    off:     "var(--text-dim)",
+    booting: "var(--yellow)",
+    ready:   "var(--green)",
+    error:   "var(--red)",
+  };
+  wcStateEl.textContent = labels[state] + (msg ? `: ${msg}` : "");
+  wcStateEl.style.color = colors[state] ?? "var(--text)";
+}
+
+function wcEnableFs(on: boolean): void {
+  [wcFsReadBtn, wcFsReaddirBtn, wcFsStatBtn, wcFsWriteBtn, wcSpawnRunBtn, wcExportRunBtn].forEach(b => {
+    b.disabled = !on;
+  });
+}
+
+wcClearBtn.addEventListener("click", () => { wcOutput.innerHTML = ""; });
+
+wcBootBtn.addEventListener("click", async () => {
+  if (wcInstance) {
+    wcLog("⚠️  WebContainer 已启动，请先 Teardown 后再重启。\n", "warn");
+    return;
+  }
+
+  wcOutput.innerHTML = "";
+  wcBootBtn.disabled = true;
+  wcSetState("booting");
+  wcEnableFs(false);
+
+  try {
+    wcLog("⏳ 编译 bun-core.wasm …\n", "info");
+    const wcWasmResp = await fetch(new URL("./bun-core.wasm", window.location.href));
+    if (!wcWasmResp.ok) throw new Error(`HTTP ${wcWasmResp.status} fetching bun-core.wasm`);
+    const wasmModule = await WebAssembly.compileStreaming(wcWasmResp);
+
+    wcLog("⏳ 启动 Kernel Worker (kernel-worker.js) …\n", "info");
+    const workerUrl = new URL("./kernel-worker.js", window.location.href);
+    wcInstance = await WebContainer.boot({ wasmModule, workerUrl });
+
+    wcLog("✅ WebContainer 就绪\n", "info");
+    wcSetState("ready");
+    wcTeardownBtn.disabled = false;
+    wcEnableFs(true);
+    wcServerStartBtn.disabled = false;  // enable HTTP server start
+
+    // Mount preset
+    const preset = WC_PRESETS[wcPresetEl.value] ?? WC_PRESETS["hello"] ?? {};
+    const presetOpt = wcPresetEl.options[wcPresetEl.selectedIndex];
+    const presetName = presetOpt ? presetOpt.text : wcPresetEl.value;
+    wcLog(`\n📂 挂载文件树: ${presetName}\n`, "info");
+    await wcInstance.mount(preset as Parameters<typeof wcInstance.mount>[0]);
+
+    const presetKeys = Object.keys(preset);
+    wcLog(`✅ 挂载完成: ${presetKeys.join(", ")}\n\n`, "info");
+
+    // Update default path in fs input
+    const firstFile = presetKeys.find(k => typeof (preset[k] as { file?: unknown }).file !== "undefined");
+    if (firstFile) wcFsPathEl.value = "/" + firstFile;
+
+  } catch (e) {
+    wcSetState("error", (e as Error).message);
+    wcLog(`❌ 启动失败: ${(e as Error).message}\n`, "stderr");
+    wcBootBtn.disabled = false;
+  }
+});
+
+wcTeardownBtn.addEventListener("click", () => {
+  if (!wcInstance) return;
+  wcInstance.teardown();
+  wcInstance = null;
+  wcSetState("off");
+  wcTeardownBtn.disabled = true;
+  wcBootBtn.disabled = false;
+  wcEnableFs(false);
+  wcLog("\n🔌 WebContainer 已销毁。\n", "warn");
+});
+
+// ── fs.readFile ─────────────────────────────────────────────────────────────
+wcFsReadBtn.addEventListener("click", async () => {
+  if (!wcInstance) return;
+  const path = wcFsPathEl.value.trim();
+  try {
+    const content = await wcInstance.fs.readFile(path, "utf-8");
+    wcFsResultEl.textContent = `📄 ${path} (${content.length} 字符):\n${content}`;
+  } catch (e) {
+    wcFsResultEl.textContent = `[错误] fs.readFile(${path}): ${(e as Error).message}`;
+  }
+});
+
+// ── fs.readdir ───────────────────────────────────────────────────────────────
+wcFsReaddirBtn.addEventListener("click", async () => {
+  if (!wcInstance) return;
+  const path = wcFsPathEl.value.trim();
+  try {
+    const entries = await wcInstance.fs.readdir(path);
+    wcFsResultEl.textContent = `📁 ${path}/ (${entries.length} 条目):\n` +
+      entries.map(e => `  ${e.type === "directory" ? "📁" : "📄"} ${e.name}`).join("\n");
+  } catch (e) {
+    wcFsResultEl.textContent = `[错误] fs.readdir(${path}): ${(e as Error).message}`;
+  }
+});
+
+// ── fs.stat ───────────────────────────────────────────────────────────────────
+wcFsStatBtn.addEventListener("click", async () => {
+  if (!wcInstance) return;
+  const path = wcFsPathEl.value.trim();
+  try {
+    const stat = await wcInstance.fs.stat(path);
+    wcFsResultEl.textContent = `📊 stat(${path}):\n${JSON.stringify(stat, null, 2)}`;
+  } catch (e) {
+    wcFsResultEl.textContent = `[错误] fs.stat(${path}): ${(e as Error).message}`;
+  }
+});
+
+// ── fs.writeFile ──────────────────────────────────────────────────────────────
+wcFsWriteBtn.addEventListener("click", async () => {
+  if (!wcInstance) return;
+  const path = wcFsPathEl.value.trim();
+  const content = wcFsWriteContent.value;
+  try {
+    await wcInstance.fs.writeFile(path, content);
+    wcFsResultEl.textContent = `✅ fs.writeFile(${path}) 成功 (${content.length} 字符)`;
+  } catch (e) {
+    wcFsResultEl.textContent = `[错误] fs.writeFile(${path}): ${(e as Error).message}`;
+  }
+});
+
+// ── spawn ─────────────────────────────────────────────────────────────────────
+wcSpawnRunBtn.addEventListener("click", async () => {
+  if (!wcInstance) return;
+
+  const cmd  = wcSpawnCmdEl.value.trim() || "bun";
+  const args = wcSpawnArgsEl.value.trim().split(/\s+/).filter(Boolean);
+
+  wcLog(`\n$ ${cmd} ${args.join(" ")}\n`, "info");
+
+  try {
+    const proc = await wcInstance.spawn(cmd, args);
+
+    // Stream output
+    const reader = proc.output.getReader();
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      wcLog(chunk.value, "stdout");
+    }
+
+    const code = await proc.exit;
+    wcLog(`\n[exit ${code}]\n`, code === 0 ? "info" : "stderr");
+  } catch (e) {
+    wcLog(`❌ spawn 失败: ${(e as Error).message}\n`, "stderr");
+  }
+});
+
+// ── export ────────────────────────────────────────────────────────────────────
+wcExportRunBtn.addEventListener("click", async () => {
+  if (!wcInstance) return;
+  const prefix = wcExportPathEl.value.trim() || "/";
+  wcLog(`\n📤 导出 FileSystemTree (${prefix}) …\n`, "info");
+  try {
+    const tree = await wcInstance.export(prefix);
+    wcLog(JSON.stringify(tree, null, 2) + "\n", "stdout");
+  } catch (e) {
+    wcLog(`❌ export 失败: ${(e as Error).message}\n`, "stderr");
+  }
+});
+
+// ── HTTP 服务器验证 ────────────────────────────────────────────────────────
+const wcServerCodeEl    = document.getElementById("wc-server-code")!     as HTMLTextAreaElement;
+const wcServerStartBtn  = document.getElementById("wc-server-start")!    as HTMLButtonElement;
+const wcServerStopBtn   = document.getElementById("wc-server-stop")!     as HTMLButtonElement;
+const wcServerStateEl   = document.getElementById("wc-server-state")!    as HTMLSpanElement;
+
+const wcReqMethodEl     = document.getElementById("wc-req-method")!      as HTMLSelectElement;
+const wcReqPathEl       = document.getElementById("wc-req-path")!        as HTMLInputElement;
+const wcReqHeadersEl    = document.getElementById("wc-req-headers")!     as HTMLInputElement;
+const wcReqBodyEl       = document.getElementById("wc-req-body")!        as HTMLTextAreaElement;
+const wcReqSendBtn      = document.getElementById("wc-req-send")!        as HTMLButtonElement;
+const wcRespOutputEl    = document.getElementById("wc-resp-output")!     as HTMLPreElement;
+
+const wcReqPresetRoot    = document.getElementById("wc-req-preset-root")!    as HTMLButtonElement;
+const wcReqPresetEcho    = document.getElementById("wc-req-preset-echo")!    as HTMLButtonElement;
+const wcReqPresetHeaders = document.getElementById("wc-req-preset-headers")! as HTMLButtonElement;
+const wcReqPreset404     = document.getElementById("wc-req-preset-404")!     as HTMLButtonElement;
+
+let wcServerPort: number | null = null;
+let wcServerProcess: ReturnType<WebContainer["spawn"]> extends Promise<infer T> ? T : never | null = null as never;
+
+function wcServerSetState(state: "stopped" | "starting" | "running" | "error", extra?: string): void {
+  const labels: Record<string, string> = {
+    stopped:  "未运行",
+    starting: "⏳ 启动中…",
+    running:  "✅ 运行中",
+    error:    "❌ 错误",
+  };
+  const colors: Record<string, string> = {
+    stopped:  "var(--text-dim)",
+    starting: "var(--yellow)",
+    running:  "var(--green)",
+    error:    "var(--red)",
+  };
+  wcServerStateEl.textContent = labels[state] + (extra ? ` — ${extra}` : "");
+  wcServerStateEl.style.color = colors[state] ?? "var(--text)";
+}
+
+function wcEnableRequests(on: boolean): void {
+  [wcReqSendBtn, wcReqPresetRoot, wcReqPresetEcho, wcReqPresetHeaders, wcReqPreset404].forEach(b => {
+    b.disabled = !on;
+  });
+}
+
+// 预设快捷按钮
+wcReqPresetRoot.addEventListener("click", () => {
+  wcReqMethodEl.value = "GET"; wcReqPathEl.value = "/"; wcReqBodyEl.value = "";
+});
+wcReqPresetEcho.addEventListener("click", () => {
+  wcReqMethodEl.value = "POST"; wcReqPathEl.value = "/echo"; wcReqBodyEl.value = "Hello bun-browser!";
+});
+wcReqPresetHeaders.addEventListener("click", () => {
+  wcReqMethodEl.value = "GET"; wcReqPathEl.value = "/headers"; wcReqBodyEl.value = "";
+});
+wcReqPreset404.addEventListener("click", () => {
+  wcReqMethodEl.value = "GET"; wcReqPathEl.value = "/notfound"; wcReqBodyEl.value = "";
+});
+
+wcServerStartBtn.addEventListener("click", async () => {
+  if (!wcInstance) {
+    wcLog("⚠️  请先 Boot WebContainer\n", "warn");
+    return;
+  }
+
+  wcServerStartBtn.disabled = true;
+  wcServerSetState("starting");
+  wcServerPort = null;
+  wcEnableRequests(false);
+
+  // Write server code to VFS
+  const serverSource = wcServerCodeEl.value;
+  try {
+    await wcInstance.fs.writeFile("/server.ts", serverSource);
+  } catch (e) {
+    wcLog(`❌ 写入 server.ts 失败: ${(e as Error).message}\n`, "stderr");
+    wcServerSetState("error");
+    wcServerStartBtn.disabled = false;
+    return;
+  }
+
+  wcLog("\n🌐 启动 HTTP 服务器…\n", "info");
+
+  // Listen for port event BEFORE spawning
+  const portPromise = new Promise<number>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("服务器启动超时 (10s)")), 10000);
+    wcInstance!.on("port", (ev) => {
+      clearTimeout(timer);
+      resolve(ev.port);
+    });
+    // Also handle server-ready
+    wcInstance!.on("server-ready", (ev) => {
+      clearTimeout(timer);
+      resolve(ev.port);
+    });
+  });
+
+  // Spawn server in background (it runs indefinitely, so don't await exit)
+  const spawnPromise = wcInstance.spawn("bun", ["run", "server.ts"]);
+
+  // Collect server output in terminal
+  spawnPromise.then(proc => {
+    // Stream server stdout/stderr to terminal
+    (async () => {
+      const reader = proc.output.getReader();
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        wcLog(chunk.value, "stdout");
+      }
+    })();
+    // When server exits unexpectedly
+    proc.exit.then(code => {
+      if (wcServerPort !== null) {
+        wcLog(`\n[server exited with code ${code}]\n`, code === 0 ? "info" : "stderr");
+        wcServerSetState("stopped");
+        wcServerPort = null;
+        wcEnableRequests(false);
+        wcServerStartBtn.disabled = false;
+        wcServerStopBtn.disabled = true;
+      }
+    });
+  }).catch(e => {
+    wcLog(`❌ spawn 失败: ${(e as Error).message}\n`, "stderr");
+    wcServerSetState("error");
+    wcServerStartBtn.disabled = false;
+  });
+
+  try {
+    const port = await portPromise;
+    wcServerPort = port;
+    wcLog(`✅ 服务器已绑定端口 ${port}\n`, "info");
+    wcServerSetState("running", `port ${port}`);
+    wcEnableRequests(true);
+    wcServerStopBtn.disabled = false;
+    wcServerStartBtn.disabled = true;
+  } catch (e) {
+    wcLog(`❌ 等待端口失败: ${(e as Error).message}\n`, "stderr");
+    wcServerSetState("error");
+    wcServerStartBtn.disabled = false;
+  }
+});
+
+wcServerStopBtn.addEventListener("click", () => {
+  wcServerPort = null;
+  wcEnableRequests(false);
+  wcServerStopBtn.disabled = true;
+  wcServerStartBtn.disabled = false;
+  wcServerSetState("stopped");
+  wcLog("\n⏹ 服务器已停止（Worker 进程继续运行，下次 Boot 时重建）\n", "warn");
+});
+
+wcReqSendBtn.addEventListener("click", async () => {
+  if (!wcInstance || wcServerPort === null) return;
+
+  const method  = wcReqMethodEl.value;
+  const path    = wcReqPathEl.value.trim() || "/";
+  const rawBody = wcReqBodyEl.value.trim();
+  const url     = `http://localhost:${wcServerPort}${path}`;
+
+  let headers: Record<string, string> = {};
+  try {
+    const raw = wcReqHeadersEl.value.trim();
+    if (raw) headers = JSON.parse(raw);
+  } catch {
+    wcRespOutputEl.textContent = "[错误] Headers 不是合法 JSON";
+    return;
+  }
+  if (rawBody && !headers["Content-Type"]) {
+    headers["Content-Type"] = "text/plain";
+  }
+
+  wcRespOutputEl.textContent = `⏳ ${method} ${url} …`;
+
+  try {
+    const start = performance.now();
+    const resp = await wcInstance.kernel.fetch(wcServerPort, {
+      url,
+      method,
+      headers,
+      ...(rawBody ? { body: rawBody } : {}),
+    });
+    const elapsed = (performance.now() - start).toFixed(1);
+
+    // Pretty print response
+    const lines: string[] = [
+      `HTTP/1.1 ${resp.status}${resp.statusText ? " " + resp.statusText : ""}  (${elapsed}ms)`,
+      ...Object.entries(resp.headers).map(([k, v]) => `${k}: ${v}`),
+      "",
+    ];
+
+    // Try to pretty-print JSON body
+    try {
+      const parsed = JSON.parse(resp.body);
+      lines.push(JSON.stringify(parsed, null, 2));
+    } catch {
+      lines.push(resp.body);
+    }
+
+    const statusColor = resp.status >= 400 ? "\x1b[31m" : "";
+    wcRespOutputEl.textContent = lines.join("\n");
+    wcRespOutputEl.style.color = resp.status >= 400 ? "var(--red)" : "var(--text)";
+
+    wcLog(`\n→ ${method} ${path}  HTTP ${resp.status}  ${elapsed}ms\n`, resp.status >= 400 ? "stderr" : "info");
+  } catch (e) {
+    wcRespOutputEl.textContent = `[错误] ${(e as Error).message}`;
+    wcRespOutputEl.style.color = "var(--red)";
+  }
+});
+
+// When WC boots, also enable server start button
+const _origWcBootClick = wcBootBtn.onclick;
+function wcEnableServerOnReady(): void {
+  // Called after WC is ready (patched into boot flow)
+  wcServerStartBtn.disabled = false;
+}
+
+// Patch the existing teardown to also reset server state
+const _origTeardownClick = wcTeardownBtn.onclick;
+wcTeardownBtn.addEventListener("click", () => {
+  wcServerPort = null;
+  wcEnableRequests(false);
+  wcServerStopBtn.disabled = true;
+  wcServerStartBtn.disabled = true;
+  wcServerSetState("stopped");
+  wcRespOutputEl.textContent = "";
+  wcRespOutputEl.style.color = "";
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -24,3 +24,6 @@ export {
   type TarEntry,
 } from './installer'
 export { WorkerPool, type WorkerLike, type WorkerFactory, type WorkerPoolOptions } from './worker-pool'
+export { ShellInterpreter, type ShellResult, type ShellEnv } from './shell-interpreter'
+export { createShell, ShellPromise, type ShellOptions } from './shell'
+export { type ShellAST, type ShellCmd, type ShellPipe, type ShellSeq, type ShellRedir } from './wasm'

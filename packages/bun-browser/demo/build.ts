@@ -29,7 +29,23 @@ if (!result.success) {
 console.log("📦 Copying bun-core.wasm …");
 await Bun.write(DIST_DIR + "/bun-core.wasm", Bun.file(ROOT + "bun-core.wasm"));
 
-// 3. Patch index.html: rewrite script src to point at compiled .js
+// 3. Bundle kernel-worker.ts → dist/kernel-worker.js
+console.log("⏳ Bundling src/kernel-worker.ts …");
+const kwResult = await Bun.build({
+  entrypoints: [ROOT + "src/kernel-worker.ts"],
+  outdir: DIST_DIR,
+  target: "browser",
+  minify: true,
+  sourcemap: "none",
+  naming: "kernel-worker.js",
+});
+
+if (!kwResult.success) {
+  for (const log of kwResult.logs) console.error(log.message);
+  process.exit(1);
+}
+
+// 4. Patch index.html: rewrite script src to point at compiled .js
 console.log("📝 Generating dist/index.html …");
 const html = await Bun.file(DEMO_DIR + "/index.html").text();
 const distHtml = html.replace(
@@ -40,8 +56,10 @@ await Bun.write(DIST_DIR + "/index.html", distHtml);
 
 const wasmSize = (await Bun.file(DIST_DIR + "/bun-core.wasm").arrayBuffer()).byteLength;
 const jsSize   = (await Bun.file(DIST_DIR + "/main.js").arrayBuffer()).byteLength;
+const kwSize   = (await Bun.file(DIST_DIR + "/kernel-worker.js").arrayBuffer()).byteLength;
 console.log(`\n✅ Demo built to demo/dist/`);
-console.log(`   bun-core.wasm  ${(wasmSize / 1024).toFixed(1)} KB`);
-console.log(`   main.js        ${(jsSize / 1024).toFixed(1)} KB`);
+console.log(`   bun-core.wasm    ${(wasmSize / 1024).toFixed(1)} KB`);
+console.log(`   main.js          ${(jsSize / 1024).toFixed(1)} KB`);
+console.log(`   kernel-worker.js ${(kwSize / 1024).toFixed(1)} KB`);
 console.log(`\n   Run: bun demo/server.ts`);
 

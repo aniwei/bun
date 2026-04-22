@@ -13,7 +13,8 @@
     "./jsi-host": "./src/jsi-host.ts",
     "./vfs-client": "./src/vfs-client.ts",
     "./protocol": "./src/protocol.ts",
-    "./webcontainer-compat": "./src/webcontainer-compat.ts"
+    "./webcontainer-compat": "./src/webcontainer-compat.ts",
+    "./shell": "./src/shell.ts"
   },
   "files": [
     "src/**/*.ts",
