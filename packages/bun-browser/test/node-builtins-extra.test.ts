@@ -198,12 +198,12 @@ describe("node:stream polyfill", () => {
 describe("node:crypto polyfill", () => {
   test("createHash('sha256') known test vector", async () => {
     const rt = await makeRuntime();
-    // SHA256("abc") = ba7816bf8f01cfea414140de5dae2ec73b00361bbef0469348423f656c4911e3
+    // SHA256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
     const result = runInRuntime(rt, `
       var crypto = require('crypto');
       crypto.createHash('sha256').update('abc').digest('hex');
     `);
-    expect(result).toBe("ba7816bf8f01cfea414140de5dae2ec73b00361bbef0469348423f656c4911e3");
+    expect(result).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
   });
 
   test("createHash('sha1') known test vector", async () => {
@@ -549,7 +549,7 @@ describe("new builtins via bundle() path", () => {
       var crypto = require('crypto');
       module.exports = crypto.createHash('sha256').update('abc').digest('hex');
     ` }]);
-    expect(bundleAndRun(rt, "/app/index.js")).toBe("ba7816bf8f01cfea414140de5dae2ec73b00361bbef0469348423f656c4911e3");
+    expect(bundleAndRun(rt, "/app/index.js")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
   });
 
   test("os in bundle: platform string", async () => {

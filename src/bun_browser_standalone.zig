@@ -583,6 +583,8 @@ const STREAM_MODULE_SRC: []const u8 =
     \\Readable.prototype.pause=function(){this._rs.flowing=false;return this;};
     \\Readable.prototype.destroy=function(e){if(e)this.emit('error',e);this.emit('close');return this;};
     \\Readable.prototype.setEncoding=function(){return this;};
+    \\Readable.prototype.on=function(ev,fn){EE.prototype.on.call(this,ev,fn);if(ev==='data'&&!this._rs.flowing)this.resume();return this;};
+    \\Readable.prototype.addListener=Readable.prototype.on;
     \\if(typeof Symbol!=='undefined'&&Symbol.asyncIterator){Readable.prototype[Symbol.asyncIterator]=function(){var self=this;return{next:function(){return new Promise(function(res){var c=self.read();if(c!==null)return res({value:c,done:false});if(self._rs.ended)return res({value:undefined,done:true});self.once('data',function(v){res({value:v,done:false});});self.once('end',function(){res({value:undefined,done:true});});});},return:function(){return Promise.resolve({done:true});}};};};
     \\Readable.from=function(iter,o){var r=new Readable(o);var items=Array.isArray(iter)?iter.slice():Array.from(iter);setTimeout(function(){for(var i=0;i<items.length;i++)r.push(items[i]);r.push(null);},0);return r;};
     \\function Writable(o){EE.call(this);this.writable=true;this._ws={ended:false,hwm:(o&&o.highWaterMark)||16384};if(o&&o.write)this._write=o.write;if(o&&o.final)this._final=o.final;}
