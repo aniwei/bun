@@ -67,6 +67,9 @@
     poolSize:8192,
   };
   if(typeof globalThis!=='undefined'&&!globalThis.Buffer)globalThis.Buffer=Buffer;
-  module.exports={Buffer:Buffer,SlowBuffer:Buffer.alloc,kMaxLength:2147483647,INSPECT_MAX_BYTES:50};
-  module.exports.Buffer=Buffer;
+  // Prefer the host-native Buffer (Bun/Node) which has a proper prototype chain
+  // needed by packages that do Object.create(Buffer.prototype).
+  var ExportedBuffer=(typeof globalThis!=='undefined'&&globalThis.Buffer&&typeof globalThis.Buffer==='function')?globalThis.Buffer:Buffer;
+  module.exports={Buffer:ExportedBuffer,SlowBuffer:ExportedBuffer.alloc||Buffer.alloc,kMaxLength:2147483647,INSPECT_MAX_BYTES:50};
+  module.exports.Buffer=ExportedBuffer;
 })();

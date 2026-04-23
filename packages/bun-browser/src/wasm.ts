@@ -1042,8 +1042,6 @@ export async function createWasmRuntime(
       }
     },
 
-    // ── Phase 5.4 T5.4.2 — bun_npm_resolve_graph ───────────────────────────
-
     resolveGraph(deps, metadata): ResolveGraphResult | null {
       const payload = enc.encode(JSON.stringify({ deps, metadata }))
       const r = callPackedRaw('bun_npm_resolve_graph', payload, undefined, false)
@@ -1055,8 +1053,6 @@ export async function createWasmRuntime(
         r.free_(r.ptr)
       }
     },
-
-    // ── Phase 5.4 T5.4.4 — async fetch protocol ────────────────────────────
 
     npmInstallBegin(deps, registry): NpmFetchRequest | null {
       const payload = enc.encode(JSON.stringify({ deps, registry: registry ?? 'https://registry.npmjs.org' }))
@@ -1144,8 +1140,6 @@ export async function createWasmRuntime(
       const fn_ = exports_.bun_npm_install_end as (() => void) | undefined
       fn_?.()
     },
-
-    // ── Phase 5.7 T5.7.2 — bun_sourcemap_lookup ────────────────────────────
 
     sourcemapLookup(map, line, col): SourcemapPosition | null {
       const payload = enc.encode(JSON.stringify({ map, line, col }))

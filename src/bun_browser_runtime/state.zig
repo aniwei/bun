@@ -164,7 +164,7 @@ pub const ModuleLoader = struct {
                     return with_ext;
                 } else |_| self.alloc.free(with_ext);
             }
-            self.alloc.free(abs);
+            // errdefer frees abs on this error path.
             return error.ModuleNotFound;
         }
 
@@ -172,7 +172,11 @@ pub const ModuleLoader = struct {
         // walk up the directory tree looking for node_modules/<specifier>.
         var dir: []const u8 = self.current_dir;
         while (true) {
-            const nm_pkg = try std.fmt.allocPrint(self.alloc, "{s}/node_modules/{s}", .{ dir, specifier });
+            // Avoid double-slash when dir is "/" (root).
+            const nm_pkg = if (std.mem.eql(u8, dir, "/"))
+                try std.fmt.allocPrint(self.alloc, "/node_modules/{s}", .{specifier})
+            else
+                try std.fmt.allocPrint(self.alloc, "{s}/node_modules/{s}", .{ dir, specifier });
             defer self.alloc.free(nm_pkg);
 
             if (self.vfs.stat(nm_pkg)) |st| {
@@ -209,8 +213,17 @@ pub const ModuleLoader = struct {
         const content = self.vfs.readFile(pkg_json_path) catch return error.PackageJsonMissing;
         defer self.alloc.free(content);
 
-        const main_rel = extractJsonStringField(self.alloc, content, "main") catch return error.NoMainField;
-        defer self.alloc.free(main_rel);
+        // Prefer "browser" field (string form) over "main" for browser-compatible entry.
+        const entry_rel: []u8 = browser: {
+            if (extractJsonStringField(self.alloc, content, "browser")) |br| {
+                // Only use the browser field when it's a file path (not an object/map).
+                if (br.len > 0 and !std.mem.eql(u8, br, "false")) break :browser br;
+                self.alloc.free(br);
+            } else |_| {}
+            break :browser try (extractJsonStringField(self.alloc, content, "main") catch error.NoMainField);
+        };
+        defer self.alloc.free(entry_rel);
+        const main_rel = entry_rel;
 
         // Resolve relative to pkg_dir (main may be "index.js", "./lib/foo", etc.)
         const base = if (std.mem.startsWith(u8, main_rel, "."))

@@ -318,6 +318,16 @@ class KernelWorkerHost {
   private handleSpawn(msg: HostRequestOfKind<'spawn'>): void {
     const runtime = this.requireRuntime()
 
+    // ── Intercept `bun install [pkg...]` ───────────────────────────────
+    // The WASM `bun_spawn` implementation only supports `bun -e` and
+    // `bun run <file>`; `bun install` would silently fall through and
+    // return 0, which is misleading.  Redirect it to the existing JS
+    // installer pipeline (same as `kernel.installPackages()`).
+    if (msg.argv.length >= 2 && msg.argv[0] === 'bun' && msg.argv[1] === 'install') {
+      this.handleBunInstallSpawn(msg)
+      return
+    }
+
     if (this.processManager) {
       const liveSnapshot = runtime.dumpVfsSnapshot()
       const emitOut = msg.streamOutput
@@ -361,6 +371,122 @@ class KernelWorkerHost {
     })
     this.post({ kind: 'spawn:exit', id: msg.id, code: exitCode })
     this.wakeTickLoop()
+  }
+
+  /**
+   * Handle `bun install [pkg...]` in the spawn pipeline by delegating to
+   * the JS installer (same path as `kernel.installPackages()`).  Emits
+   * stdout/stderr progress lines and a final `spawn:exit`.
+   *
+   * Supports:
+   *   `bun install`                 — installs deps from <cwd>/package.json
+   *   `bun install foo bar@^1.0`    — installs explicit list
+   *   `--cwd <dir>` / `--cwd=<dir>` — override install root dir
+   *   `--registry <url>`            — override registry
+   */
+  private handleBunInstallSpawn(msg: HostRequestOfKind<'spawn'>): void {
+    const runtime = this.requireRuntime()
+    const args = msg.argv.slice(2)
+
+    const emitOut = msg.streamOutput
+      ? (data: string) => this.post({ kind: 'spawn:stdout', id: msg.id, data })
+      : (data: string) => this.post({ kind: 'stdout', data })
+    const emitErr = msg.streamOutput
+      ? (data: string) => this.post({ kind: 'spawn:stderr', id: msg.id, data })
+      : (data: string) => this.post({ kind: 'stderr', data })
+
+    let installCwd: string | undefined
+    let registry: string | undefined
+    const positional: string[] = []
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!
+      if (a === '--cwd' && i + 1 < args.length) {
+        installCwd = args[++i]
+      } else if (a.startsWith('--cwd=')) {
+        installCwd = a.slice('--cwd='.length)
+      } else if (a === '--registry' && i + 1 < args.length) {
+        registry = args[++i]
+      } else if (a.startsWith('--registry=')) {
+        registry = a.slice('--registry='.length)
+      } else if (a.startsWith('-')) {
+        // Silently ignore unknown flags (--save, --production, etc.)
+      } else {
+        positional.push(a)
+      }
+    }
+
+    const cwd = installCwd ?? msg.cwd ?? '/'
+    const installRoot = (cwd.endsWith('/') ? cwd.slice(0, -1) : cwd) + '/node_modules'
+
+    void (async () => {
+      try {
+        let deps: Record<string, string>
+        if (positional.length > 0) {
+          deps = {}
+          for (const spec of positional) {
+            const at = spec.lastIndexOf('@')
+            if (at > 0) {
+              deps[spec.slice(0, at)] = spec.slice(at + 1)
+            } else {
+              deps[spec] = 'latest'
+            }
+          }
+        } else {
+          // Read <cwd>/package.json
+          const pkgPath = (cwd.endsWith('/') ? cwd.slice(0, -1) : cwd) + '/package.json'
+          const snap = runtime.dumpVfsSnapshot()
+          if (!snap) throw new Error('bun install: VFS snapshot unavailable')
+          const files = parseSnapshot(snap.buffer as ArrayBuffer)
+          const pkgEntry = files.find(f => f.path === pkgPath)
+          if (!pkgEntry) throw new Error(`bun install: ${pkgPath} not found`)
+          const pkgText = typeof pkgEntry.data === 'string'
+            ? pkgEntry.data
+            : new TextDecoder().decode(pkgEntry.data)
+          const pkgJson = JSON.parse(pkgText) as {
+            dependencies?: Record<string, string>
+            devDependencies?: Record<string, string>
+          }
+          deps = { ...(pkgJson.dependencies ?? {}), ...(pkgJson.devDependencies ?? {}) }
+          if (Object.keys(deps).length === 0) {
+            emitOut('bun install: no dependencies to install\n')
+            this.post({ kind: 'spawn:exit', id: msg.id, code: 0 })
+            this.wakeTickLoop()
+            return
+          }
+        }
+
+        emitOut(`bun install: installing ${Object.keys(deps).length} package(s) to ${installRoot}\n`)
+
+        const { installPackages } = await import('./installer')
+        const result = await installPackages(deps, {
+          ...(registry !== undefined ? { registry } : {}),
+          installRoot,
+          wasmRuntime: runtime,
+          onProgress: p => {
+            if (p.phase === 'tarball' || p.phase === 'done') {
+              emitOut(`  ${p.phase} ${p.name}${p.version !== undefined ? '@' + p.version : ''}\n`)
+            }
+          },
+        })
+
+        if (result.files.length > 0) {
+          const loader = runtime.instance.exports.bun_vfs_load_snapshot as
+            | ((ptr: number, len: number) => number)
+            | undefined
+          if (loader) {
+            const snap = buildSnapshot(result.files)
+            runtime.withBytes(new Uint8Array(snap), (ptr, len) => loader(ptr, len))
+          }
+        }
+
+        emitOut(`bun install: done (${result.packages.length} package(s))\n`)
+        this.post({ kind: 'spawn:exit', id: msg.id, code: 0 })
+      } catch (err: unknown) {
+        emitErr(`bun install: ${toError(err).message}\n`)
+        this.post({ kind: 'spawn:exit', id: msg.id, code: 1 })
+      }
+      this.wakeTickLoop()
+    })()
   }
 
   private handleSpawnKill(msg: HostRequestOfKind<'spawn:kill'>): void {

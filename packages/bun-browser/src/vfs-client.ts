@@ -90,7 +90,7 @@ export function parseSnapshot(buf: ArrayBuffer): VfsFile[] {
 }
 
 // ---------------------------------------------------------------------------
-// T5.11.4：WebContainer 兼容的 FileSystemTree 格式转换
+// WebContainer 兼容的 FileSystemTree 格式转换
 // ---------------------------------------------------------------------------
 
 /** 文件节点（WebContainer FileSystemTree 兼容格式）。 */

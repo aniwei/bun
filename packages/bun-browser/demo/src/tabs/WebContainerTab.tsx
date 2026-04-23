@@ -8,21 +8,17 @@ interface OutputLine { text: string; cls?: string; }
 
 function toFileSystemTree(files: Readonly<Record<string, string>>): FileSystemTree {
   const root: FileSystemTree = {};
-  for (const [rawPath, contents] of Object.entries(files)) {
-    const parts = rawPath.split("/").filter(Boolean);
-    if (parts.length === 0) continue;
-
-    let node = root;
+  for (const [absPath, contents] of Object.entries(files)) {
+    const parts = absPath.split("/").filter(Boolean);
+    let node: FileSystemTree = root;
     for (let i = 0; i < parts.length - 1; i++) {
-      const part = parts[i]!;
-      const existing = node[part];
-      if (!existing || !("directory" in existing)) {
-        node[part] = { directory: {} };
-      }
-      node = (node[part] as { directory: FileSystemTree }).directory;
+      const seg = parts[i]!;
+      if (!(seg in node)) node[seg] = { directory: {} };
+      const child = node[seg]!;
+      if ("directory" in child) node = child.directory;
     }
-
-    node[parts[parts.length - 1]!] = { file: { contents } };
+    const filename = parts[parts.length - 1];
+    if (filename) node[filename] = { file: { contents } };
   }
   return root;
 }
@@ -403,10 +399,10 @@ export function WebContainerTab() {
         const parts = cfg.cmd.split(" ");
         const prog  = parts[0]!;
         const args  = parts.slice(1);
-        addOutput(`\n$ ${cfg.cmd}\n`);
-        const proc = await containerRef.spawn(prog, args);
-        const exitCode = await proc.exit;
-        addOutput(`[exit ${exitCode}]\n`, exitCode === 0 ? "s" : "e");
+    addOutput(`\n$ ${cfg.cmd}\n`);
+      const proc = await containerRef.spawn(prog, args);
+      const exitCode = await proc.exit;
+      addOutput(`[exit ${exitCode}]\n`, exitCode === 0 ? "s" : "e");
       }
     } catch (e) {
       addOutput(`[error] ${(e as Error).message}\n`, "e");

@@ -72,6 +72,13 @@ pub fn builtinPolyfillSource(canonical: []const u8) []const u8 {
         return PROCESS_MODULE_SRC;
     if (std.mem.eql(u8, canonical, "node:fs") or std.mem.eql(u8, canonical, "fs"))
         return "module.exports=(typeof globalThis!==\"undefined\"&&typeof globalThis.require===\"function\")?globalThis.require(\"node:fs\"):{};";
+    if (std.mem.eql(u8, canonical, "node:tty") or std.mem.eql(u8, canonical, "tty"))
+        return "module.exports={isatty:function(){return false;},ReadStream:function(){},WriteStream:function(){}};";
+    if (std.mem.eql(u8, canonical, "node:net") or std.mem.eql(u8, canonical, "net"))
+        return "module.exports={createServer:function(){return{listen:function(){},on:function(){return this;},close:function(){}};},Socket:function(){this.on=function(){return this;};this.write=function(){};this.end=function(){};this.destroy=function(){};}};";
+    if (std.mem.eql(u8, canonical, "node:dns") or std.mem.eql(u8, canonical, "dns") or
+        std.mem.eql(u8, canonical, "node:dns/promises"))
+        return "module.exports={lookup:function(h,o,cb){var fn=typeof o===\"function\"?o:cb;if(fn)fn(null,h,4);}};";
     return "module.exports={};";
 }
 
