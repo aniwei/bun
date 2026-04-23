@@ -12,7 +12,7 @@
  *   - 5..  由本类的自由表分配
  */
 
-export const EXCEPTION_SENTINEL = 0xffffffff >>> 0;
+export const EXCEPTION_SENTINEL = 0xffffffff >>> 0
 
 export const enum ReservedHandle {
   Undefined = 0,
@@ -40,7 +40,7 @@ export const enum TypeTag {
 }
 
 /** HostFunction 回调签名（由 Zig 侧 `jsi_host_invoke` 反向驱动 —— 通过 WASM 导出，不经由 imports 表）。 */
-export type HostFnImpl = (thisHandle: number, argv: number[]) => number;
+export type HostFnImpl = (thisHandle: number, argv: number[]) => number
 
 /** 打印级别，对应 `jsi_print` level 参数。 */
 export const enum PrintLevel {
@@ -49,102 +49,113 @@ export const enum PrintLevel {
 }
 
 export interface JsiHostOptions {
-  global?: object;
-  memory?: WebAssembly.Memory | undefined;
+  global?: object
+  memory?: WebAssembly.Memory | undefined
   /** stdout/stderr 输出回调。默认路由到 console.log / console.error。 */
-  onPrint?: (data: string, level: PrintLevel) => void;
+  onPrint?: (data: string, level: PrintLevel) => void
   /**
    * TypeScript 转译回调。接收原始 TS 源码 + 文件名，返回 转译后 JS。
    * 默认为恒等（identity）——即不提供转译，原文直接返回。
    * 中高级用法：插入 esbuild-wasm / swc-wasm 实现。
    */
-  transpile?: (source: string, filename: string) => string;
+  transpile?: (source: string, filename: string) => string
   /**
    * 代码求值器。默认为 `new Function(code)()`（宿主 global 作用域）。
-   * Node 宿主可注入 `vm.runInContext` 以隔离到沙箱 Context，满足 Phase 2 验收
-   * "同一 wasm 在 Node.js 宿主下用 vm.Context 作为 JSI backend"。
+   * Node 宿主可注入 `vm.runInContext` 以隔离到沙箱 Context。
    */
-  evaluator?: (code: string, url: string) => unknown;
+  evaluator?: (code: string, url: string) => unknown
+  /**
+   * 孵化一个新的 Worker 线程，在内部运行 wasm export `bun_thread_entry(arg)`。
+   * 未注入时 `jsi_thread_spawn` 返回 0；注入后返回 host 分配的 tid（>0）。
+   */
+  spawnThread?: (arg: number) => number
+  /** 当前 JsiHost 实例所在线程的 tid；主线程为 0。 */
+  threadId?: number
 }
 
 export class JsiHost {
-  private handles: Array<unknown>;
-  private freeList: number[] = [];
-  private textDecoder = new TextDecoder("utf-8", { fatal: false });
-  private textEncoder = new TextEncoder();
-  private lastException: unknown = undefined;
-  private memory: WebAssembly.Memory | undefined;
-  private onPrint: (data: string, level: PrintLevel) => void;
-  private transpile: (source: string, filename: string) => string;
-  private evaluator: (code: string, url: string) => unknown;
-  public wasmExports: WebAssembly.Exports | undefined;
+  private handles: Array<unknown>
+  private freeList: number[] = []
+  private textDecoder = new TextDecoder('utf-8', { fatal: false })
+  private textEncoder = new TextEncoder()
+  private lastException: unknown = undefined
+  private memory: WebAssembly.Memory | undefined
+  private onPrint: (data: string, level: PrintLevel) => void
+  private transpile: (source: string, filename: string) => string
+  private evaluator: (code: string, url: string) => unknown
+  /** 可选 thread-spawn 钩子（由 kernel 注入）。 */
+  public spawnThread: ((arg: number) => number) | undefined
+  /** 本 host 实例归属的线程 id；主线程为 0。 */
+  public threadId: number
+  public wasmExports: WebAssembly.Exports | undefined
 
   constructor(opts: JsiHostOptions = {}) {
-    const g = opts.global ?? globalThis;
-    this.handles = [undefined, null, true, false, g];
-    this.memory = opts.memory;
+    const g = opts.global ?? globalThis
+    this.handles = [undefined, null, true, false, g]
+    this.memory = opts.memory
     this.onPrint =
       opts.onPrint ??
       ((data, level) => {
-        if (level === PrintLevel.Stderr) console.error(data);
-        else console.log(data);
-      });
-    this.transpile = opts.transpile ?? ((source) => source);
+        if (level === PrintLevel.Stderr) console.error(data)
+        else console.log(data)
+      })
+    this.transpile = opts.transpile ?? (source => source)
     this.evaluator =
       opts.evaluator ??
       ((code, url) => {
-        // 默认：宿主 global 作用域 eval。sourceURL 注释便于 DevTools 栈帧归属。
         // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-        return new Function(`${code}\n//# sourceURL=${url}`)();
-      });
+        return new Function(`${code}\n//# sourceURL=${url}`)()
+      })
+    this.spawnThread = opts.spawnThread
+    this.threadId = opts.threadId ?? 0
   }
 
   bind(instance: WebAssembly.Instance): void {
-    this.wasmExports = instance.exports;
-    const mem = instance.exports.memory;
-    if (mem instanceof WebAssembly.Memory) this.memory = mem;
+    this.wasmExports = instance.exports
+    const mem = instance.exports.memory
+    if (mem instanceof WebAssembly.Memory) this.memory = mem
   }
 
   private memBytes(): Uint8Array {
-    const m = this.memory;
-    if (!m) throw new Error("JsiHost: memory not bound");
-    return new Uint8Array(m.buffer);
+    const m = this.memory
+    if (!m) throw new Error('JsiHost: memory not bound')
+    return new Uint8Array(m.buffer)
   }
 
   private memView(): DataView {
-    const m = this.memory;
-    if (!m) throw new Error("JsiHost: memory not bound");
-    return new DataView(m.buffer);
+    const m = this.memory
+    if (!m) throw new Error('JsiHost: memory not bound')
+    return new DataView(m.buffer)
   }
 
   retain(value: unknown): number {
-    if (value === undefined) return ReservedHandle.Undefined;
-    if (value === null) return ReservedHandle.Null;
-    if (value === true) return ReservedHandle.True;
-    if (value === false) return ReservedHandle.False;
-    const reused = this.freeList.pop();
+    if (value === undefined) return ReservedHandle.Undefined
+    if (value === null) return ReservedHandle.Null
+    if (value === true) return ReservedHandle.True
+    if (value === false) return ReservedHandle.False
+    const reused = this.freeList.pop()
     if (reused !== undefined) {
-      this.handles[reused] = value;
-      return reused;
+      this.handles[reused] = value
+      return reused
     }
-    this.handles.push(value);
-    return this.handles.length - 1;
+    this.handles.push(value)
+    return this.handles.length - 1
   }
 
   release(handle: number): void {
-    if (handle <= ReservedHandle.Global) return;
-    if (handle === EXCEPTION_SENTINEL) return;
-    this.handles[handle] = undefined;
-    this.freeList.push(handle);
+    if (handle <= ReservedHandle.Global) return
+    if (handle === EXCEPTION_SENTINEL) return
+    this.handles[handle] = undefined
+    this.freeList.push(handle)
   }
 
   deref(handle: number): unknown {
-    if (handle === EXCEPTION_SENTINEL) throw new Error("JSI: exception handle used as value");
-    return this.handles[handle];
+    if (handle === EXCEPTION_SENTINEL) throw new Error('JSI: exception handle used as value')
+    return this.handles[handle]
   }
 
   readString(ptr: number, len: number): string {
-    return this.textDecoder.decode(new Uint8Array(this.memBytes().buffer, ptr, len));
+    return this.textDecoder.decode(new Uint8Array(this.memBytes().buffer, ptr, len))
   }
 
   /**
@@ -152,15 +163,15 @@ export class JsiHost {
    * 每个导入的签名必须与 `src/jsi/imports.zig` 完全一致。
    */
   imports(): WebAssembly.ModuleImports {
-    const self = this;
+    const self = this
 
     return {
       // ── lifecycle ────────────────────────────────────
       // Zig 侧 retain 语义：在 handles 表中为同一值分配新槽，使其生命周期独立于原句柄。
       // 保留句柄 (0..Global) 和哨兵不需要计数，直接返回。
       jsi_retain: (handle: number): number => {
-        if (handle <= ReservedHandle.Global || handle === EXCEPTION_SENTINEL) return handle;
-        return self.retain(self.handles[handle]);
+        if (handle <= ReservedHandle.Global || handle === EXCEPTION_SENTINEL) return handle
+        return self.retain(self.handles[handle])
       },
       jsi_release: (handle: number): void => self.release(handle),
 
@@ -170,334 +181,382 @@ export class JsiHost {
       jsi_make_object: (): number => self.retain({}),
       jsi_make_array: (len: number): number => self.retain(new Array(len)),
       jsi_make_arraybuffer: (ptr: number, len: number, copy: number): number => {
-        const src = self.memBytes().subarray(ptr, ptr + len);
+        const src = self.memBytes().subarray(ptr, ptr + len)
         if (copy !== 0) {
-          const ab = new ArrayBuffer(len);
-          new Uint8Array(ab).set(src);
-          return self.retain(ab);
+          const ab = new ArrayBuffer(len)
+          new Uint8Array(ab).set(src)
+          return self.retain(ab)
         }
         // Zig 侧 copy=0 请求零拷贝视图；WASM grow 可能使其失效。
-        return self.retain(src.slice().buffer);
+        return self.retain(src.slice().buffer)
       },
       jsi_make_error: (ptr: number, len: number): number => {
-        return self.retain(new Error(self.readString(ptr, len)));
+        return self.retain(new Error(self.readString(ptr, len)))
       },
 
       // ── type queries ─────────────────────────────────
       jsi_typeof: (handle: number): number => {
-        const v = self.deref(handle);
-        if (v === undefined) return TypeTag.Undefined;
-        if (v === null) return TypeTag.Null;
+        const v = self.deref(handle)
+        if (v === undefined) return TypeTag.Undefined
+        if (v === null) return TypeTag.Null
         switch (typeof v) {
-          case "boolean":
-            return TypeTag.Boolean;
-          case "number":
-            return TypeTag.Number;
-          case "string":
-            return TypeTag.String;
-          case "function":
-            return TypeTag.Function;
-          case "symbol":
-            return TypeTag.Symbol;
-          case "bigint":
+          case 'boolean':
+            return TypeTag.Boolean
+          case 'number':
+            return TypeTag.Number
+          case 'string':
+            return TypeTag.String
+          case 'function':
+            return TypeTag.Function
+          case 'symbol':
+            return TypeTag.Symbol
+          case 'bigint':
             // Zig TypeTag 无 bigint；回退到 number（最接近的 scalar）。
-            return TypeTag.Number;
+            return TypeTag.Number
           default:
-            if (Array.isArray(v)) return TypeTag.Array;
-            if (v instanceof ArrayBuffer) return TypeTag.ArrayBuffer;
-            if (ArrayBuffer.isView(v)) return TypeTag.TypedArray;
-            if (v instanceof Promise) return TypeTag.Promise;
-            if (v instanceof Error) return TypeTag.Error;
-            return TypeTag.Object;
+            if (Array.isArray(v)) return TypeTag.Array
+            if (v instanceof ArrayBuffer) return TypeTag.ArrayBuffer
+            if (ArrayBuffer.isView(v)) return TypeTag.TypedArray
+            if (v instanceof Promise) return TypeTag.Promise
+            if (v instanceof Error) return TypeTag.Error
+            return TypeTag.Object
         }
       },
       jsi_to_number: (handle: number): number => Number(self.deref(handle)),
       jsi_to_boolean: (handle: number): number => (self.deref(handle) ? 1 : 0),
-      // 将任意值强制转为 JS 字符串（等价于 String(v)），返回新 retain 的 handle。
+      // 将任意值强制转为 JS 字符串，返回新 retain 的 handle。
       jsi_to_string: (handle: number): number => {
         try {
-          return self.retain(String(self.deref(handle)));
+          return self.retain(String(self.deref(handle)))
         } catch (e) {
-          self.lastException = e;
-          return EXCEPTION_SENTINEL;
+          self.lastException = e
+          return EXCEPTION_SENTINEL
         }
       },
       jsi_string_length: (handle: number): number => {
-        const s = self.deref(handle);
-        if (typeof s !== "string") return 0;
-        return self.textEncoder.encode(s).byteLength;
+        const s = self.deref(handle)
+        if (typeof s !== 'string') return 0
+        return self.textEncoder.encode(s).byteLength
       },
       jsi_string_read: (handle: number, bufPtr: number, bufLen: number): void => {
-        const s = self.deref(handle);
-        if (typeof s !== "string") return;
-        self.textEncoder.encodeInto(s, self.memBytes().subarray(bufPtr, bufPtr + bufLen));
+        const s = self.deref(handle)
+        if (typeof s !== 'string') return
+        self.textEncoder.encodeInto(s, self.memBytes().subarray(bufPtr, bufPtr + bufLen))
       },
 
       // ── properties ───────────────────────────────────
       jsi_get_prop: (obj: number, namePtr: number, nameLen: number): number => {
         try {
-          const o = self.deref(obj) as Record<string, unknown>;
-          return self.retain(o[self.readString(namePtr, nameLen)]);
+          const o = self.deref(obj) as Record<string, unknown>
+          return self.retain(o[self.readString(namePtr, nameLen)])
         } catch (e) {
-          self.lastException = e;
-          return EXCEPTION_SENTINEL;
+          self.lastException = e
+          return EXCEPTION_SENTINEL
         }
       },
       jsi_set_prop: (obj: number, namePtr: number, nameLen: number, val: number): void => {
         try {
-          const o = self.deref(obj) as Record<string, unknown>;
-          o[self.readString(namePtr, nameLen)] = self.deref(val);
+          const o = self.deref(obj) as Record<string, unknown>
+          o[self.readString(namePtr, nameLen)] = self.deref(val)
         } catch (e) {
-          self.lastException = e;
+          self.lastException = e
         }
       },
       jsi_get_index: (arr: number, idx: number): number => {
         try {
-          return self.retain((self.deref(arr) as unknown[])[idx]);
+          return self.retain((self.deref(arr) as unknown[])[idx])
         } catch (e) {
-          self.lastException = e;
-          return EXCEPTION_SENTINEL;
+          self.lastException = e
+          return EXCEPTION_SENTINEL
         }
       },
       jsi_set_index: (arr: number, idx: number, val: number): void => {
         try {
-          (self.deref(arr) as unknown[])[idx] = self.deref(val);
+          ;(self.deref(arr) as unknown[])[idx] = self.deref(val)
         } catch (e) {
-          self.lastException = e;
+          self.lastException = e
         }
       },
       jsi_has_prop: (obj: number, namePtr: number, nameLen: number): number => {
         try {
-          const o = self.deref(obj) as object;
-          return self.readString(namePtr, nameLen) in o ? 1 : 0;
+          const o = self.deref(obj) as object
+          return self.readString(namePtr, nameLen) in o ? 1 : 0
         } catch {
-          return 0;
+          return 0
         }
       },
 
       // ── call / construct ─────────────────────────────
       jsi_call: (fn: number, thisH: number, argvPtr: number, argc: number): number => {
         try {
-          const f = self.deref(fn) as (...args: unknown[]) => unknown;
-          const view = self.memView();
-          const args: unknown[] = new Array(argc);
-          for (let i = 0; i < argc; i++) args[i] = self.deref(view.getUint32(argvPtr + i * 4, true));
-          return self.retain(f.apply(self.deref(thisH) as object, args));
+          const f = self.deref(fn) as (...args: unknown[]) => unknown
+          const view = self.memView()
+          const args: unknown[] = new Array(argc)
+          for (let i = 0; i < argc; i++) args[i] = self.deref(view.getUint32(argvPtr + i * 4, true))
+          return self.retain(f.apply(self.deref(thisH) as object, args))
         } catch (e) {
-          self.lastException = e;
-          return EXCEPTION_SENTINEL;
+          self.lastException = e
+          return EXCEPTION_SENTINEL
         }
       },
       jsi_new: (ctor: number, argvPtr: number, argc: number): number => {
         try {
-          const C = self.deref(ctor) as new (...args: unknown[]) => unknown;
-          const view = self.memView();
-          const args: unknown[] = new Array(argc);
-          for (let i = 0; i < argc; i++) args[i] = self.deref(view.getUint32(argvPtr + i * 4, true));
-          return self.retain(new C(...args));
+          const C = self.deref(ctor) as new (...args: unknown[]) => unknown
+          const view = self.memView()
+          const args: unknown[] = new Array(argc)
+          for (let i = 0; i < argc; i++) args[i] = self.deref(view.getUint32(argvPtr + i * 4, true))
+          return self.retain(new C(...args))
         } catch (e) {
-          self.lastException = e;
-          return EXCEPTION_SENTINEL;
+          self.lastException = e
+          return EXCEPTION_SENTINEL
         }
       },
 
       // ── host function factory ────────────────────────
-      jsi_make_host_function: (
-        tag: number,
-        namePtr: number,
-        nameLen: number,
-        argc: number,
-      ): number => {
-        void argc;
-        const name = nameLen > 0 ? self.readString(namePtr, nameLen) : `host_fn_${tag}`;
+      jsi_make_host_function: (tag: number, namePtr: number, nameLen: number, argc: number): number => {
+        void argc
+        const name = nameLen > 0 ? self.readString(namePtr, nameLen) : `host_fn_${tag}`
         const fn = function hostFn(this: unknown, ...args: unknown[]): unknown {
-          const thisHandle = self.retain(this);
-          const argHandles = args.map((a) => self.retain(a));
+          const thisHandle = self.retain(this)
+          const argHandles = args.map(a => self.retain(a))
           try {
-            const scratch = self.wasmExports?.jsi_host_arg_scratch as
-              | ((count: number) => number)
-              | undefined;
+            const scratch = self.wasmExports?.jsi_host_arg_scratch as ((count: number) => number) | undefined
             const invoke = self.wasmExports?.jsi_host_invoke as
               | ((fnId: number, thisH: number, argvPtr: number, argc: number) => number)
-              | undefined;
-            if (!scratch || !invoke) throw new Error("jsi_host_* exports missing");
+              | undefined
+            if (!scratch || !invoke) throw new Error('jsi_host_* exports missing')
 
-            const ptr = scratch(argHandles.length);
-            const view = self.memView();
+            const ptr = scratch(argHandles.length)
+            const view = self.memView()
             for (let i = 0; i < argHandles.length; i++) {
-              view.setUint32(ptr + i * 4, argHandles[i]!, true);
+              view.setUint32(ptr + i * 4, argHandles[i]!, true)
             }
-            const resultHandle = invoke(tag, thisHandle, ptr, argHandles.length);
+            const resultHandle = invoke(tag, thisHandle, ptr, argHandles.length)
             if (resultHandle === EXCEPTION_SENTINEL) {
-              throw self.lastException ?? new Error(`JSI host function '${name}' threw`);
+              throw self.lastException ?? new Error(`JSI host function '${name}' threw`)
             }
-            return self.deref(resultHandle);
+            return self.deref(resultHandle)
           } finally {
-            self.release(thisHandle);
-            for (const h of argHandles) self.release(h);
+            self.release(thisHandle)
+            for (const h of argHandles) self.release(h)
           }
-        };
+        }
         try {
-          Object.defineProperty(fn, "name", { value: name });
+          Object.defineProperty(fn, 'name', { value: name })
         } catch {
           // ignore
         }
-        return self.retain(fn);
+        return self.retain(fn)
       },
 
       // ── promise ──────────────────────────────────────
       jsi_make_promise: (resolverTag: number): number => {
-        void resolverTag;
-        // Phase 0 占位：返回 pending promise，resolver 由 Zig 侧 Resolver table 驱动。
-        let resolveFn: (v: unknown) => void = () => {};
-        let rejectFn: (e: unknown) => void = () => {};
+        void resolverTag
+        let resolveFn: (v: unknown) => void = () => {}
+        let rejectFn: (e: unknown) => void = () => {}
         const p = new Promise<unknown>((res, rej) => {
-          resolveFn = res;
-          rejectFn = rej;
-        });
+          resolveFn = res
+          rejectFn = rej
+        })
         // 把 resolver 挂上以便 jsi_resolve / jsi_reject 定位。
-        (p as unknown as { __resolve: typeof resolveFn }).__resolve = resolveFn;
-        (p as unknown as { __reject: typeof rejectFn }).__reject = rejectFn;
-        return self.retain(p);
+        ;(p as unknown as { __resolve: typeof resolveFn }).__resolve = resolveFn
+        ;(p as unknown as { __reject: typeof rejectFn }).__reject = rejectFn
+        return self.retain(p)
       },
       jsi_resolve: (promise: number, value: number): void => {
-        const p = self.deref(promise) as { __resolve?: (v: unknown) => void } | null;
-        p?.__resolve?.(self.deref(value));
+        const p = self.deref(promise) as { __resolve?: (v: unknown) => void } | null
+        p?.__resolve?.(self.deref(value))
       },
       jsi_reject: (promise: number, value: number): void => {
-        const p = self.deref(promise) as { __reject?: (v: unknown) => void } | null;
-        p?.__reject?.(self.deref(value));
+        const p = self.deref(promise) as { __reject?: (v: unknown) => void } | null
+        p?.__reject?.(self.deref(value))
       },
 
       // ── eval ─────────────────────────────────────────
       jsi_eval: (codePtr: number, codeLen: number, urlPtr: number, urlLen: number): number => {
         try {
-          const code = self.readString(codePtr, codeLen);
-          const url = urlLen > 0 ? self.readString(urlPtr, urlLen) : "<eval>";
-          return self.retain(self.evaluator(code, url));
+          const code = self.readString(codePtr, codeLen)
+          const url = urlLen > 0 ? self.readString(urlPtr, urlLen) : '<eval>'
+          return self.retain(self.evaluator(code, url))
         } catch (e) {
-          self.lastException = e;
-          return EXCEPTION_SENTINEL;
+          self.lastException = e
+          return EXCEPTION_SENTINEL
         }
       },
-      jsi_eval_module: (
-        codePtr: number,
-        codeLen: number,
-        urlPtr: number,
-        urlLen: number,
-      ): number => {
-        // Phase 0: 暂按 script 语义执行；后续 Phase 替换为 import() + Blob URL。
+      jsi_eval_module: (codePtr: number, codeLen: number, urlPtr: number, urlLen: number): number => {
         try {
-          const code = self.readString(codePtr, codeLen);
-          const url = urlLen > 0 ? self.readString(urlPtr, urlLen) : "<module>";
-          return self.retain(self.evaluator(code, url));
+          const code = self.readString(codePtr, codeLen)
+          const url = urlLen > 0 ? self.readString(urlPtr, urlLen) : '<module>'
+          return self.retain(self.evaluator(code, url))
         } catch (e) {
-          self.lastException = e;
-          return EXCEPTION_SENTINEL;
+          self.lastException = e
+          return EXCEPTION_SENTINEL
         }
       },
 
       // ── host helpers ─────────────────────────────────
       jsi_schedule_microtask: (): void => {
-        const tick = self.wasmExports?.bun_tick as (() => void) | undefined;
-        if (tick) queueMicrotask(tick);
+        const tick = self.wasmExports?.bun_tick as (() => void) | undefined
+        if (tick) queueMicrotask(tick)
       },
 
       // ── 直接打印（Zig → Host stdout/stderr）──────────────
       jsi_print: (ptr: number, len: number, level: number): void => {
-        const data = self.textDecoder.decode(
-          new Uint8Array(self.memBytes().buffer, ptr, len),
-        );
-        self.onPrint(data, level as PrintLevel);
+        const data = self.textDecoder.decode(new Uint8Array(self.memBytes().buffer, ptr, len))
+        self.onPrint(data, level as PrintLevel)
       },
 
       // ── TypeScript transpile ─────────────────────
-      jsi_transpile: (
-        srcPtr: number,
-        srcLen: number,
-        filenamePtr: number,
-        filenameLen: number,
-      ): number => {
+      jsi_transpile: (srcPtr: number, srcLen: number, filenamePtr: number, filenameLen: number): number => {
         try {
-          const source = self.readString(srcPtr, srcLen);
-          const filename = filenameLen > 0 ? self.readString(filenamePtr, filenameLen) : "unknown.ts";
-          const js = self.transpile(source, filename);
-          return self.retain(js);
+          const source = self.readString(srcPtr, srcLen)
+          const filename = filenameLen > 0 ? self.readString(filenamePtr, filenameLen) : 'unknown.ts'
+          const js = self.transpile(source, filename)
+          return self.retain(js)
         } catch (e) {
-          self.lastException = e;
-          return EXCEPTION_SENTINEL;
+          self.lastException = e
+          return EXCEPTION_SENTINEL
         }
       },
 
-      // ── Phase 5.7: ArrayBuffer I/O ───────────────
+      // ── ArrayBuffer I/O ─────────────────────────────────
       /**
        * Copy bytes from an ArrayBuffer/TypedArray handle into WASM linear memory.
        * Returns bytes copied, or -1 if handle is not a buffer.
        */
       jsi_read_arraybuffer: (handle: number, destPtr: number, destLen: number): number => {
-        const v = self.deref(handle);
-        let bytes: Uint8Array;
+        const v = self.deref(handle)
+        let bytes: Uint8Array
         if (v instanceof ArrayBuffer) {
-          bytes = new Uint8Array(v);
+          bytes = new Uint8Array(v)
         } else if (ArrayBuffer.isView(v)) {
           bytes = new Uint8Array(
             (v as ArrayBufferView).buffer,
             (v as ArrayBufferView).byteOffset,
             (v as ArrayBufferView).byteLength,
-          );
+          )
         } else {
-          return -1;
+          return -1
         }
-        const count = Math.min(bytes.byteLength, destLen);
-        self.memBytes().subarray(destPtr, destPtr + count).set(bytes.subarray(0, count));
-        return count;
+        const count = Math.min(bytes.byteLength, destLen)
+        self
+          .memBytes()
+          .subarray(destPtr, destPtr + count)
+          .set(bytes.subarray(0, count))
+        return count
       },
       /** Return byteLength of an ArrayBuffer/TypedArray handle, or -1. */
       jsi_arraybuffer_byteLength: (handle: number): number => {
-        const v = self.deref(handle);
-        if (v instanceof ArrayBuffer) return v.byteLength;
-        if (ArrayBuffer.isView(v)) return (v as ArrayBufferView).byteLength;
-        return -1;
+        const v = self.deref(handle)
+        if (v instanceof ArrayBuffer) return v.byteLength
+        if (ArrayBuffer.isView(v)) return (v as ArrayBufferView).byteLength
+        return -1
       },
-    };
+
+      // ── wasm-threads + SAB ───────────────────────────────
+      //
+      // 非 SAB 环境下这些是 no-op stub（返回 0/timed-out）。
+
+      /** jsi_atomic_wait: 0=ok, 1=not-equal, 2=timed-out. */
+      jsi_atomic_wait: (viewPtr: number, expected: number, timeoutMs: number): number => {
+        const mem = self.memory
+        if (!mem || !(mem.buffer instanceof SharedArrayBuffer)) {
+          // 非 SAB path：只做一次性比较，不同则立即返回 1，相同则立即返回 2（timed-out）
+          if (!mem) return 2
+          const v = new Int32Array(mem.buffer, viewPtr, 1)[0]
+          return v !== expected ? 1 : 2
+        }
+        const view = new Int32Array(mem.buffer)
+        const inWorker = typeof (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope !== 'undefined'
+        const timeout = timeoutMs === 0xffffffff ? Infinity : timeoutMs
+        if (!inWorker) {
+          // 主线程：Atomics.wait 会抛 TypeError，改用单次比较 + 即刻返回
+          const v = Atomics.load(view, viewPtr >> 2)
+          return v !== expected ? 1 : 2
+        }
+        const r = Atomics.wait(view, viewPtr >> 2, expected, timeout)
+        if (r === 'ok') return 0
+        if (r === 'not-equal') return 1
+        return 2
+      },
+
+      /** jsi_atomic_notify: 返回实际唤醒线程数。 */
+      jsi_atomic_notify: (viewPtr: number, count: number): number => {
+        const mem = self.memory
+        if (!mem || !(mem.buffer instanceof SharedArrayBuffer)) return 0
+        const view = new Int32Array(mem.buffer)
+        try {
+          return Atomics.notify(view, viewPtr >> 2, count === 0xffffffff ? Infinity : count)
+        } catch {
+          return 0
+        }
+      },
+
+      /** jsi_thread_spawn: host 未启用 pool → 返回 0。 */
+      jsi_thread_spawn: (_arg: number): number => {
+        const spawner = self.spawnThread
+        if (!spawner) return 0
+        return spawner(_arg) >>> 0
+      },
+
+      /** jsi_thread_self: 由 kernel 在 bind() 时注入；默认主线程 = 0。 */
+      jsi_thread_self: (): number => self.threadId >>> 0,
+
+      /** jsi_thread_capability: bit0=SAB, bit1=inWorker+waitSync, bit2=host-spawn。 */
+      jsi_thread_capability: (): number => {
+        let bits = 0
+        if (typeof SharedArrayBuffer !== 'undefined') bits |= 1
+        if (
+          typeof (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope !== 'undefined' &&
+          typeof Atomics?.wait === 'function'
+        )
+          bits |= 2
+        if (self.spawnThread) bits |= 4
+        return bits >>> 0
+      },
+    }
   }
 }
 
 /**
  * 类型化的 imports 表——主要用于测试中将 `host.imports()` cast 成可调用类型。
- * 生产炴不要使用；运行时 ABI 由 `src/jsi/imports.zig` 定义。
  */
 export interface JsiImportsTyped {
-  jsi_retain: (handle: number) => number;
-  jsi_release: (handle: number) => void;
-  jsi_make_number: (value: number) => number;
-  jsi_make_string: (ptr: number, len: number) => number;
-  jsi_make_object: () => number;
-  jsi_make_array: (length: number) => number;
-  jsi_make_arraybuffer: (ptr: number, len: number, copy: number) => number;
-  jsi_make_error: (ptr: number, len: number) => number;
-  jsi_typeof: (handle: number) => number;
-  jsi_to_number: (handle: number) => number;
-  jsi_to_boolean: (handle: number) => number;
-  jsi_to_string: (handle: number) => number;
-  jsi_string_length: (handle: number) => number;
-  jsi_string_read: (handle: number, bufPtr: number, bufLen: number) => void;
-  jsi_get_prop: (obj: number, namePtr: number, nameLen: number) => number;
-  jsi_set_prop: (obj: number, namePtr: number, nameLen: number, val: number) => void;
-  jsi_get_index: (arr: number, idx: number) => number;
-  jsi_set_index: (arr: number, idx: number, val: number) => void;
-  jsi_has_prop: (obj: number, namePtr: number, nameLen: number) => number;
-  jsi_call: (fn: number, thisH: number, argvPtr: number, argc: number) => number;
-  jsi_new: (ctor: number, argvPtr: number, argc: number) => number;
-  jsi_make_host_function: (tag: number, namePtr: number, nameLen: number, argc: number) => number;
-  jsi_make_promise: (resolverTag: number) => number;
-  jsi_resolve: (promise: number, value: number) => void;
-  jsi_reject: (promise: number, value: number) => void;
-  jsi_eval: (codePtr: number, codeLen: number, urlPtr: number, urlLen: number) => number;
-  jsi_eval_module: (codePtr: number, codeLen: number, urlPtr: number, urlLen: number) => number;
-  jsi_schedule_microtask: () => void;
-  jsi_print: (ptr: number, len: number, level: number) => void;
-  jsi_transpile: (srcPtr: number, srcLen: number, filenamePtr: number, filenameLen: number) => number;
-  jsi_read_arraybuffer: (handle: number, destPtr: number, destLen: number) => number;
-  jsi_arraybuffer_byteLength: (handle: number) => number;
+  jsi_retain: (handle: number) => number
+  jsi_release: (handle: number) => void
+  jsi_make_number: (value: number) => number
+  jsi_make_string: (ptr: number, len: number) => number
+  jsi_make_object: () => number
+  jsi_make_array: (length: number) => number
+  jsi_make_arraybuffer: (ptr: number, len: number, copy: number) => number
+  jsi_make_error: (ptr: number, len: number) => number
+  jsi_typeof: (handle: number) => number
+  jsi_to_number: (handle: number) => number
+  jsi_to_boolean: (handle: number) => number
+  jsi_to_string: (handle: number) => number
+  jsi_string_length: (handle: number) => number
+  jsi_string_read: (handle: number, bufPtr: number, bufLen: number) => void
+  jsi_get_prop: (obj: number, namePtr: number, nameLen: number) => number
+  jsi_set_prop: (obj: number, namePtr: number, nameLen: number, val: number) => void
+  jsi_get_index: (arr: number, idx: number) => number
+  jsi_set_index: (arr: number, idx: number, val: number) => void
+  jsi_has_prop: (obj: number, namePtr: number, nameLen: number) => number
+  jsi_call: (fn: number, thisH: number, argvPtr: number, argc: number) => number
+  jsi_new: (ctor: number, argvPtr: number, argc: number) => number
+  jsi_make_host_function: (tag: number, namePtr: number, nameLen: number, argc: number) => number
+  jsi_make_promise: (resolverTag: number) => number
+  jsi_resolve: (promise: number, value: number) => void
+  jsi_reject: (promise: number, value: number) => void
+  jsi_eval: (codePtr: number, codeLen: number, urlPtr: number, urlLen: number) => number
+  jsi_eval_module: (codePtr: number, codeLen: number, urlPtr: number, urlLen: number) => number
+  jsi_schedule_microtask: () => void
+  jsi_print: (ptr: number, len: number, level: number) => void
+  jsi_transpile: (srcPtr: number, srcLen: number, filenamePtr: number, filenameLen: number) => number
+  jsi_read_arraybuffer: (handle: number, destPtr: number, destLen: number) => number
+  jsi_arraybuffer_byteLength: (handle: number) => number
+  jsi_atomic_wait: (viewPtr: number, expected: number, timeoutMs: number) => number
+  jsi_atomic_notify: (viewPtr: number, count: number) => number
+  jsi_thread_spawn: (arg: number) => number
+  jsi_thread_self: () => number
+  jsi_thread_capability: () => number
 }

@@ -313,7 +313,9 @@ pub const Integrity = extern struct {
 };
 
 const std = @import("std");
-const Crypto = @import("../sha.zig").Hashers;
-
 const bun = @import("bun");
+const Crypto = if (bun.Environment.isWasm and bun.Environment.wasm_browser_runtime)
+    bun.sha.Hashers
+else
+    @import("../sha.zig").Hashers;
 const strings = bun.strings;

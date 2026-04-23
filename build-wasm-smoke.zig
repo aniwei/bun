@@ -1,16 +1,20 @@
 //! Smoke-test + browser-runtime WASM build script (Zig 0.15).
 //!
 //! Steps:
-//!   test         — run host-native VFS / wasm_event_loop unit tests
-//!   check-wasm   — sema-check `src/jsi/jsi.zig` against wasm32-freestanding
-//!   build-wasm   — compile `src/bun_browser_standalone.zig` → bun-core.wasm
-//!                  Output: packages/bun-browser/bun-core.wasm
+//!   test              — run host-native VFS / wasm_event_loop unit tests
+//!   check-wasm        — sema-check `src/jsi/jsi.zig` against wasm32-freestanding
+//!   build-wasm        — compile `src/bun_browser_standalone.zig` → bun-core.wasm
+//!                       Output: packages/bun-browser/bun-core.wasm
+//!   build-wasm-threads — same as build-wasm, but with `atomics` + `bulk_memory`
+//!                       CPU features and shared memory. Output:
+//!                       packages/bun-browser/bun-core.threads.wasm
 //!
 //! Usage from repo root:
 //!   zig build --build-file build-wasm-smoke.zig test
 //!   zig build --build-file build-wasm-smoke.zig check-wasm
 //!   zig build --build-file build-wasm-smoke.zig build-wasm --prefix .
 //!   zig build --build-file build-wasm-smoke.zig build-wasm --prefix . -Doptimize=ReleaseFast
+//!   zig build --build-file build-wasm-smoke.zig build-wasm-threads --prefix .
 //!
 //! Without --prefix . the output lands at zig-out/packages/bun-browser/bun-core.wasm.
 //!
@@ -123,6 +127,87 @@ pub fn build(b: *std.Build) void {
 
     const build_wasm_step = b.step("build-wasm", "Compile bun_browser_standalone.zig → " ++ wasm_out_dir ++ "/bun-core.wasm");
     build_wasm_step.dependOn(&install_wasm.step);
+
+    // ── build-wasm-threads: same as build-wasm, with shared memory + atomics ──
+    //
+    // Outputs a DIFFERENT artifact (`bun-core.threads.wasm`) so the non-threaded
+    // wasm stays intact for environments without crossOriginIsolated. The host
+    // probes `jsi_thread_capability()` / SharedArrayBuffer availability and
+    // picks the right module.
+    //
+    // Notes on the target query:
+    //   - `atomics`      — enables `memory.atomic.wait32` / `memory.atomic.notify`
+    //   - `bulk_memory`  — required by the tool-chain whenever atomics are enabled
+    //   - The new `Module.shared_memory = true` tells the backend to emit a
+    //     shared `(memory ... shared)` import so the host can pass in a
+    //     SharedArrayBuffer-backed WebAssembly.Memory.
+    const wasm_threads_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+        .cpu_features_add = std.Target.wasm.featureSet(&.{ .atomics, .bulk_memory }),
+    });
+
+    const bun_shim_threads = b.createModule(.{
+        .root_source_file = b.path("src/bun_wasm_shim.zig"),
+        .target = wasm_threads_target,
+        .optimize = optimize,
+        // NOTE: left `single_threaded = true` because the Zig stdlib code we
+        // pull in through the shim is not (yet) thread-safe; the kernel side
+        // uses JS-level threads + SAB for actual concurrency, and only the
+        // `memory.atomic.wait32/notify` primitives need cross-thread visibility
+        // (those are plain wasm instructions and don't care about this flag).
+        .single_threaded = true,
+    });
+    bun_shim_threads.addImport("bun", bun_shim_threads);
+
+    const jsi_mod_threads = b.createModule(.{
+        .root_source_file = b.path("src/jsi/jsi.zig"),
+        .target = wasm_threads_target,
+        .optimize = .Debug,
+    });
+    jsi_mod_threads.addImport("bun", bun_shim_threads);
+
+    const sys_wasm_mod_threads = b.createModule(.{
+        .root_source_file = b.path("src/sys_wasm/sys_wasm.zig"),
+        .target = wasm_threads_target,
+        .optimize = .Debug,
+    });
+
+    const wasm_threads_root = b.createModule(.{
+        .root_source_file = b.path("src/bun_browser_standalone.zig"),
+        .target = wasm_threads_target,
+        .optimize = optimize,
+        .single_threaded = true,
+    });
+    wasm_threads_root.addImport("jsi", jsi_mod_threads);
+    wasm_threads_root.addImport("sys_wasm", sys_wasm_mod_threads);
+    wasm_threads_root.addImport("bun", bun_shim_threads);
+
+    const wasm_threads_exe = b.addExecutable(.{
+        .name = "bun-core.threads",
+        .root_module = wasm_threads_root,
+    });
+    wasm_threads_exe.entry = .disabled;
+    wasm_threads_exe.rdynamic = true;
+    // shared memory import is the whole point of the threads build
+    wasm_threads_exe.shared_memory = true;
+    // With shared memory we must import `memory` rather than define it, so the
+    // host can hand us a SharedArrayBuffer-backed WebAssembly.Memory instance.
+    wasm_threads_exe.import_memory = true;
+    // Reserve a stack-per-thread that the host pthread shim will bump-allocate.
+    // 1 MiB stack, 16 MiB initial heap, 256 MiB max (matches non-threaded build).
+    wasm_threads_exe.initial_memory = 16 * 1024 * 1024;
+    wasm_threads_exe.max_memory = 256 * 1024 * 1024;
+
+    const install_wasm_threads = b.addInstallArtifact(wasm_threads_exe, .{
+        .dest_dir = .{ .override = .{ .custom = wasm_out_dir } },
+    });
+
+    const build_wasm_threads_step = b.step(
+        "build-wasm-threads",
+        "Compile bun_browser_standalone.zig with atomics + shared memory → " ++ wasm_out_dir ++ "/bun-core.threads.wasm",
+    );
+    build_wasm_threads_step.dependOn(&install_wasm_threads.step);
 
     b.default_step.dependOn(test_step);
     b.default_step.dependOn(check_wasm);

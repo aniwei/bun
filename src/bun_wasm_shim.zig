@@ -53,6 +53,7 @@ pub const JSTerminated = error{JSTerminated};
 pub const JSOOM = OOM || JSError;
 
 pub const callconv_inline: std.builtin.CallingConvention = if (builtin.mode == .Debug) .auto else .@"inline";
+pub const callmod_inline: std.builtin.CallModifier = if (builtin.mode == .Debug) .auto else .always_inline;
 
 pub const default_allocator: std.mem.Allocator = std.heap.wasm_allocator;
 
@@ -62,9 +63,19 @@ pub fn assert(ok: bool) void {
     }
 }
 
+pub fn debugAssert(ok: bool) void {
+    if (Environment.allow_assert) {
+        if (!ok) unreachable;
+    }
+}
+
 pub fn unsafeAssert(ok: bool) void {
     _ = ok;
 }
+
+// ── BoundedArray (pure Zig, no native deps; needed by glob/match.zig) ────────
+
+pub const BoundedArray = @import("./collections/bounded_array.zig").BoundedArray;
 
 // ── IdentityContext (pure Zig, no deps) ─────────────────────────────────────
 
