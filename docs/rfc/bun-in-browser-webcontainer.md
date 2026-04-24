@@ -1,0 +1,585 @@
+# RFC: Bun-in-Browser WebContainer 运行时
+
+| 字段     | 值                                           |
+| -------- | -------------------------------------------- |
+| 状态     | Draft                                        |
+| 版本     | v3 (2026-04-24)                              |
+| 作者     | —                                            |
+| 关联 RFC | —                                            |
+| 目标     | 在浏览器内复现完整 Bun 开发体验              |
+
+> 本文是三轮方案讨论（v1 架构基础 / v2 插件+Shell / v3 API 全覆盖）的综合整理。
+
+---
+
+## 0. 摘要
+
+将 Bun 的 **JS/TS API 形状全覆盖** 以纯 TypeScript + WASM 方式重实现，运行在浏览器标签页内，参考 WebContainer 架构。行为兼容按 A/B/C/D 分级推进。核心约束：
+
+- **不运行 JavaScriptCore WASM**，JS 执行委托给宿主浏览器引擎。
+- **不执行原生 addon**（N-API / FFI / dlopen）。
+- `crossOriginIsolated = true`（`COOP`/`COEP` 头）为部署前提，以解锁 `SharedArrayBuffer`。
+
+验收目标：能在浏览器内执行 **Express / Koa / Vite + React + TypeScript / tsx**，并通过 Bun 官方测试集的 JS/TS 层测试用例。
+
+---
+
+## 1. 分层架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Host Page                                                      │
+│  · 终端 UI (xterm.js)  · 编辑器  · 预览 iframe                  │
+│  · @bun-web/client SDK  (postMessage RPC / 终端协议)            │
+├─────────────────────────────────────────────────────────────────┤
+│  Service Worker  ← 网络虚拟化层                                  │
+│  · fetch 拦截 → 路由到 Bun.serve Process                        │
+│  · WebSocket 桥 (VirtualWebSocket polyfill)                     │
+│  · 静态资源 → 读 VFS                                            │
+├─────────────────────────────────────────────────────────────────┤
+│  Kernel Worker  (SharedWorker / DedicatedWorker)                │
+│  · 进程表 / 调度器 / 信号 / stdio 管道                          │
+│  · VFS (OPFS + MemFS + BaseLayer 叠加)                          │
+│  · 包管理器 · 解析器 · 打包器 · Plugin 引擎                     │
+├─────────────────────────────────────────────────────────────────┤
+│  Process Workers  (每个 "bun run" = 1 个 Worker)                │
+│  · JS/TS 运行时：模块加载 · node:* polyfill · Bun.* API         │
+│  · 与 Kernel 通过 MessageChannel + SAB 通信                     │
+├─────────────────────────────────────────────────────────────────┤
+│  原生基础设施                                                    │
+│  · OPFS (持久化 FS)                                             │
+│  · IndexedDB (lockfile / 包缓存)                                │
+│  · SharedArrayBuffer + Atomics (同步 syscall / 管道)            │
+│  · WASM (esbuild-wasm / swc-wasm / pako / argon2 / wa-sqlite)   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 2. 虚拟文件系统（VFS）
+
+三层叠加（OverlayFS 语义）：
+
+| 层 | 存储 | 内容 |
+|---|---|---|
+| BaseLayer | 内存 | 只读 node_modules 快照（CDN 懒加载） |
+| PersistLayer | OPFS | 用户项目代码、lockfile、bun.lock |
+| MemLayer | 内存 | /tmp、/proc、/dev |
+
+关键实现细节：
+- 大文件使用 `FileSystemSyncAccessHandle`（OPFS 同步 API，仅 Worker 内可用）避免往返。
+- `fs.watch` 基于内部 `EventTarget` 事件总线，跨 Worker 走 `BroadcastChannel`。
+- `fs.readFileSync` 等同步 API 通过下文 SAB syscall 桥在 Process Worker 内实现。
+
+---
+
+## 3. 同步系统调用桥（SAB Bridge）
+
+Node/Bun 的同步 API 依赖阻塞语义，在浏览器多 Worker 架构中通过以下协议落地：
+
+```
+Process Worker                    Kernel Worker
+    │                                   │
+    │── 写请求到 SAB 请求区 ────────────►│
+    │── Atomics.notify ────────────────►│
+    │                                   │── 处理（fs/net/...）
+    │◄── Atomics.notify ───────────────│
+    │── Atomics.wait(响应区) ─────────► │── 回写结果到 SAB 响应区
+    │◄── 读取结果 ──────────────────────│
+```
+
+这是整个方案最关键的 trick，与 WebContainer 的 sync syscall 机制一致。
+
+---
+
+## 4. 模块系统
+
+### 4.1 Resolver（TS 实现）
+
+对齐 `src/resolver/` 语义：
+- Node `exports`/`imports`/`conditions`（`browser`/`bun`/`import`/`require`）。
+- tsconfig `paths`、`baseUrl`。
+- `.ts` ↔ `.js` 扩展名互换。
+
+### 4.2 Transpiler
+
+按优先级复用 WASM 方案：
+
+| 方案 | 场景 |
+|---|---|
+| `@swc/wasm-web` | TS/JSX → JS，装饰器，主力 |
+| `esbuild-wasm` | bundler / minifier |
+| `oxc-wasm` | 轻量 lint/transform（后期） |
+
+转译结果以内容 hash + 选项 hash 为键缓存到 IndexedDB，热路径 < 5ms。
+
+### 4.3 Module Registry
+
+每个 Process Worker 内部维护 `ModuleRegistry`：
+- **ESM**：转译后注入为 Blob URL，或通过 `import-maps` 注册。
+- **CJS**：`new Function('module','exports','require', src)` 沙箱执行。
+- **node:\***：优先 `jspm-core`，按 Bun 差异打补丁。
+
+---
+
+## 5. 网络虚拟化（Service Worker）
+
+### 5.1 HTTP 拦截
+
+```ts
+// packages/bun-web-sw/src/sw.ts
+self.addEventListener('fetch', (e: FetchEvent) => {
+  const port = resolveVirtualPort(new URL(e.request.url));
+  if (port == null) return;
+  e.respondWith(dispatchToKernel(port, e.request));
+});
+```
+
+- 虚拟主机格式：`http://<pid>.bun.local/` 或 `/__bun__/:port/*`。
+- Request body 以 `ReadableStream` transfer，零拷贝。
+
+### 5.2 WebSocket 桥
+
+浏览器 SW 无法处理 `Upgrade: websocket`，采用 **polyfill 方案**：
+
+```ts
+// 注入到每个 Process Worker
+globalThis.WebSocket = VirtualWebSocket;
+// VirtualWebSocket 通过 BroadcastChannel 直连 Kernel 中
+// Bun.serve({ websocket }) 的 handler
+```
+
+打包时由 Bundler 自动替换 `WebSocket` 符号为 `__bunWebSocket`。
+
+### 5.3 出站请求
+
+指向外部 origin 的 `fetch`/`WebSocket`，SW 直接透传；跨域受 CORS 限制（与 WebContainer 行为一致）。
+
+### 5.4 TCP/TLS 隧道（可选）
+
+为解锁 `postgres` / `redis` / 原始 TCP，提供可选的 WS 代理服务端：
+
+```
+wss://proxy/tunnel?target=host:port&proto=tcp|tls
+```
+
+客户端 `bun-web-net` 按配置自动选择直连或隧道，无配置时抛 `NotSupportedError` 并提示注入 `tunnelUrl`。
+
+---
+
+## 6. 插件体系（Hook Engine）
+
+### 6.1 Hook 命名空间
+
+```
+kernel:boot / kernel:shutdown
+vfs:read / vfs:write / vfs:stat / vfs:watch
+resolve:beforeResolve / resolve:afterResolve
+loader:load / loader:transform / loader:source-map
+process:beforeSpawn / process:afterSpawn / process:onExit
+net:fetch / net:websocket / net:serve
+shell:beforeCommand / shell:registerBuiltin / shell:afterCommand
+test:beforeEach / test:afterEach
+```
+
+### 6.2 核心类型
+
+```ts
+export interface BunWebPlugin {
+  name: string;
+  version?: string;
+  scopes?: Array<'kernel' | 'process' | 'sw' | 'shell'>;
+  setup(ctx: PluginContext): void | Promise<void>;
+}
+
+export interface PluginContext {
+  hooks: Hooks;                               // 全部 hook 强类型入口
+  fs: VFS;
+  registerShellBuiltin(name: string, impl: ShellBuiltin): void;
+  registerLoader(opts: LoaderPattern): void;  // 对齐 Bun.plugin({ setup })
+  logger: Logger;
+  abortSignal: AbortSignal;
+}
+```
+
+### 6.3 安全沙箱
+
+- 插件默认无 DOM、无 `fetch`；能力按 `scopes` 与 manifest 声明开放。
+- `Proxy` 包裹 `PluginContext`，未声明能力调用立即抛错。
+- 插件 CPU/内存超预算时 Kernel 熔断。
+- 跨 Worker 分发：源码以 swc 预打包 IIFE + capability 列表一起 `postMessage`，不 `eval`。
+
+### 6.4 与 Bun.plugin 的关系
+
+暴露与 Bun 一致的 `Bun.plugin({ name, setup })`，内部映射到 `loader:*` hook，保证 `bun-plugin-svelte`、`bun-plugin-yaml` 等现有插件直接复用。
+
+---
+
+## 7. Shell 命令集
+
+Shell 解析器直接移植自 `src/shell/`（纯算法 TS 化），执行器接收 `ShellContext`：
+
+```ts
+export interface ShellBuiltin {
+  name: string;
+  run(ctx: ShellContext): Promise<number>;  // exit code
+}
+export interface ShellContext {
+  argv: string[];
+  env: Record<string, string>;
+  cwd: string;
+  stdin: ReadableStream<Uint8Array>;
+  stdout: WritableStream<Uint8Array>;
+  stderr: WritableStream<Uint8Array>;
+  fs: VFS;
+  signal: AbortSignal;
+}
+```
+
+Phase 1 内置命令（面向 AI Agent 高频使用）：
+
+| 分组 | 命令 |
+|---|---|
+| 文件浏览 | `ls` `tree` `pwd` `cd` `stat` `file` `which` `readlink` |
+| 文件读写 | `cat` `head` `tail` `wc` `cp` `mv` `rm` `mkdir` `rmdir` `touch` `ln` `chmod` |
+| 查找过滤 | `grep` `find` `fd` `sed` `awk`(子集) `sort` `uniq` `cut` `tr` `xargs` |
+| 差异补丁 | `diff` `patch`（jsdiff） |
+| 压缩 | `tar` `gzip` `gunzip` `zip` `unzip`（pako + fflate） |
+| 网络 | `curl` `wget`（走 fetch + SW） |
+| 进程环境 | `ps` `kill` `env` `export` `echo` `true` `false` `sleep` `time` |
+| 管道助手 | `jq`（jq-wasm）`yq` `base64` `sha256sum` `md5sum` |
+| 版本控制 | `git`（isomorphic-git） |
+| 包管理 | `bun` `bunx` `npm`(→bun) `npx`(→bunx) `node`(→bun) |
+
+---
+
+## 8. Bun API 全覆盖
+
+兼容级别：**A** 完整等价 · **B** 功能等价有已知差异 · **C** 部分实现或降级 · **D** 存根（抛错但不缺 API 形状）
+
+### 8.1 Bun.* 顶层
+
+| API | 级别 | 实现策略 |
+|---|---|---|
+| `Bun.version/revision/main/env/argv/cwd` | A | 常量注入 + Kernel env 代理 |
+| `Bun.nanoseconds()` | A | `performance.now() * 1e6` |
+| `Bun.sleep/sleepSync` | A/B | async→setTimeout；sync→SAB Atomics.wait |
+| `Bun.gc(force)` | C | weakref cleanup；无真实 GC 控制 |
+| `Bun.inspect / Bun.deepEquals / Bun.deepMatch / Bun.peek` | A | 移植 src/bun.js/ 纯逻辑 |
+| `Bun.escapeHTML / Bun.stringWidth / Bun.color / Bun.semver` | A | 纯算法移植 |
+| `Bun.randomUUIDv7 / v5` | A | WebCrypto + 自实现 |
+| `Bun.hash.*` (wyhash/xxHash64/cityHash/murmur) | A | WASM 绑定 |
+| `Bun.CryptoHasher` | A | WebCrypto + blake3-wasm + sha3-wasm |
+| `Bun.password.hash/verify` | A | argon2-wasm + bcrypt-wasm |
+| `Bun.file / Bun.write / Bun.stdin/stdout/stderr` | A | VFS + Blob 包装 |
+| `Bun.mmap` | C | 退化为一次性 readFileSync，返回 Uint8Array 视图 |
+| `Bun.serve / server.*` | A/C | Kernel 端口表 + SW 转发；TLS/unix/reusePort 降级 |
+| `Bun.listen / Bun.connect` | C | 同源走 MessagePort；跨源需 WS 隧道 |
+| `Bun.udpSocket` | D | 无 UDP |
+| `Bun.spawn / spawnSync` | A/B | JS/TS→Worker；系统二进制→Shell builtin |
+| `Bun.$` (Shell) | A | bun-web-shell 完整实现 |
+| `Bun.Transpiler` | A | swc-wasm 包装，对齐选项 |
+| `Bun.build / Bun.plugin` | A | esbuild-wasm + hook 引擎 |
+| `Bun.Glob` | A | 移植自 src/glob/ |
+| `Bun.TOML.parse / Bun.YAML.parse` | A | @iarna/toml + yaml |
+| `Bun.dns.*` | C | DoH (1.1.1.1 JSON API) |
+| `Bun.S3Client / Bun.SQL / Bun.redis` | C | fetch + SigV4 / WS 代理；无代理时报错 |
+| `Bun.openInEditor` | D | emit 事件给宿主页 |
+| `bun:sqlite` | A | wa-sqlite + OPFS VFS |
+| `bun:test` | A | 移植 src/js/，snapshot 写 OPFS |
+| `bun:ffi` | D | 存根；允许 dlopen('.wasm') 扩展 |
+| `bun:jsc` | C | serialize→structuredClone；其余近似值 |
+
+### 8.2 Node.js 内建模块
+
+| 模块 | 级别 | 实现 |
+|---|---|---|
+| `node:fs` / `fs/promises` | A | VFS + SAB sync |
+| `node:path` `node:url` `node:querystring` `node:string_decoder` `node:punycode` | A | 纯算法 |
+| `node:os` | B | cpus=`navigator.hardwareConcurrency`，platform=`'browser'` |
+| `node:buffer` | A | buffer 包 + Bun 扩展补丁 |
+| `node:events` `node:stream` `node:stream/web` `node:stream/promises` | A | readable-stream |
+| `node:crypto` | A | WebCrypto + crypto-browserify + scrypt/ed25519/x25519 WASM |
+| `node:tls` | C | SW 层代理；createSecureContext 存根 |
+| `node:net` | C | Socket→WS 隧道；Server→Kernel 端口表 |
+| `node:http` `node:https` | A/B | net 之上构建 |
+| `node:http2` | C | 仅覆盖 request-like 子集；不承诺 session/stream/server 全语义 |
+| `node:dgram` | D | 存根 |
+| `node:dns` / `dns/promises` | C | 走 Bun.dns |
+| `node:zlib` | A | pako + fflate + brotli-wasm |
+| `node:child_process` | B | Worker 模拟 exec/spawn/fork |
+| `node:worker_threads` | A | Worker 直接对应 |
+| `node:cluster` | C | Worker + 端口共享近似 |
+| `node:process` | A | 完整 process 对象 |
+| `node:async_hooks` / `AsyncLocalStorage` | A | Zone 风格 polyfill |
+| `node:perf_hooks` | A | 原生 performance API |
+| `node:timers` / `timers/promises` | A | 原生 |
+| `node:v8` | C | serialize→structuredClone；其余存根 |
+| `node:vm` | B | `new Function` + realm polyfill |
+| `node:assert` `node:console` `node:util` `node:util/types` | A | 移植 src/js/node/ |
+| `node:test` | A | bun:test 别名层 |
+| `node:readline` / `readline/promises` | A | 绑定 stdio |
+| `node:module` | A | `createRequire` / `isBuiltin` / `register` loader hook |
+| `node:wasi` | B | wasi-js + VFS 绑定 |
+| `node:sqlite` | A | 映射到 bun:sqlite |
+
+### 8.3 Web 标准 API
+
+均为 A 级（浏览器原生 + Bun 扩展属性补丁）：`fetch`、`Request`、`Response`、`Headers`、`FormData`、`Blob`、`File`、`URL`、`URLSearchParams`、`WebSocket`（polyfill）、`ReadableStream`、`WritableStream`、`TransformStream`、`TextEncoder/Decoder`、`crypto`（WebCrypto）、`structuredClone`、`AbortController`、`performance`、`BroadcastChannel`、`MessageChannel`、`CompressionStream`、`WebAssembly`、`EventTarget`。
+
+特殊处：不承诺覆写原生 `navigator.userAgent`。运行时通过可配置 UA 标识与请求头注入策略兼容常见 UA 探测逻辑。
+
+---
+
+## 9. Compat Registry（符号 → 级别注册表）
+
+所有公开符号在发布时必须登记一个兼容级别，CI 强制校验：
+
+```ts
+// packages/bun-web-compat-registry/src/index.ts
+export type Level = 'A' | 'B' | 'C' | 'D';
+
+export interface CompatEntry {
+  symbol: string;     // e.g. 'Bun.serve', 'node:net.Socket'
+  level: Level;
+  notes?: string;
+  since?: string;     // semver
+}
+
+export const registry: CompatEntry[] = [ /* 自动从各包聚合 */ ];
+```
+
+CI 脚本 `scripts/gen-compat-matrix.ts`：
+1. 扫描 `packages/bun-types/**/*.d.ts` 提取所有符号。
+2. 对比 `registry`，漏登记则 build 失败。
+3. 产出 `COMPAT.md` 兼容矩阵，发布到文档站。
+
+---
+
+## 10. 仓库结构
+
+```
+packages/
+  bun-web-kernel/           # Kernel + 调度 + SAB syscall bridge
+  bun-web-vfs/              # OPFS/Mem overlay fs
+  bun-web-runtime/          # Process Worker bootstrap、Bun.* 实现
+  bun-web-node/             # node:* 全家桶 polyfill
+  bun-web-webapis/          # Web 标准 API 补丁层
+  bun-web-resolver/         # 模块解析（移植自 src/resolver/）
+  bun-web-transpiler/       # swc/esbuild WASM 封装
+  bun-web-installer/        # bun install（移植自 src/install/）
+  bun-web-bundler/          # Bun.build（esbuild-wasm + 自研 chunk 合并）
+  bun-web-shell/            # Bun.$ 解释器（移植自 src/shell/）
+  bun-web-shell-builtins/   # 所有 builtin shell 命令
+  bun-web-sw/               # Service Worker（HTTP + WS 虚拟化）
+  bun-web-test/             # bun:test 运行器
+  bun-web-sqlite/           # wa-sqlite OPFS VFS 绑定
+  bun-web-crypto/           # WebCrypto + argon2/bcrypt/blake3 WASM
+  bun-web-net/              # net/tls/http/http2 over WS 隧道
+  bun-web-dns/              # DoH 客户端
+  bun-web-hooks/            # Hook 引擎与类型
+  bun-web-plugin-api/       # 公共插件 SDK（对齐 Bun.plugin）
+  bun-web-agent/            # AI Agent 受限 shell + 审计 overlay
+  bun-web-compat-registry/  # 符号 → 级别注册表 + 类型校验
+  bun-web-client/           # 宿主页面 SDK（类 @webcontainer/api）
+  bun-web-proxy-server/     # 可选 WS/TCP 隧道服务端
+```
+
+宿主 SDK 使用方式（对齐 WebContainer API 风格）：
+
+```ts
+import { BunContainer } from '@bun-web/client';
+
+const bun = await BunContainer.boot();
+await bun.mount({
+  'index.ts': 'console.log("hi")',
+  'package.json': JSON.stringify({ name: 'demo' }),
+});
+
+const proc = await bun.spawn('bun', ['run', 'index.ts']);
+proc.output.pipeTo(terminal.writable);
+
+bun.on('server-ready', (port, url) => {
+  iframe.src = url;
+});
+```
+
+---
+
+## 11. 验收测试
+
+### 11.1 生态验收（Playwright 驱动真实浏览器）
+
+#### Express
+
+```sh
+bun add express && bun run server.ts
+```
+
+- `GET /` 返回 200，body 含 "Hello"。
+- `POST /echo`（JSON body）回显正确。
+- `express.static('./public')` 从 VFS 提供 `index.html`。
+- SW 拦截后用 `fetch` 从宿主页访问可得数据。
+- 并发 100 QPS × 10s 无 5xx。
+
+#### Koa
+
+```sh
+bun add koa koa-router
+```
+
+- 中间件链顺序正确（前后置日志时序断言）。
+- `ctx.throw(418)` 返回 418 JSON。
+- 流式响应（`fs.createReadStream`）分块到达页面。
+
+#### Vite + React + TypeScript
+
+```sh
+bun create vite app --template react-ts
+cd app && bun install && bun run dev
+```
+
+- iframe 预览页面渲染 `<App />`。
+- 修改 `App.tsx` → OPFS 写入 → Vite HMR → 界面热更新（**不整页刷新**）。
+- `import.meta.hot` 生效。
+- `bun run build` 产出 `dist/`，SW 托管后生产预览通过。
+- `tsc --noEmit` 零错误。
+
+#### tsx
+
+```sh
+bunx tsx script.ts
+```
+
+- 支持 top-level `await`、`import.meta.url`、`process.argv`。
+- `tsx watch` 监听 VFS 变更自动重启。
+- `paths`/`exports`/`.ts↔.js` 扩展名互换行为与原生一致。
+
+#### Shell / AI Agent 命令
+
+顺序执行，全部 exit code 0：
+
+```sh
+mkdir -p src && cd src
+echo 'hello world' > a.txt
+cat a.txt | tr a-z A-Z | tee b.txt
+grep -n HELLO b.txt
+find .. -name '*.txt' | xargs wc -l
+ls -la && tree -L 2 ..
+curl -sS http://localhost:3000/ | jq .
+git init && git add . && git commit -m init
+```
+
+### 11.2 Bun 官方测试用例直通
+
+目标：能以 `bun-web-runtime` 作为执行宿主，直接运行 Bun 官方测试集中的 **JS/TS 层用例**（不涉及原生二进制/FFI 的部分），且通过率 ≥ 95%。
+
+```sh
+# 在 bun-web-runtime 宿主环境中执行（非浏览器构建）
+USE_BUN_WEB_RUNTIME=1 bun test test/js/bun/http/serve.test.ts
+USE_BUN_WEB_RUNTIME=1 bun test test/js/node/
+USE_BUN_WEB_RUNTIME=1 bun test test/js/web/
+```
+
+**分类跑通策略**
+
+| 测试目录 | 跑通要求 | 不含内容 |
+|---|---|---|
+| `test/js/web/` | **100%** | 无 native 依赖 |
+| `test/js/node/` | ≥ 95% | 跳过 `dgram`、`cluster`（D 级）与 `http2` 全语义用例（C 级） |
+| `test/js/bun/http/` | ≥ 90% | 跳过 TLS 套件 |
+| `test/js/bun/crypto/` | ≥ 90% | 跳过 `ffi` / `dlopen` |
+| `test/js/bun/shell/` | ≥ 85% | 跳过系统二进制依赖用例 |
+| `test/cli/install/` | ≥ 80% | 跳过 `postinstall` node-gyp |
+| `test/bundler/` | ≥ 80% | 跳过 WASM/native plugin 用例 |
+
+**排除清单机制**（避免误判）
+
+使用 `test/integration/bun-in-browser/skip-in-browser.txt`，每行一条相对路径 + 原因注释，CI 自动跳过；新增跳过条目需 PR 说明原因，对应 issue 链接。
+
+**回归门禁**
+
+- 官方测试集通过率**不得低于上次合并时的基线**。
+- 任何级别从 A/B 退化为 C/D 需在 PR 中显式标注 + compat-registry 更新，否则 CI 阻塞。
+
+### 11.3 插件体系验收
+
+- 自定义插件能注册新 loader（`.vue` → compiled JS）并被 `bun run` 拾取。
+- 插件能挂 `net:fetch` hook 改写请求 Header，影响 Express 实际收到的值。
+- 卸载插件后所有副作用回滚，无泄漏句柄（`ps` + 内存快照验证）。
+
+### 11.4 API 表面完整性
+
+- 自动扫描所有 `Bun.*` 与 `node:*` 符号，`typeof` 检查非 `undefined`。
+- D 级符号调用时抛预期的 `{ code: 'ERR_BUN_WEB_UNSUPPORTED' }`。
+- `tsc --noEmit` 对 `bun-web-runtime` + `bun-types` 零错误。
+
+### 11.5 性能基线（参考值）
+
+| 场景 | 目标 |
+|---|---|
+| Kernel 冷启动 | < 1.5s |
+| `bun install express`（首次） | < 8s |
+| `bun install express`（缓存命中） | < 1s |
+| Vite dev 冷启动 | < 6s |
+| HMR round-trip | < 300ms |
+| `grep -r` 扫描 10k 行 | < 500ms |
+
+### 11.6 稳定性
+
+- 连续 1h 不间断 HMR + 终端操作，无 Worker 崩溃、无 OPFS 句柄泄漏。
+- SW 被浏览器回收后能自动复活，`Bun.serve` 进行中连接可自愈。
+
+### 11.7 测试文件与状态
+
+- 核心测试文件与实时状态统一维护在 [bun-in-browser-webcontainer-implementation-plan.md](./bun-in-browser-webcontainer-implementation-plan.md) 的“测试文件与测试状态”章节。
+- 当前已落盘文件：
+  - `test/integration/bun-in-browser/acceptance.test.ts`
+  - `test/integration/bun-in-browser/run-official-tests.ts`
+  - `test/integration/bun-in-browser/skip-in-browser.txt`
+- 运行结果以最新测试执行记录为准，文档状态必须与 CI/本地执行结果一致。
+
+---
+
+## 12. 分阶段里程碑
+
+| 阶段 | 核心交付 | 验收入口 |
+|---|---|---|
+| M1 | Kernel + VFS + 单 Worker 运行 TS | `bun run script.ts` → `console.log` 输出 |
+| M2 | Resolver + `node:fs/path/events` polyfill | 跑通 cowsay、chalk 等纯 JS 包 |
+| M3 | `bun install`（MVP）+ OPFS 持久化 | 装 npm 包并持久化到 OPFS |
+| M4 | Service Worker + `Bun.serve` HTTP | iframe 预览 Hono / Elysia 应用 |
+| M5 | WebSocket + `Bun.spawn` + `bun:test` | HMR 热更新 + 单测运行 |
+| M6 | `bun build` + `bun:sqlite` + Shell | 接近完整开发体验 |
+| M7 | 插件体系 + Compat Registry CI | 生态插件开箱可用，兼容矩阵 100% 覆盖 |
+| M8 | 官方测试集直通（≥ 95% 目标） | CI 绿灯，发布 `@bun-web/client` beta |
+
+---
+
+## 13. 关键风险
+
+| 风险 | 缓解措施 |
+|---|---|
+| `crossOriginIsolated` 部署要求 | 文档化；提供 `COOP`/`COEP` 中间件 helper |
+| SAB 在 iOS Safari 受限 | M1 提供纯 async fallback 模式（不支持同步 API） |
+| SW 生命周期回收 | `Clients.claim` + 心跳保活；`activate` 时重建端口表 |
+| ESM Blob URL 内存膨胀 | LRU 置换 + `URL.revokeObjectURL` GC 策略 |
+| esbuild/swc WASM 性能（3-10x 退化） | 先铺功能，热路径后用 WASM SIMD + 多 Worker 并行 |
+| FFI / N-API 不可用 | 不兼容清单自动化生成，文档化 |
+| OPFS 跨源隔离 | 子目录隔离多项目；不支持跨 origin 共享 |
+
+---
+
+## 14. 参考资料
+
+- [WebContainers 架构概述](https://blog.stackblitz.com/posts/webcontainers-announcement/)
+- [Bun 源码 - src/shell/](../../src/shell/)
+- [Bun 源码 - src/resolver/](../../src/resolver/)
+- [Bun 源码 - src/install/](../../src/install/)
+- [Bun 源码 - src/js/node/](../../src/js/node/)
+- [实施计划](./bun-in-browser-webcontainer-implementation-plan.md)
+- [模块 API 设计文档](./bun-in-browser-module-design.md)
+- [wa-sqlite](https://github.com/rhashimoto/wa-sqlite)
+- [isomorphic-git](https://isomorphic-git.org/)
+- [esbuild-wasm](https://esbuild.github.io/getting-started/#wasm)
+- [@swc/wasm-web](https://swc.rs/docs/usage/wasm)
