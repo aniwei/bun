@@ -1,3 +1,5 @@
+import { SyncSyscallUnavailableError } from './errors'
+
 export const SYSCALL_OP = {
   FS_READ: 0x01,
   FS_WRITE: 0x02,
@@ -30,6 +32,7 @@ export interface SyscallResponse {
 
 export class SyscallBridge {
   readonly isAsync: boolean
+  private seq = 0
 
   constructor(private readonly sab: SharedArrayBuffer | null) {
     this.isAsync = sab == null || typeof Atomics.wait !== 'function'
@@ -37,19 +40,25 @@ export class SyscallBridge {
 
   callSync(op: SyscallOp, payload: Uint8Array): SyscallResponse {
     if (this.isAsync) {
-      throw new Error('Synchronous syscall is unavailable in async fallback mode')
+      throw new SyncSyscallUnavailableError()
     }
 
+    const seq = this.seq
+    this.seq += 1
+
     return {
-      seq: 0,
+      seq,
       ok: true,
       payload: new Uint8Array([op, ...payload]),
     }
   }
 
   async callAsync(op: SyscallOp, payload: Uint8Array): Promise<SyscallResponse> {
+    const seq = this.seq
+    this.seq += 1
+
     return {
-      seq: 0,
+      seq,
       ok: true,
       payload: new Uint8Array([op, ...payload]),
     }

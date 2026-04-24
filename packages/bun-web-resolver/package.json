@@ -1,0 +1,14 @@
+{
+  "name": "@mars/web-resolver",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "src"
+  ],
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

@@ -90,6 +90,15 @@ Process Worker                    Kernel Worker
 
 这是整个方案最关键的 trick，与 WebContainer 的 sync syscall 机制一致。
 
+补充：SAB 仅承担同步 syscall 数据面（FS/NET/PROCESS 操作）。
+进程生命周期与 stdio 走控制面 `MessagePort` 协议（`stdout`/`stderr`/`exit` 消息），由 Kernel 统一汇聚到事件总线，再驱动 `waitpid` 与上层订阅回调。两条链路解耦可避免把高频日志流量塞入同步桥，降低阻塞风险。
+
+控制面生命周期约束：`attachProcessPort(pid, port)` 绑定是幂等替换语义（同 pid 重新绑定会先清理旧监听），进程 `exit/kill` 后必须自动解绑端口监听并回收 stdio channel，避免长时会话中的监听器泄漏。
+运行时侧通过 `ProcessSupervisor` 统一消费 Kernel `processExit` 事件并编排回调，减少上层直接操作 Kernel 事件细节。
+在更高层入口上，运行时可进一步通过 `spawnSupervisedProcess()` 将 `kernel.spawn()`、控制面挂载与 `bootstrapProcessWorker()` 收敛为一次调用，作为后续 `Bun.spawn`/真实 runtime 入口的过渡形态。
+在此基础上，runtime 还可通过 `createChildProcessHandle()` 将受监管进程适配为最小 `ChildProcess` 句柄（`pid/stdout/stderr/exited/kill`），作为后续 `spawn.ts` 公共 API 的桥接层。
+当前 M1 已在 `spawn.ts` 提供薄 `spawn()` 入口：复用 `RuntimeProcessSupervisor.spawnSupervisedProcess()` 与 `createChildProcessHandle()`，输出最小 `ChildProcess` 形状并收敛 `onExit` 回调；已通过集成与 acceptance 用例覆盖 `stdin: pipe`、`kill→exited`、`onExit(proc, code, signal=null)` 契约，以及 `stdout/stderr` 的 `pipe/inherit/ignore` 最小语义（`ignore` 时流立即关闭、`inherit` 不进入子句柄 pipe）；`spawnSync()` 为明确占位错误（`Error: spawnSync is not implemented in bun-web-runtime M1`），保留到 M5-3 实现；m1-acceptance.test.ts 15/15 通过（含三类新增边界 smoke）。M1 全量完成。
+
 ---
 
 ## 4. 模块系统
@@ -100,6 +109,11 @@ Process Worker                    Kernel Worker
 - Node `exports`/`imports`/`conditions`（`browser`/`bun`/`import`/`require`）。
 - tsconfig `paths`、`baseUrl`。
 - `.ts` ↔ `.js` 扩展名互换。
+
+**M2 已交付**：`@mars/web-resolver` 包已落盘（`packages/bun-web-resolver/`）。
+- `resolve(specifier, fromFile, options)` — 相对/绝对/裸包/`#`-imports 全路径；`package.json` exports 完整实现（条件导出、子路径、`*` 模式、嵌套数组 fallback）；node_modules walk-up；
+- `createTsconfigPathResolver(config)` — `paths` 精确/通配符/多候选、`baseUrl` 回退；
+- m2-resolver.test.ts 33/33 pass。
 
 ### 4.2 Transpiler
 
@@ -149,7 +163,7 @@ globalThis.WebSocket = VirtualWebSocket;
 // Bun.serve({ websocket }) 的 handler
 ```
 
-打包时由 Bundler 自动替换 `WebSocket` 符号为 `__bunWebSocket`。
+打包时由 Bundler 自动替换 `WebSocket` 符号为 `__marsWebSocket`。
 
 ### 5.3 出站请求
 
@@ -185,7 +199,7 @@ test:beforeEach / test:afterEach
 ### 6.2 核心类型
 
 ```ts
-export interface BunWebPlugin {
+export interface MarsWebPlugin {
   name: string;
   version?: string;
   scopes?: Array<'kernel' | 'process' | 'sw' | 'shell'>;
@@ -360,10 +374,11 @@ CI 脚本 `scripts/gen-compat-matrix.ts`：
 
 ```
 packages/
-  bun-web-kernel/           # Kernel + 调度 + SAB syscall bridge
-  bun-web-vfs/              # OPFS/Mem overlay fs
-  bun-web-runtime/          # Process Worker bootstrap、Bun.* 实现
-  bun-web-node/             # node:* 全家桶 polyfill
+  bun-web-shared/           # 对应 package: @mars/web-shared
+  bun-web-kernel/           # 对应 package: @mars/web-kernel
+  bun-web-vfs/              # 对应 package: @mars/web-vfs
+  bun-web-runtime/          # 对应 package: @mars/web-runtime
+  bun-web-node/             # 对应 package: @mars/web-node（process 继承 @mars/web-shared）
   bun-web-webapis/          # Web 标准 API 补丁层
   bun-web-resolver/         # 模块解析（移植自 src/resolver/）
   bun-web-transpiler/       # swc/esbuild WASM 封装
@@ -385,10 +400,12 @@ packages/
   bun-web-proxy-server/     # 可选 WS/TCP 隧道服务端
 ```
 
+当前实现约定：`packages/bun-web-node/src/process.ts` 通过导入 `@mars/web-shared` 中导出的 `TypedEventEmitter` 复用事件系统；`packages/bun-web-node/src/events-stream.ts` 已提供 `node:events`、`node:stream` 以及 `node:stream/web`、`node:stream/promises` 的最小主路径。后续其他模块统一通过 `@mars/web-*` scoped package 引用跨包能力，不再使用跨包相对路径。
+
 宿主 SDK 使用方式（对齐 WebContainer API 风格）：
 
 ```ts
-import { BunContainer } from '@bun-web/client';
+import { BunContainer } from '@mars/web-client';
 
 const bun = await BunContainer.boot();
 await bun.mount({
@@ -472,14 +489,22 @@ git init && git add . && git commit -m init
 
 ### 11.2 Bun 官方测试用例直通
 
-目标：能以 `bun-web-runtime` 作为执行宿主，直接运行 Bun 官方测试集中的 **JS/TS 层用例**（不涉及原生二进制/FFI 的部分），且通过率 ≥ 95%。
+目标：能以 `@mars/web-runtime` 作为执行宿主，直接运行 Bun 官方测试集中的 **JS/TS 层用例**（不涉及原生二进制/FFI 的部分），且通过率 ≥ 95%。
 
 ```sh
-# 在 bun-web-runtime 宿主环境中执行（非浏览器构建）
+# 在 @mars/web-runtime 宿主环境中执行（非浏览器构建）
 USE_BUN_WEB_RUNTIME=1 bun test test/js/bun/http/serve.test.ts
 USE_BUN_WEB_RUNTIME=1 bun test test/js/node/
 USE_BUN_WEB_RUNTIME=1 bun test test/js/web/
 ```
+
+当前进展（2026-04-25）：
+
+- 已在 bun-in-browser 集成层先落地 `fs/path/module` 官方语义回放子集（非 mock），用于锁定 `node:module` 的 VFS node_modules 裸包解析、包内相对 require、require cache，以及 `path.parse/format` 与 `fs.realpath/lstat` 关键行为。
+- 已完成首批 `test/js/node` 真实目录门禁子集（`module/node-module-module` + `path/parse-format` + `path/to-namespaced-path` + `path/basename` + `url/pathToFileURL`）：`USE_BUN_WEB_RUNTIME=1 bun test ...` 结果 39 pass / 0 fail。
+- 已完成 `test/js/node/fs` 稳定子集（`fs.test.ts` + `fs-mkdir.test.ts`）：264 pass / 5 skip / 0 fail。
+- 当前阻塞点：`fs-stats-truncate.test.ts` 依赖 `bun:internal-for-testing`（当前宿主缺失）与 `fs-stats-constructor.test.ts` 的 `Stats(...)` 无 `new` 构造语义差异（2 fail）。
+- 下一步修复 `Stats` 构造行为并补 `bun:internal-for-testing` 映射后，接入 `run-official-tests.ts` 的目录通过率与 baseline 回归判断。
 
 **分类跑通策略**
 
@@ -512,7 +537,7 @@ USE_BUN_WEB_RUNTIME=1 bun test test/js/web/
 
 - 自动扫描所有 `Bun.*` 与 `node:*` 符号，`typeof` 检查非 `undefined`。
 - D 级符号调用时抛预期的 `{ code: 'ERR_BUN_WEB_UNSUPPORTED' }`。
-- `tsc --noEmit` 对 `bun-web-runtime` + `bun-types` 零错误。
+- `tsc --noEmit` 对 `@mars/web-runtime` + `bun-types` 零错误。
 
 ### 11.5 性能基线（参考值）
 
@@ -546,13 +571,13 @@ USE_BUN_WEB_RUNTIME=1 bun test test/js/web/
 | 阶段 | 核心交付 | 验收入口 |
 |---|---|---|
 | M1 | Kernel + VFS + 单 Worker 运行 TS | `bun run script.ts` → `console.log` 输出 |
-| M2 | Resolver + `node:fs/path/events` polyfill | 跑通 cowsay、chalk 等纯 JS 包 |
+| M2 | Resolver + `node:fs/path/events/stream` polyfill（含 fs/path/module 官方语义回放子集） | 跑通 cowsay、chalk 等纯 JS 包 |
 | M3 | `bun install`（MVP）+ OPFS 持久化 | 装 npm 包并持久化到 OPFS |
 | M4 | Service Worker + `Bun.serve` HTTP | iframe 预览 Hono / Elysia 应用 |
 | M5 | WebSocket + `Bun.spawn` + `bun:test` | HMR 热更新 + 单测运行 |
 | M6 | `bun build` + `bun:sqlite` + Shell | 接近完整开发体验 |
 | M7 | 插件体系 + Compat Registry CI | 生态插件开箱可用，兼容矩阵 100% 覆盖 |
-| M8 | 官方测试集直通（≥ 95% 目标） | CI 绿灯，发布 `@bun-web/client` beta |
+| M8 | 官方测试集直通（≥ 95% 目标） | CI 绿灯，发布 `@mars/web-client` beta |
 
 ---
 

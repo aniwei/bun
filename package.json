@@ -4,7 +4,14 @@
   "version": "1.3.13",
   "workspaces": [
     "./packages/bun-types",
-    "./packages/@types/bun"
+    "./packages/@types/bun",
+    "./packages/bun-web-kernel",
+    "./packages/bun-web-vfs",
+    "./packages/bun-web-runtime",
+    "./packages/bun-web-node",
+    "./packages/bun-web-shared",
+    "./packages/bun-web-webapis",
+    "./packages/bun-web-resolver"
   ],
   "devDependencies": {
     "@lezer/common": "^1.2.3",

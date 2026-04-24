@@ -11,6 +11,14 @@
 > 本文档是实施前的接口契约。每次开始某阶段编码前，对应模块的类名/方法签名须已在此文档中冻结。
 > 实施时以本文档为准；发现需变更时先修改本文档并在 PR 中注明理由，再同步修改实施计划。
 
+实施快照（2026-04-25）：
+
+- `@mars/web-node` 已落地 `node:fs/path/url/module` 关键 API 增量：`lstatSync/realpathSync`、`path.parse/format/toNamespacedPath`、`fileURLToPath/pathToFileURL`、`createRequireWithVfs`。
+- `@mars/web-node` 已导出 `builtinModulesList`，并补齐 `node:buffer` 注册。
+- `test/integration/bun-in-browser/` 已开始承载 `fs/path/module` 官方语义回放子集，作为 M2-6 迁移到 `test/js/node` 门禁前的稳定性锁定层。
+- `test/js/node` 真实门禁已推进两批：`module/path/url` 子集 39 pass / 0 fail；`fs` 稳定子集（`fs.test.ts` + `fs-mkdir.test.ts`）264 pass / 5 skip / 0 fail。
+- 当前 `fs` 差距集中在 `bun:internal-for-testing` 依赖映射与 `Stats(...)` 构造语义（无 `new`）对齐，修复后将并入目录级 baseline 门禁。
+
 ---
 
 ## 命名规范
@@ -42,11 +50,30 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 - 实现文件按职责单词命名，如 `overlay-fs.ts`、`syscall-bridge.ts`。
 - 类型声明文件统一后缀 `.types.ts`，可被跨包引用。
 
+### 包管理规范（package + pnpm workspace）
+
+- 每个模块必须是 `packages/` 下的独立 package，并包含自身 `package.json`。
+- package 名统一使用 `@mars/web-*` scoped 命名，不再使用 `bun-web-*` 作为 package name。
+- 模块间依赖通过 `pnpm workspace` 统一管理，禁止绕过 workspace 直接引用未声明依赖。
+- 包间引用使用 workspace 版本约束（如 `workspace:*`），保持本地联调与 CI 解析一致。
+- 源码跨包依赖统一通过 package name 导入，例如 `@mars/web-vfs`、`@mars/web-shared`，禁止 `../../bun-web-*/src/*` 形式的跨包相对路径。
+- 新增模块时需同时补齐 `package.json` 的 `name`、`exports`、`types`（如有）与最小脚本入口。
+
+### Package 交付清单
+
+- 每个目录位于 `packages/bun-web-*` 的模块至少包含：`src/index.ts`、`package.json`、可被 workspace 解析的 `@mars/web-*` 包名。
+- `package.json` 必填最小字段：`name`、`private`、`version`、`type`、`exports`、`files`。
+- 跨包依赖必须声明在 `dependencies`，并使用 `workspace:*`。
+- 根目录需维护 `pnpm-workspace.yaml`，并保证覆盖 `packages/*`。
+- 根 `package.json` 的 `workspaces` 需与 pnpm workspace 配置保持一致。
+
+说明：物理目录仍保持 `packages/bun-web-*`，文档中的逻辑包名与源码 import 统一使用 `@mars/web-*`。
+
 ### 类命名
 
 - `PascalCase`，与所属包功能对应，如 `KernelProcess`、`OverlayFS`。
 - 单例类（全局唯一）加 `Manager` 或 `Registry` 后缀，如 `ProcessManager`、`CompatRegistry`。
-- 错误类统一后缀 `Error`，继承 `BunWebError`，如 `SyscallError`、`VFSNotFoundError`。
+- 错误类统一后缀 `Error`，继承 `MarsWebError`，如 `SyscallError`、`VFSNotFoundError`。
 - 内部实现类加 `_` 前缀或放入 `internal/` 子目录，不在 `index.ts` 导出。
 
 ### 错误码约定
@@ -54,7 +81,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 D 级 API 的存根调用统一抛出：
 
 ```ts
-throw new BunWebUnsupportedError('Bun.udpSocket', {
+throw new MarsWebUnsupportedError('Bun.udpSocket', {
   code: 'ERR_BUN_WEB_UNSUPPORTED',
   level: 'D',
 });
@@ -65,34 +92,36 @@ throw new BunWebUnsupportedError('Bun.udpSocket', {
 ## 包依赖关系（顶层）
 
 ```
-bun-web-client
-  └─ bun-web-runtime
-       ├─ bun-web-kernel  ←→  bun-web-vfs
+@mars/web-client
+  └─ @mars/web-runtime
+  ├─ @mars/web-shared
+    ├─ @mars/web-kernel  ←→  @mars/web-vfs
        │    └─ (SAB Bridge)
-       ├─ bun-web-resolver
-       ├─ bun-web-transpiler
-       ├─ bun-web-node
-       │    └─ bun-web-webapis
-       ├─ bun-web-net
-       │    └─ bun-web-dns
-       ├─ bun-web-shell
-       │    └─ bun-web-shell-builtins
-       ├─ bun-web-bundler
-       │    └─ bun-web-transpiler
-       ├─ bun-web-test
-       ├─ bun-web-sqlite
-       └─ bun-web-crypto
-bun-web-sw  (独立 Worker 上下文，不 import runtime)
-bun-web-hooks  ←  bun-web-plugin-api
-bun-web-compat-registry  ←  所有包（注册时依赖）
-bun-web-agent  ←  bun-web-shell + bun-web-runtime
-bun-web-proxy-server  (可选独立服务端，Node/Deno/Bun 运行)
-bun-web-installer  ←  bun-web-vfs + bun-web-resolver
+    ├─ @mars/web-resolver
+    ├─ @mars/web-transpiler
+    ├─ @mars/web-node
+  │    ├─ @mars/web-shared
+    │    └─ @mars/web-webapis
+    ├─ @mars/web-net
+    │    └─ @mars/web-dns
+    ├─ @mars/web-shell
+    │    └─ @mars/web-shell-builtins
+    ├─ @mars/web-bundler
+    │    └─ @mars/web-transpiler
+    ├─ @mars/web-test
+    ├─ @mars/web-sqlite
+    └─ @mars/web-crypto
+@mars/web-sw  (独立 Worker 上下文，不 import runtime)
+@mars/web-hooks  ←  @mars/web-plugin-api
+@mars/web-compat-registry  ←  所有包（注册时依赖）
+@mars/web-agent  ←  @mars/web-shell + @mars/web-runtime
+@mars/web-proxy-server  (可选独立服务端，Node/Deno/Bun 运行)
+@mars/web-installer  ←  @mars/web-vfs + @mars/web-resolver
 ```
 
 ---
 
-## 1. `bun-web-kernel`
+## 1. `@mars/web-kernel`
 
 > 实施计划：M1-1, M1-2, M1-7 | RFC §1（Kernel Worker）、§3（SAB Bridge）、§13（iOS fallback）
 
@@ -140,19 +169,31 @@ export interface ProcessDescriptor {
 }
 
 // kernel.ts
-export class Kernel {
+export type KernelEvents = {
+  stdio: (payload: { pid: Pid; kind: 'stdout' | 'stderr'; data: string }) => void;
+  processExit: (payload: { pid: Pid; code: number }) => void;
+};
+
+export class Kernel extends TypedEventEmitter<KernelEvents> {
   static readonly instance: Kernel;
 
   static async boot(config?: KernelConfig): Promise<Kernel>;
   static shutdown(): Promise<void>;
 
   get processes(): ProcessTable;
-  get vfs(): import('../bun-web-vfs').VFS;
+  get vfs(): import('@mars/web-vfs').VFS;
   get syscallBridge(): SyscallBridge;
 
   spawn(opts: SpawnOptions): Promise<ProcessDescriptor>;
   kill(pid: Pid, signal?: number): void;
   waitpid(pid: Pid): Promise<number>;            // exit code
+
+  // stdio / lifecycle control-plane
+  allocateStdio(pid: Pid): { stdoutPort: MessagePort; stderrPort: MessagePort };
+  onStdio(pid: Pid, listener: (kind: 'stdout' | 'stderr', data: string) => void): () => void;
+  // idempotent replace for same pid; auto-detached on process exit/kill
+  attachProcessPort(pid: Pid, port: MessagePort): () => void;
+  notifyExit(pid: Pid, code: number): void;
 
   // 端口表（供 Bun.serve 注册）
   registerPort(pid: Pid, port: number): void;
@@ -219,7 +260,7 @@ export function createBridge(port: MessagePort): SyscallBridge;
 
 ---
 
-## 2. `bun-web-vfs`
+## 2. `@mars/web-vfs`
 
 > 实施计划：M1-3, M1-4, M3-5 | RFC §2（三层 VFS）
 
@@ -332,7 +373,7 @@ export class PackageCacheStore {
 
 ---
 
-## 3. `bun-web-runtime`
+## 3. `@mars/web-runtime`
 
 > 实施计划：M1-5, M4-2, M5-3, M8-5 | RFC §1（Process Worker）、§8.1（Bun.* API）
 
@@ -343,6 +384,7 @@ packages/bun-web-runtime/
   src/
     index.ts
     process-bootstrap.ts   # Process Worker 入口，Bun 全局注入
+    process-supervisor.ts  # Runtime 侧进程控制面编排（attach/onExit/cleanup）
     bun-globals.ts         # Bun.version/env/argv/cwd 等常量注入
     serve.ts               # Bun.serve() 实现
     spawn.ts               # Bun.spawn / Bun.spawnSync
@@ -367,7 +409,7 @@ packages/bun-web-runtime/
 ```ts
 // process-bootstrap.ts
 export interface ProcessBootstrapOptions {
-  kernel: import('../bun-web-kernel').Kernel;
+  kernel: import('@mars/web-kernel').Kernel;
   pid: number;
   argv: string[];
   env: Record<string, string>;
@@ -377,6 +419,31 @@ export interface ProcessBootstrapOptions {
 
 export async function bootstrapProcessWorker(opts: ProcessBootstrapOptions): Promise<void>;
 // 在 Process Worker 顶层调用，注入全局 Bun / process / require 等
+
+// process-supervisor.ts
+export interface AttachProcessControlOptions {
+  pid: number;
+  port: MessagePort;
+  onExit?: (code: number) => void;
+}
+
+export interface BootstrapSupervisedProcessOptions {
+  bootstrap: ProcessBootstrapOptions;
+  onExit?: (code: number) => void;
+}
+
+export interface SpawnSupervisedProcessOptions extends import('@mars/web-kernel').SpawnOptions {
+  sabBuffer?: SharedArrayBuffer | null;
+  onExit?: (code: number) => void;
+}
+
+export class RuntimeProcessSupervisor {
+  constructor(kernel: import('@mars/web-kernel').Kernel);
+  attachProcessControl(options: AttachProcessControlOptions): () => void;
+  bootstrapSupervisedProcess(options: BootstrapSupervisedProcessOptions): Promise<BootstrappedContext & { exited: Promise<number>; onStdio(listener: (kind: 'stdout' | 'stderr', data: string) => void): () => void; cleanup(): void }>;
+  spawnSupervisedProcess(options: SpawnSupervisedProcessOptions): Promise<BootstrappedContext & { descriptor: import('@mars/web-kernel').ProcessDescriptor; exited: Promise<number>; onStdio(listener: (kind: 'stdout' | 'stderr', data: string) => void): () => void; cleanup(): void }>;
+  dispose(): void;
+}
 
 // serve.ts
 export interface ServeOptions<T = unknown> {
@@ -423,8 +490,19 @@ export interface ChildProcess {
   unref(): void;
 }
 
+export function createChildProcessHandle(
+  kernel: import('@mars/web-kernel').Kernel,
+  supervised: Awaited<ReturnType<RuntimeProcessSupervisor['spawnSupervisedProcess']>>,
+  options?: Pick<SpawnOptions, 'stdin' | 'stdout' | 'stderr' | 'onExit'>,
+): ChildProcess;
+
 export function spawn(opts: SpawnOptions): ChildProcess;
 export function spawnSync(opts: SpawnOptions): SyncSubprocess;
+
+// M1 当前状态：spawn() 为薄入口实现，内部复用 RuntimeProcessSupervisor + createChildProcessHandle。
+// 已覆盖最小行为：`stdin: 'pipe'` 返回可写句柄；`kill()` 驱动 `exited`；`onExit(proc, code, signal)` 中 signal 当前固定为 null；`stdout/stderr` 支持 `pipe/inherit/ignore`（inherit/ignore 不进入子句柄 pipe）。
+// spawnSync() 为明确占位，调用时抛 Error("spawnSync is not implemented in bun-web-runtime M1")；后续在 M5-3 完成同步语义与缓冲输出契约。
+// m1-acceptance.test.ts 已通过 15/15：含 stdout ignore 流关闭断言、stdout inherit 不进入子 pipe 断言、spawnSync 占位报错断言。
 
 // module-registry.ts
 export class ModuleRegistry {
@@ -449,7 +527,7 @@ export class BlobURLPool {
 
 ---
 
-## 4. `bun-web-vfs` → `bun-web-kernel` 内 `syscall-handler.ts`
+## 4. `@mars/web-vfs` → `@mars/web-kernel` 内 `syscall-handler.ts`
 
 （Kernel 侧：处理来自 Process Worker 的 syscall 请求，分发到 VFS / 进程表）
 
@@ -470,52 +548,57 @@ export class SyscallHandler {
 
 ---
 
-## 5. `bun-web-resolver`
+## 5. `@mars/web-resolver`
 
-> 实施计划：M2-1, M2-2 | RFC §4.1（Resolver）
+> 实施计划：M2-1, M2-2 | RFC §4.1（Resolver）| **M2 已完成**
 
-### 文件结构
+### 文件结构（已交付）
 
 ```
 packages/bun-web-resolver/
   src/
-    index.ts
-    resolve.ts           # 主解析入口
-    conditions.ts        # exports/imports/conditions 解析
-    tsconfig-paths.ts    # tsconfig paths/baseUrl
-    extension-map.ts     # .ts↔.js / .tsx↔.jsx 映射
-    package-json.ts      # package.json 缓存读取
-    resolver.types.ts
+    index.ts           # 导出 resolve / resolveExports / resolveImports / createTsconfigPathResolver
+    resolve.ts         # 主解析入口（相对/绝对/裸包/#-imports + exports/imports 完整算法）
+    tsconfig-paths.ts  # tsconfig paths/baseUrl 映射（精确/通配符/多候选/回退）
 ```
 
-### 核心类设计
+### M2 实际 API（已落盘）
 
 ```ts
-// resolver.types.ts
-export interface ResolveOptions {
-  conditions?: string[];    // 默认 ['browser', 'bun', 'import', 'require']
-  extensions?: string[];    // 默认 ['.ts','.tsx','.js','.jsx','.json']
-  tsconfig?: TsConfigPaths;
-  vfs: import('../bun-web-vfs').VFS;
-  cwd?: string;
-}
-
-export interface ResolveResult {
-  path: string;             // 绝对路径
-  type: 'esm' | 'cjs' | 'builtin' | 'data';
-  sideEffects: boolean;
-}
-
 // resolve.ts
-export class Resolver {
-  constructor(opts: ResolveOptions);
-
-  resolve(specifier: string, fromFile: string): ResolveResult;
-  resolveAsync(specifier: string, fromFile: string): Promise<ResolveResult>;
-
-  // 批量预解析（bundler 用）
-  resolveAll(specifiers: string[], fromFile: string): ResolveResult[];
+export interface ResolverFs {
+  existsSync(path: string): boolean
+  readFileSync(path: string): string | null
 }
+
+export interface ResolveOptions {
+  conditions?: string[]   // 默认 ['browser', 'import', 'default']
+  extensions?: string[]   // 默认 ['.ts','.tsx','.js','.jsx','.json']
+  fs?: ResolverFs
+}
+
+export function resolve(specifier: string, fromFile: string, options?: ResolveOptions): string | null
+export function resolveExports(exports: ExportsField, subpath: string, conditions: string[]): string | null
+export function resolveImports(imports: ImportsField, specifier: string, conditions: string[]): string | null
+
+// tsconfig-paths.ts
+export interface TsconfigPaths {
+  paths?: Record<string, string[]>
+  baseUrl?: string
+}
+
+export interface TsconfigPathResolver {
+  resolve(specifier: string): string[]   // 返回候选绝对路径列表
+}
+
+export function createTsconfigPathResolver(config: TsconfigPaths): TsconfigPathResolver
+```
+
+// m2-resolver.test.ts 33/33 pass（含 exports 单元/imports 单元/相对/绝对/裸包/walk-up/imports字段/tsconfig-paths 完整覆盖）
+}
+
+// ↑ 注：以上为旧设计草稿。实际 M2 交付 API 见上方"M2 实际 API（已落盘）"。
+// ResolveResult 类型、Resolver class、loadTsConfig 等均未实现（留存为后续 bundler 阶段参考）。
 
 // tsconfig-paths.ts
 export interface TsConfigPaths {
@@ -533,7 +616,7 @@ export function resolveTsPath(
 
 ---
 
-## 6. `bun-web-transpiler`
+## 6. `@mars/web-transpiler`
 
 > 实施计划：M6-1 | RFC §4.2（Transpiler）
 
@@ -593,7 +676,41 @@ export class TranspileCache {
 
 ---
 
-## 7. `bun-web-node`
+## 6.5 `@mars/web-shared`
+
+> 实施计划：M1-10 | RFC §10（跨包公共能力）
+
+### 文件结构
+
+```
+packages/bun-web-shared/
+  src/
+    index.ts
+    event-emitter.ts    # TypedEventEmitter 公共事件系统
+```
+
+### 核心类设计
+
+```ts
+// event-emitter.ts
+export type EventListener = (...args: unknown[]) => void;
+
+export class TypedEventEmitter<T extends Events> {
+  on(event: string, listener: EventListener): this;
+  addListener(event: string, listener: EventListener): this;
+  off(event: string, listener: EventListener): this;
+  removeListener(event: string, listener: EventListener): this;
+  once(event: string, listener: EventListener): this;
+  emit(event: string, ...args: unknown[]): boolean;
+  removeAllListeners(event?: string): this;
+  listeners(event: string): EventListener[];
+  listenerCount(event: string): number;
+}
+```
+
+---
+
+## 7. `@mars/web-node`
 
 > 实施计划：M2-3~M2-8, M4-7, M5-4, M5-5, M6-8, M6-9 | RFC §8.2（node:* 全家桶）
 
@@ -615,7 +732,7 @@ packages/bun-web-node/
     async_hooks.ts       # node:async_hooks / AsyncLocalStorage
     child_process.ts     # node:child_process（委托 Bun.spawn）
     zlib.ts              # node:zlib（pako + fflate + brotli-wasm）
-    process.ts           # node:process 完整对象
+    process.ts           # node:process 完整对象（继承 @mars/web-shared/TypedEventEmitter）
     vm-misc.ts           # node:vm / v8 / wasi / assert / util / console / readline / os / cluster
     perf_hooks.ts        # node:perf_hooks / timers（原生 API 封装）
     dgram.ts             # node:dgram（D级存根）
@@ -626,7 +743,7 @@ packages/bun-web-node/
 
 ```ts
 // process.ts
-export interface BunWebProcess extends NodeJS.Process {
+export interface MarsWebProcess extends NodeJS.Process {
   // 全部 Node.js process 属性
   readonly pid: number;
   readonly ppid: number;
@@ -646,7 +763,236 @@ export interface BunWebProcess extends NodeJS.Process {
   browser: true;
 }
 
-export const process: BunWebProcess;
+export const process: MarsWebProcess;
+
+// fs.ts
+export interface NodeFsBridge {
+  readFileSync(path: string, encoding?: BufferEncoding): Buffer | string;
+  writeFileSync(path: string, data: Buffer | string): void;
+  appendFileSync(path: string, data: Buffer | string): void;
+  existsSync(path: string): boolean;
+  mkdirSync(path: string, opts?: { recursive?: boolean }): void;
+  readdirSync(path: string): string[];
+  readdirSync(path: string, opts: { withFileTypes: true }): Dirent[];
+  statSync(path: string): FileStat;
+  unlinkSync(path: string): void;
+  renameSync(oldPath: string, newPath: string): void;
+  copyFileSync(src: string, dest: string): void;
+  rmSync(path: string, opts?: { recursive?: boolean; force?: boolean }): void;
+
+  promises: {
+    readFile(path: string, encoding?: BufferEncoding): Promise<Buffer | string>;
+    writeFile(path: string, data: Buffer | string): Promise<void>;
+    appendFile(path: string, data: Buffer | string): Promise<void>;
+    access(path: string): Promise<void>;
+    mkdir(path: string, opts?: { recursive?: boolean }): Promise<void>;
+    readdir(path: string): Promise<string[]>;
+    readdir(path: string, opts: { withFileTypes: true }): Promise<Dirent[]>;
+    stat(path: string): Promise<FileStat>;
+    unlink(path: string): Promise<void>;
+    rename(oldPath: string, newPath: string): Promise<void>;
+    copyFile(src: string, dest: string): Promise<void>;
+    rm(path: string, opts?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  };
+}
+
+// url.ts
+export type QueryValue = string | string[];
+export type QueryObject = Record<string, QueryValue>;
+
+export function parseQueryString(input: string, sep?: string, eq?: string): QueryObject;
+export function stringifyQueryString(input: QueryObject, sep?: string, eq?: string): string;
+export function resolveURL(from: string, to: string): string;
+export function formatURL(input: URL | string): string;
+export function parseURL(input: string, parseQuery?: boolean): {
+  href: string;
+  origin: string;
+  protocol: string;
+  host: string;
+  hostname: string;
+  port: string;
+  pathname: string;
+  search: string;
+  hash: string;
+  query: string | QueryObject;
+};
+
+export const querystring: {
+  parse: typeof parseQueryString;
+  stringify: typeof stringifyQueryString;
+  decode: typeof parseQueryString;
+  encode: typeof stringifyQueryString;
+};
+
+export class StringDecoder {
+  constructor(encoding?: BufferEncoding | 'utf-8');
+  write(input: Buffer | Uint8Array | string): string;
+  end(input?: Buffer | Uint8Array | string): string;
+}
+
+export { URL, URLSearchParams };
+
+// buffer.ts
+export type BufferEncoding =
+  | 'utf8' | 'utf-8' | 'base64' | 'base64url' | 'hex'
+  | 'ascii' | 'latin1' | 'binary' | 'ucs2' | 'ucs-2' | 'utf16le' | 'utf-16le';
+
+export const INSPECT_MAX_BYTES: number;
+export const kMaxLength: number;
+
+export class Buffer extends Uint8Array {
+  // 静态工厂
+  static from(value: string | ArrayBuffer | SharedArrayBuffer | Uint8Array | number[] | ArrayLike<number> | Iterable<number>, encodingOrOffset?: BufferEncoding | number, length?: number): Buffer;
+  static alloc(size: number, fill?: string | number | Buffer, encoding?: BufferEncoding): Buffer;
+  static allocUnsafe(size: number): Buffer;
+  static allocUnsafeSlow(size: number): Buffer;
+  static concat(list: Uint8Array[], totalLength?: number): Buffer;
+  // 判定
+  static isBuffer(obj: unknown): obj is Buffer;
+  static compare(a: Uint8Array, b: Uint8Array): -1 | 0 | 1;
+  static isEncoding(encoding: string): boolean;
+  static byteLength(value: string | Buffer | ArrayBuffer | Uint8Array, encoding?: BufferEncoding): number;
+  // 实例
+  toString(encoding?: BufferEncoding | string, start?: number, end?: number): string;
+  copy(target: Buffer, targetStart?: number, sourceStart?: number, sourceEnd?: number): number;
+  equals(other: Uint8Array): boolean;
+  compare(other: Uint8Array, targetStart?: number, targetEnd?: number, sourceStart?: number, sourceEnd?: number): -1 | 0 | 1;
+  fill(value: string | number | Uint8Array, offset?: number, end?: number, encoding?: BufferEncoding): this;
+  indexOf(value: string | number | Uint8Array, byteOffset?: number, encoding?: BufferEncoding): number;
+  includes(value: string | number | Uint8Array, byteOffset?: number, encoding?: BufferEncoding): boolean;
+  subarray(start?: number, end?: number): Buffer;
+  slice(start?: number, end?: number): Buffer;
+  toJSON(): { type: 'Buffer'; data: number[] };
+  // 整数 read/write
+  readUInt8(offset?: number): number;
+  readInt8(offset?: number): number;
+  readUInt16LE(offset?: number): number; readUInt16BE(offset?: number): number;
+  readInt16LE(offset?: number): number; readInt16BE(offset?: number): number;
+  readUInt32LE(offset?: number): number; readUInt32BE(offset?: number): number;
+  readInt32LE(offset?: number): number; readInt32BE(offset?: number): number;
+  readFloatLE(offset?: number): number; readFloatBE(offset?: number): number;
+  readDoubleLE(offset?: number): number; readDoubleBE(offset?: number): number;
+  writeUInt8(value: number, offset?: number): number;
+  writeInt8(value: number, offset?: number): number;
+  writeUInt16LE(value: number, offset?: number): number; writeUInt16BE(value: number, offset?: number): number;
+  writeInt16LE(value: number, offset?: number): number; writeInt16BE(value: number, offset?: number): number;
+  writeUInt32LE(value: number, offset?: number): number; writeUInt32BE(value: number, offset?: number): number;
+  writeInt32LE(value: number, offset?: number): number; writeInt32BE(value: number, offset?: number): number;
+  writeFloatLE(value: number, offset?: number): number; writeFloatBE(value: number, offset?: number): number;
+  writeDoubleLE(value: number, offset?: number): number; writeDoubleBE(value: number, offset?: number): number;
+}
+
+// events-stream.ts（当前已落 `node:events` + `node:stream` 最小主路径，含 `stream/web` 与 `stream/promises` 最小入口）
+export const captureRejectionSymbol: symbol;
+
+export class EventEmitter {
+  static readonly captureRejectionSymbol: symbol;
+  static once(emitter: EventEmitter, event: string | symbol, opts?: { signal?: AbortSignal }): Promise<unknown[]>;
+
+  on(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  addListener(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  prependListener(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  once(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  prependOnceListener(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  off(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  removeListener(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  emit(event: string | symbol, ...args: unknown[]): boolean;
+  removeAllListeners(event?: string | symbol): this;
+  listeners(event: string | symbol): Array<(...args: unknown[]) => void>;
+  listenerCount(event: string | symbol): number;
+  setMaxListeners(count: number): this;
+  getMaxListeners(): number;
+}
+
+export function once(emitter: EventEmitter, event: string | symbol, opts?: { signal?: AbortSignal }): Promise<unknown[]>;
+export function getEventListeners(emitter: EventEmitter, event: string | symbol): Array<(...args: unknown[]) => void>;
+export function getMaxListeners(emitter: EventEmitter): number;
+export function setMaxListeners(count: number, ...emitters: EventEmitter[]): void;
+
+export class Stream extends EventEmitter {}
+
+export class Readable extends Stream {
+  constructor(opts?: {
+    read?(this: Readable, size?: number): void;
+    encoding?: BufferEncoding;
+    objectMode?: boolean;
+  });
+
+  static fromWeb(stream: ReadableStream): Readable;
+  static toWeb(stream: Readable): ReadableStream;
+
+  push(chunk: Buffer | Uint8Array | string | null): boolean;
+  unshift(chunk: Buffer | Uint8Array | string): void;
+  read(): unknown;
+  setEncoding(encoding: BufferEncoding): this;
+  pipe<T extends Writable>(dest: T): T;
+  [Symbol.asyncIterator](): AsyncGenerator<unknown, void, void>;
+}
+
+export class Writable extends Stream {
+  constructor(opts?: {
+    objectMode?: boolean;
+    write?(this: Writable, chunk: unknown, encoding: BufferEncoding | undefined, callback: (error?: Error | null) => void): void;
+    writev?(this: Writable, chunks: Array<{ chunk: unknown; encoding: BufferEncoding | undefined }>, callback: (error?: Error | null) => void): void;
+  });
+
+  write(chunk: unknown, encoding?: BufferEncoding, callback?: (error?: Error | null) => void): boolean;
+  end(chunk?: unknown, encoding?: BufferEncoding, callback?: () => void): this;
+}
+
+export class Duplex extends Readable {
+  constructor(opts?: {
+    read?(this: Duplex, size?: number): void;
+    objectMode?: boolean;
+    write?(this: Writable, chunk: unknown, encoding: BufferEncoding | undefined, callback: (error?: Error | null) => void): void;
+    writev?(this: Writable, chunks: Array<{ chunk: unknown; encoding: BufferEncoding | undefined }>, callback: (error?: Error | null) => void): void;
+  });
+
+  write(chunk: unknown, encoding?: BufferEncoding, callback?: (error?: Error | null) => void): boolean;
+  end(chunk?: unknown, encoding?: BufferEncoding, callback?: () => void): this;
+}
+
+export class Transform extends Duplex {
+  constructor(opts?: {
+    read?(this: Readable, size?: number): void;
+    encoding?: BufferEncoding;
+    objectMode?: boolean;
+    transform?(this: Transform, chunk: unknown, encoding: BufferEncoding | undefined, callback: (error?: Error | null, data?: unknown) => void): void;
+  });
+}
+
+export class PassThrough extends Transform {}
+
+export const streamWeb: {
+  ReadableStream: typeof ReadableStream;
+  WritableStream: typeof WritableStream;
+  TransformStream: typeof TransformStream;
+  ByteLengthQueuingStrategy: typeof ByteLengthQueuingStrategy;
+  CountQueuingStrategy: typeof CountQueuingStrategy;
+  TextDecoderStream: typeof TextDecoderStream;
+  TextEncoderStream: typeof TextEncoderStream;
+  CompressionStream: typeof CompressionStream;
+  DecompressionStream: typeof DecompressionStream;
+};
+
+export const streamPromises: {
+  finished(stream: { on(event: string, listener: (...args: unknown[]) => void): unknown }): Promise<void>;
+  pipeline(...streams: Array<{ on(event: string, listener: (...args: unknown[]) => void): unknown }>): Promise<void>;
+};
+
+// module.ts
+export type RequireFunction = ((specifier: string) => unknown) & {
+  resolve(specifier: string): string;
+  cache: Record<string, unknown>;
+  register(specifier: string, exportsValue: unknown): void;
+};
+
+export function createRequire(fromFile?: string): RequireFunction;
+export function isBuiltin(specifier: string): boolean;
+export function register(specifier: string, exportsValue: unknown): void;
+
+// createRequire 约定：当 specifier 为 `./` 或 `../` 开头时，按 fromFile 所在目录解析为绝对路径后再查找注册表。
+// register 约定：同名重复注册视为热替换，后续 require 必须可见新值（旧 cache 项会失效）。
 
 // http-net.ts
 export interface VirtualSocket extends NodeJS.EventEmitter {
@@ -708,7 +1054,7 @@ export class BrotliDecompress extends TransformStream<Uint8Array, Uint8Array> {}
 
 ---
 
-## 8. `bun-web-webapis`
+## 8. `@mars/web-webapis`
 
 > 实施计划：M2-9 | RFC §8.3（Web 标准 API 补丁层）
 
@@ -768,7 +1114,7 @@ export function installWebSocketPolyfill(): void;
 
 ---
 
-## 9. `bun-web-sw`
+## 9. `@mars/web-sw`
 
 > 实施计划：M4-1, M4-9 | RFC §5（Service Worker 网络虚拟化）
 
@@ -822,7 +1168,7 @@ export class SWHeartbeat {
 
 ---
 
-## 10. `bun-web-net`
+## 10. `@mars/web-net`
 
 > 实施计划：M4-3, M4-4, M4-7 | RFC §5.2（WebSocket 桥）、§5.4（TCP 隧道）
 
@@ -892,7 +1238,7 @@ export class VirtualSocket extends EventTarget {
 
 ---
 
-## 11. `bun-web-dns`
+## 11. `@mars/web-dns`
 
 > 实施计划：M4-8 | RFC §8.1（Bun.dns.* C级）
 
@@ -946,7 +1292,7 @@ export const dns: {
 
 ---
 
-## 12. `bun-web-installer`
+## 12. `@mars/web-installer`
 
 > 实施计划：M3-1~M3-4 | RFC §（bun install MVP）
 
@@ -1027,7 +1373,7 @@ export class NodeModulesLayout {
 
 ---
 
-## 13. `bun-web-bundler`
+## 13. `@mars/web-bundler`
 
 > 实施计划：M6-2 | RFC §8.1（Bun.build）
 
@@ -1039,7 +1385,7 @@ packages/bun-web-bundler/
     index.ts
     build.ts          # Bun.build() 主入口
     chunk-merger.ts   # 自研 chunk 合并策略
-    plugin-adapter.ts # 适配 bun-web-hooks 的 loader plugin 桥
+    plugin-adapter.ts # 适配 @mars/web-hooks 的 loader plugin 桥
     output.ts         # BuildOutput / BuildArtifact 类型
     bundler.types.ts
 ```
@@ -1059,7 +1405,7 @@ export interface BuildOptions {
   sourcemap?: 'none' | 'inline' | 'external' | 'linked';
   define?: Record<string, string>;
   external?: string[];
-  plugins?: import('../bun-web-plugin-api').BunWebPlugin[];
+  plugins?: import('@mars/web-plugin-api').MarsWebPlugin[];
   loader?: Record<string, string>;
 }
 
@@ -1083,7 +1429,7 @@ export function build(opts: BuildOptions): Promise<BuildOutput>;
 
 ---
 
-## 14. `bun-web-shell`
+## 14. `@mars/web-shell`
 
 > 实施计划：M5-1, M5-2 | RFC §7（Shell 命令集）
 
@@ -1112,7 +1458,7 @@ export interface ShellContext {
   stdin: ReadableStream<Uint8Array>;
   stdout: WritableStream<Uint8Array>;
   stderr: WritableStream<Uint8Array>;
-  fs: import('../bun-web-vfs').VFS;
+  fs: import('@mars/web-vfs').VFS;
   signal: AbortSignal;
   builtins: Map<string, ShellBuiltin>;
 }
@@ -1169,7 +1515,7 @@ export interface ShellPromise extends Promise<ShellResult> {
 
 ---
 
-## 15. `bun-web-shell-builtins`
+## 15. `@mars/web-shell-builtins`
 
 > 实施计划：M5-7 | RFC §7（Phase 1 命令集完整表）
 
@@ -1234,7 +1580,7 @@ export const git: ShellBuiltin = {
 
 ---
 
-## 16. `bun-web-test`
+## 16. `@mars/web-test`
 
 > 实施计划：M6-3, M6-4 | RFC §8.1（bun:test A级）
 
@@ -1313,7 +1659,7 @@ export class SnapshotStore {
 
 ---
 
-## 17. `bun-web-sqlite`
+## 17. `@mars/web-sqlite`
 
 > 实施计划：M6-5 | RFC §8.1（bun:sqlite A级）
 
@@ -1378,7 +1724,7 @@ export class Statement<Row extends Record<string, unknown> = Record<string, unkn
 
 ---
 
-## 18. `bun-web-crypto`
+## 18. `@mars/web-crypto`
 
 > 实施计划：M6-7 | RFC §8.1（CryptoHasher/password/hash.* A级）
 
@@ -1452,7 +1798,7 @@ export const hash: {
 
 ---
 
-## 19. `bun-web-hooks`
+## 19. `@mars/web-hooks`
 
 > 实施计划：M7-1 | RFC §6（插件体系 Hook Engine）
 
@@ -1509,9 +1855,9 @@ export class HookEngine {
 
 ---
 
-## 20. `bun-web-plugin-api`
+## 20. `@mars/web-plugin-api`
 
-> 实施计划：M7-2 | RFC §6（BunWebPlugin / PluginContext）
+> 实施计划：M7-2 | RFC §6（MarsWebPlugin / PluginContext）
 
 ### 文件结构
 
@@ -1529,7 +1875,7 @@ packages/bun-web-plugin-api/
 
 ```ts
 // plugin.types.ts（对齐 RFC §6.2）
-export interface BunWebPlugin {
+export interface MarsWebPlugin {
   name: string;
   version?: string;
   scopes?: Array<'kernel' | 'process' | 'sw' | 'shell'>;
@@ -1546,7 +1892,7 @@ export interface LoaderArgs {
   path: string;
   namespace: string;
   importer: string;
-  vfs: import('../bun-web-vfs').VFS;
+  vfs: import('@mars/web-vfs').VFS;
 }
 
 export interface LoaderResult {
@@ -1560,7 +1906,7 @@ export class PluginContextImpl implements PluginContext {
     engine: HookEngine,
     vfs: VFS,
     shellExecutor: ShellExecutor,
-    allowedScopes: BunWebPlugin['scopes'],
+    allowedScopes: MarsWebPlugin['scopes'],
   );
 
   readonly hooks: TypedHooks;
@@ -1584,7 +1930,7 @@ export function runWithBudget<T>(fn: () => Promise<T>, budget: PluginBudget): Pr
 
 ---
 
-## 21. `bun-web-compat-registry`
+## 21. `@mars/web-compat-registry`
 
 > 实施计划：M7-3, M7-4 | RFC §9（Compat Registry）
 
@@ -1627,7 +1973,7 @@ export class CompatRegistry {
   assertSupported(symbol: string): void;
 }
 
-export class BunWebUnsupportedError extends Error {
+export class MarsWebUnsupportedError extends Error {
   constructor(symbol: string, meta?: { code?: string; level?: CompatLevel });
   readonly code: 'ERR_BUN_WEB_UNSUPPORTED';
   readonly symbol: string;
@@ -1637,7 +1983,7 @@ export class BunWebUnsupportedError extends Error {
 
 ---
 
-## 22. `bun-web-agent`
+## 22. `@mars/web-agent`
 
 > 实施计划：M7-7 | RFC §10（`bun-web-agent/`）
 
@@ -1701,7 +2047,7 @@ export interface AuditEntry {
 
 ---
 
-## 23. `bun-web-client`
+## 23. `@mars/web-client`
 
 > 实施计划：M4-5, M7-8 | RFC §10（`bun-web-client/`、宿主 SDK）
 
@@ -1778,7 +2124,7 @@ export class PreviewManager {
 
 ---
 
-## 24. `bun-web-proxy-server`
+## 24. `@mars/web-proxy-server`
 
 > 实施计划：M4-10 | RFC §5.4（可选 WS/TCP 隧道服务端）
 
@@ -1826,27 +2172,27 @@ export async function handleTunnel(
 
 ```ts
 // packages/bun-web-kernel/src/errors.ts（或统一放 bun-web-runtime）
-export class BunWebError extends Error {
+export class MarsWebError extends Error {
   readonly code: string;
 }
 
-export class SyscallError extends BunWebError {
+export class SyscallError extends MarsWebError {
   readonly syscall: string;
   readonly errno: number;
 }
 
-export class VFSNotFoundError extends BunWebError { }    // ENOENT
-export class VFSPermissionError extends BunWebError { }  // EACCES
-export class VFSIsDirectoryError extends BunWebError { } // EISDIR
+export class VFSNotFoundError extends MarsWebError { }    // ENOENT
+export class VFSPermissionError extends MarsWebError { }  // EACCES
+export class VFSIsDirectoryError extends MarsWebError { } // EISDIR
 
-export class BunWebUnsupportedError extends BunWebError {
+export class MarsWebUnsupportedError extends MarsWebError {
   readonly code: 'ERR_BUN_WEB_UNSUPPORTED';
   readonly compatLevel: 'C' | 'D';
   readonly symbol: string;
 }
 
-export class PluginSandboxError extends BunWebError { }  // 插件熔断
-export class TunnelNotConfiguredError extends BunWebError { }  // 未配置 tunnelUrl
+export class PluginSandboxError extends MarsWebError { }  // 插件熔断
+export class TunnelNotConfiguredError extends MarsWebError { }  // 未配置 tunnelUrl
 ```
 
 ---
@@ -1855,11 +2201,11 @@ export class TunnelNotConfiguredError extends BunWebError { }  // 未配置 tunn
 
 | 类型 | 定义位置 | 消费者 |
 |---|---|---|
-| `VFS` | `bun-web-vfs/vfs.types.ts` | runtime / node / kernel / installer / sqlite / test |
-| `FileStat` / `Dirent` | `bun-web-vfs/vfs.types.ts` | node:fs / resolver |
-| `ShellContext` / `ShellBuiltin` | `bun-web-shell/shell.types.ts` | shell-builtins / plugin-api / agent |
-| `SyscallBridge` | `bun-web-kernel/kernel.types.ts` | runtime / node |
-| `BunWebPlugin` / `PluginContext` | `bun-web-plugin-api/plugin.types.ts` | runtime / bundler / hooks |
-| `CompatEntry` | `bun-web-compat-registry/compat.types.ts` | 所有包（注册时） |
-| `BunWebError` 及子类 | `bun-web-kernel/errors.ts` | 所有包 |
-| `FileTree` | `bun-web-client/client.types.ts` | sdk / mount |
+| `VFS` | `@mars/web-vfs` | runtime / node / kernel / installer / sqlite / test |
+| `FileStat` / `Dirent` | `@mars/web-vfs` | node:fs / resolver |
+| `ShellContext` / `ShellBuiltin` | `@mars/web-shell` | shell-builtins / plugin-api / agent |
+| `SyscallBridge` | `@mars/web-kernel` | runtime / node |
+| `MarsWebPlugin` / `PluginContext` | `@mars/web-plugin-api` | runtime / bundler / hooks |
+| `CompatEntry` | `@mars/web-compat-registry` | 所有包（注册时） |
+| `MarsWebError` 及子类 | `@mars/web-kernel` | 所有包 |
+| `FileTree` | `@mars/web-client` | sdk / mount |
