@@ -15,9 +15,26 @@
 
 - `@mars/web-node` 已落地 `node:fs/path/url/module` 关键 API 增量：`lstatSync/realpathSync`、`path.parse/format/toNamespacedPath`、`fileURLToPath/pathToFileURL`、`createRequireWithVfs`。
 - `@mars/web-node` 已导出 `builtinModulesList`，并补齐 `node:buffer` 注册。
-- `test/integration/bun-in-browser/` 已开始承载 `fs/path/module` 官方语义回放子集，作为 M2-6 迁移到 `test/js/node` 门禁前的稳定性锁定层。
+- `packages/bun-web-test/tests/` 已承接原 `test/integration/bun-in-browser/*.test.ts` 模块测试用例，统一迁移到 Vitest 运行。
+- `packages/bun-web-test/tests` 已完成一轮 M1/M2 批量回归：13 文件 218 pass / 0 fail。
+- 所有 `packages/bun-web-*` 模块已统一补齐工程文件：`tsdown.config.ts`、`tsconfig.json`、`README.md`，并统一模块脚本为 `build/typecheck/clean`；根工作区通过 Nx 管理这些模块的批量构建、类型检查与清理。
+- Nx 编排验证状态：8 个 bun-web 模块已可被统一发现并执行 `build` 与 `typecheck`，当前 `web:build` / `web:typecheck` 均已通过。
+- 2026-04-25 最新复测：`m2-node-events.test.ts` 在 Vitest 下保持 10/10 通过；`m2-node-fs-official-replay.test.ts`（由官方 `fs-stats-truncate + fs-stats-constructor + abort-signal-leak` 稳定子集改造移植）在 Vitest 下 8/8 通过（含 `internal-for-testing` bare alias 兼容）。
+- 2026-04-25 本轮新增：`m2-node-path-official-replay.test.ts`（官方 `path.parse/format/toNamespacedPath/basename` 迁移子集）在 Vitest 下 4/4 通过。
+- 2026-04-25 本轮新增：`m2-node-module-official-replay.test.ts`（官方 `node-module-module` 的 builtin resolve、require cache、createRequire base 语义迁移子集）在 Vitest 下 7/7 通过。
+- 2026-04-25 本轮在 `@mars/web-node` 的 `fs.ts` 新增 `Stats/BigIntStats`、`createStatsForIno` shim 与 aborted signal (`ABORT_ERR`) 处理；`m2-node-fs.test.ts` 扩展后 11/11 通过。
+- 本轮已清理构建声明噪音：`TypedEventEmitter` 的 MISSING_EXPORT 告警已消除；当前构建输出仅剩 tsdown `define` 非阻塞输入告警。
+- 本轮已推进官方回放门禁脚本：`run-official-tests.ts` 修复 skip 前缀匹配、root 定位与 `--dir` 阈值继承；最新 `--dir test/js/node/fs` 在 skip 已知阻塞后为 11/11。
+- 本轮补充：`run-official-tests.ts` 现默认设置 `BUN_FEATURE_FLAG_INTERNAL_FOR_TESTING=1`（以及 `BUN_GARBAGE_COLLECTOR_LEVEL=1`）并在失败行输出错误摘要，便于快速定位 `internal-for-testing` 与 `Stats` 语义类问题。
+- 本轮确认：M2 `fs` 官方回放主验证路径已切换为 `bun-web-test`（`bun run web:test -- tests/m2-node-fs-official-replay.test.ts`），不再依赖直接 `bun bd test` 执行官方文件作为日常门禁。
+- 本轮补充：`@mars/web-node` 的 `createRequire/isBuiltin` 已支持 `internal-for-testing` bare alias 映射到 `bun:internal-for-testing`，并覆盖 `require.resolve` 语义，便于官方语义用例迁移复用。
+- 本轮补充：官方门禁基线文件 `test/integration/bun-in-browser/baseline.json` 已初始化 `test/js/node/fs` 条目，回放门禁可执行“阈值 + 基线”双重比较。
 - `test/js/node` 真实门禁已推进两批：`module/path/url` 子集 39 pass / 0 fail；`fs` 稳定子集（`fs.test.ts` + `fs-mkdir.test.ts`）264 pass / 5 skip / 0 fail。
-- 当前 `fs` 差距集中在 `bun:internal-for-testing` 依赖映射与 `Stats(...)` 构造语义（无 `new`）对齐，修复后将并入目录级 baseline 门禁。
+- `test/js/node/fs` 差距子集复测结果仍为 `1 pass / 3 fail / 1 error`（`bun:internal-for-testing` + `Stats(...)` 语义差距）；在 `--dir` 官方门禁中临时去掉 `fs-stats*` skip 的探测结果为 12/14，结论一致。
+- 当前 `fs` 剩余差距集中在三项：`bun:internal-for-testing` 依赖阻塞（当前源码状态下仍待处理）、`Stats(...)` 构造语义（无 `new`）对齐、以及 `abort-signal-leak-read-write-file` 在浏览器 runtime 下的 GC 波动。
+- 当前 `bun bd test` 仅保留为源码级根因调试路径：构建在 [build.zig](build.zig#L881) 处报 `unreachable else prong`，需先修复编译阻塞再推进 runtime 层对齐。
+- `src/js/thirdparty/ws.js` 的 MarsWeb 前缀重命名已回退，待后续重新提交并复测。
+- 2026-04-25 本轮补充：`@mars/web-installer` 的 `installFromManifest()` 新增 `optionalDependencies` 最小语义（失败跳过、不阻塞安装），并已补齐根依赖与 transitive optional 失败边界回放用例。
 
 ---
 
@@ -54,6 +71,8 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 
 - 每个模块必须是 `packages/` 下的独立 package，并包含自身 `package.json`。
 - package 名统一使用 `@mars/web-*` scoped 命名，不再使用 `bun-web-*` 作为 package name。
+- 根工作区统一通过 Nx 编排模块 `build/typecheck/clean`，批量入口分别为 `web:build`、`web:typecheck`、`web:clean`。
+- 现阶段各模块仍以 `package.json` scripts 作为真实执行入口，Nx 只负责项目发现、依赖排序与批量执行，不额外维护模块级 `project.json`。
 - 模块间依赖通过 `pnpm workspace` 统一管理，禁止绕过 workspace 直接引用未声明依赖。
 - 包间引用使用 workspace 版本约束（如 `workspace:*`），保持本地联调与 CI 解析一致。
 - 源码跨包依赖统一通过 package name 导入，例如 `@mars/web-vfs`、`@mars/web-shared`，禁止 `../../bun-web-*/src/*` 形式的跨包相对路径。
@@ -1582,45 +1601,33 @@ export const git: ShellBuiltin = {
 
 ## 16. `@mars/web-test`
 
-> 实施计划：M6-3, M6-4 | RFC §8.1（bun:test A级）
+> 实施计划：M6-3, M6-4 | RFC §8.1（Vitest 统一门禁）
 
 ### 文件结构
 
 ```
 packages/bun-web-test/
-  src/
-    index.ts
-    runner.ts         # 测试执行器（describe/test/it/beforeEach 等）
-    expect.ts         # expect() 匹配器（移植自 Bun）
-    snapshot.ts       # snapshot 读写（OPFS）
-    reporter.ts       # 结果报告（TAP / JSON / 终端彩色）
-    mock.ts           # jest.fn() / jest.spyOn() 兼容层
-    test.types.ts
+  tests/
+    *.test.ts         # bun-web 模块测试（已从 test/integration/bun-in-browser 迁移）
+  vitest.config.ts
+  tsconfig.json
+  package.json
 ```
 
-### 核心类设计
+### 核心设计
 
 ```ts
-// runner.ts
-export interface TestSuite {
-  name: string;
-  tests: TestCase[];
-  beforeAll: HookFn[];
-  afterAll: HookFn[];
-  beforeEach: HookFn[];
-  afterEach: HookFn[];
-  nested: TestSuite[];
-}
+// vitest.config.ts（核心约束）
+import { defineConfig } from 'vitest/config'
 
-export interface TestCase {
-  name: string;
-  fn: () => void | Promise<void>;
-  timeout?: number;
-  skip?: boolean;
-  only?: boolean;
-  todo?: boolean | string;
-}
-
+export default defineConfig({
+  test: {
+    include: ['packages/bun-web-test/tests/**/*.test.ts'],
+    environment: 'node',
+    isolate: true,
+  },
+})
+```
 export type HookFn = () => void | Promise<void>;
 
 export class TestRunner {

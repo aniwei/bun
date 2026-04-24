@@ -153,6 +153,14 @@ function decodeBytes(bytes: Uint8Array, encoding: BufferEncoding): string {
 export class Buffer extends Uint8Array {
   // ─── Static methods ────────────────────────────────────────────────────────
 
+  static from(value: string, encoding?: BufferEncoding): Buffer
+  static from(value: ArrayBuffer | SharedArrayBuffer, byteOffset?: number, length?: number): Buffer
+  static from(value: Uint8Array): Buffer
+  static from(arrayLike: ArrayLike<number>): Buffer
+  static from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Buffer
+  static from(elements: Iterable<number>): Buffer
+  static from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Buffer
+
   static from(
     value:
       | string
@@ -162,7 +170,7 @@ export class Buffer extends Uint8Array {
       | number[]
       | ArrayLike<number>
       | Iterable<number>,
-    encodingOrOffset?: BufferEncoding | number,
+    encodingOrOffset?: BufferEncoding | number | ((v: any, k: number) => number),
     length?: number,
   ): Buffer {
     if (typeof value === 'string') {
@@ -176,7 +184,10 @@ export class Buffer extends Uint8Array {
     if (value instanceof ArrayBuffer || value instanceof SharedArrayBuffer) {
       const offset = typeof encodingOrOffset === 'number' ? encodingOrOffset : 0
       const len = typeof length === 'number' ? length : value.byteLength - offset
-      return new Buffer(value, offset, len)
+      const view = new Uint8Array(value, offset, len)
+      const buf = new Buffer(view.length)
+      buf.set(view)
+      return buf
     }
 
     if (value instanceof Uint8Array) {
@@ -193,7 +204,10 @@ export class Buffer extends Uint8Array {
       return buf
     }
 
-    const arr = Array.from(value as Iterable<number>)
+    const mapfn = typeof encodingOrOffset === 'function' ? encodingOrOffset : undefined
+    const arr = mapfn
+      ? Array.from(value as ArrayLike<number> | Iterable<number>, mapfn)
+      : Array.from(value as ArrayLike<number> | Iterable<number>)
     const buf = new Buffer(arr.length)
     for (let i = 0; i < arr.length; i++) {
       buf[i] = arr[i] & 0xff

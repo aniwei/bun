@@ -1,5 +1,5 @@
 type EventKey = string | symbol
-type Listener = (...args: unknown[]) => void
+type Listener = (...args: any[]) => void
 type ListenerEntry = {
   listener: Listener
   original: Listener
@@ -56,7 +56,7 @@ function chunkEncoding(chunk: unknown, objectMode = false): BufferEncoding | und
   if (objectMode) {
     return undefined
   }
-  return 'buffer'
+  return undefined
 }
 
 function mergeChunks(chunks: unknown[], encoding?: BufferEncoding, objectMode = false): unknown {
@@ -93,6 +93,9 @@ export class EventEmitter {
 
   private readonly events = new Map<EventKey, ListenerEntry[]>()
   private maxListenersValue = defaultMaxListeners
+
+  declare addListener: (event: EventKey, listener: Listener) => this
+  declare removeListener: (event: EventKey, listener: Listener) => this
 
   private emitUnhandledError(args: unknown[]): never {
     const first = args[0]
@@ -203,6 +206,10 @@ export class EventEmitter {
 
   listenerCount(event: EventKey): number {
     return this.listeners(event).length
+  }
+
+  eventNames(): EventKey[] {
+    return Array.from(this.events.keys())
   }
 
   setMaxListeners(count: number): this {

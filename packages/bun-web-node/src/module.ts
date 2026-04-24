@@ -14,7 +14,7 @@ import eventsModule, {
 } from './events-stream'
 import path from './path'
 import streamPromises, { finished, pipeline } from './stream-promises'
-import { createNodeFs } from './fs'
+import { createNodeFs, createStatsForIno } from './fs'
 import { createProcess } from './process'
 import {
   StringDecoder,
@@ -61,8 +61,70 @@ const builtinSpecifiers = new Set<string>([
   'node:stream/promises',
   'node:process',
   'node:module',
+  'internal-for-testing',
+  'bun:internal-for-testing',
   'buffer',
   'node:buffer',
+  'assert',
+  'node:assert',
+  'async_hooks',
+  'node:async_hooks',
+  'crypto',
+  'node:crypto',
+  'cluster',
+  'node:cluster',
+  'console',
+  'node:console',
+  'diagnostics_channel',
+  'node:diagnostics_channel',
+  'dgram',
+  'node:dgram',
+  'dns',
+  'node:dns',
+  'dns/promises',
+  'node:dns/promises',
+  'domain',
+  'node:domain',
+  'http',
+  'node:http',
+  'https',
+  'node:https',
+  'http2',
+  'node:http2',
+  'inspector',
+  'node:inspector',
+  'net',
+  'node:net',
+  'os',
+  'node:os',
+  'perf_hooks',
+  'node:perf_hooks',
+  'punycode',
+  'node:punycode',
+  'readline',
+  'node:readline',
+  'repl',
+  'node:repl',
+  'tls',
+  'node:tls',
+  'tty',
+  'node:tty',
+  'util',
+  'node:util',
+  'util/types',
+  'node:util/types',
+  'v8',
+  'node:v8',
+  'vm',
+  'node:vm',
+  'wasi',
+  'node:wasi',
+  'worker_threads',
+  'node:worker_threads',
+  'zlib',
+  'node:zlib',
+  'test',
+  'node:test',
 ])
 
 /** Node.js-compatible list of builtin module names (bare form) */
@@ -77,7 +139,152 @@ export const builtinModulesList: string[] = [
   'buffer',
   'process',
   'module',
+  'internal-for-testing',
+  'bun:internal-for-testing',
+  'assert',
+  'async_hooks',
+  'crypto',
+  'cluster',
+  'console',
+  'diagnostics_channel',
+  'dgram',
+  'dns',
+  'domain',
+  'http',
+  'https',
+  'http2',
+  'inspector',
+  'net',
+  'os',
+  'perf_hooks',
+  'punycode',
+  'readline',
+  'repl',
+  'tls',
+  'tty',
+  'util',
+  'v8',
+  'vm',
+  'wasi',
+  'worker_threads',
+  'zlib',
+  'test',
 ]
+
+/**
+ * Module class - represents a loaded module
+ */
+export class Module {
+  id: string
+  exports: Record<string, unknown> = {}
+  filename?: string
+  dirname?: string
+  require: RequireFunction
+
+  constructor(id: string, parent?: Module) {
+    this.id = id
+    this.require = createRequire(id)
+  }
+
+  _compile(code: string, filename: string): undefined {
+    this.filename = filename
+    this.dirname = path.dirname(filename)
+
+    const wrappedCode = wrap(code)
+    // eslint-disable-next-line no-new-func
+    const fn = new Function(wrappedCode)
+    fn.call(
+      this.exports,
+      this.exports,
+      this.require,
+      this,
+      this.filename,
+      this.dirname,
+    )
+
+    return undefined
+  }
+
+  static Module = Module
+
+  static _extensions: Record<string, (module: Module, filename: string) => void> = {
+    '.js': () => {},
+    '.json': () => {},
+    '.node': () => {},
+  }
+
+  static _resolveLookupPaths(request: string, mod?: any): string[] {
+    // If it's a relative specifier and mod has a filename, use its directory
+    if ((request.startsWith('./') || request.startsWith('../')) && mod?.filename) {
+      return [path.dirname(mod.filename)]
+    }
+
+    // If it's a bare specifier and mod has paths, use those
+    if (!request.startsWith('.') && mod?.paths) {
+      return mod.paths
+    }
+
+    // If relative without filename context, use current directory
+    if (request.startsWith('./') || request.startsWith('../')) {
+      return ['.']
+    }
+
+    // For bare specifiers without custom paths, return empty
+    return []
+  }
+
+  static findSourceMap(filename: string) {
+    return undefined
+  }
+}
+
+/**
+ * Module.wrap - wraps code in a function with CommonJS variables
+ */
+export function wrap(code?: string): string {
+  if (code === undefined) {
+    code = 'undefined'
+  }
+  return `(function (exports, require, module, __filename, __dirname) { ${code}\n});`
+}
+
+/**
+ * _nodeModulePaths - returns the node_modules search paths for a given directory
+ */
+export function _nodeModulePaths(start?: string): string[] {
+  if (start === undefined || start === '') {
+    start = '.'
+  }
+
+  // Normalize the start path
+  const normalized = path.resolve(start)
+
+  // If start is just '/', return ['/node_modules']
+  if (normalized === '/') {
+    return ['/node_modules']
+  }
+
+  const paths: string[] = []
+  let current = normalized
+
+  // Walk up directory tree, adding node_modules at each level
+  while (true) {
+    paths.push(path.join(current, 'node_modules'))
+
+    if (current === '/') {
+      break
+    }
+
+    const parent = path.dirname(current)
+    if (parent === current) {
+      break
+    }
+
+    current = parent
+  }
+
+  return paths
+}
 
 const _defaultVfs = new VFS()
 
@@ -139,10 +346,27 @@ const builtinModules: Record<string, unknown> = {
     createRequire,
     isBuiltin,
     builtinModules: builtinModulesList,
+    Module,
+    wrap,
+    _nodeModulePaths,
+  },
+  'internal-for-testing': {
+    createStatsForIno,
+  },
+  'bun:internal-for-testing': {
+    createStatsForIno,
   },
 }
 
 function normalizeSpecifier(specifier: string): string {
+  if (specifier === 'internal-for-testing') {
+    return 'bun:internal-for-testing'
+  }
+
+  if (specifier.includes(':')) {
+    return specifier
+  }
+
   if (specifier.startsWith('node:')) {
     return specifier
   }
@@ -173,6 +397,20 @@ function resolveFromBase(fromFile: string, specifier: string): string {
   return specifier
 }
 
+function normalizeRequireBase(input: string): string {
+  // Accept file URL inputs from createRequire(new URL(...)) style callsites.
+  const filePath = input.startsWith('file:') ? fileURLToPath(input) : input
+  const normalized = path.posix.normalize(filePath)
+
+  // If caller passed a directory (trailing slash), preserve directory semantics
+  // by attaching a synthetic filename so resolveFromBase() uses that directory.
+  if (filePath.endsWith('/')) {
+    return path.posix.join(normalized, '__bun_web_virtual__.js')
+  }
+
+  return normalized
+}
+
 const registry = new Map<string, unknown>()
 const requireCaches = new Set<Record<string, unknown>>()
 
@@ -191,7 +429,7 @@ export function register(specifier: string, exportsValue: unknown): void {
 }
 
 export function createRequire(_fromFile = '/'): RequireFunction {
-  const fromFile = _fromFile
+  const fromFile = normalizeRequireBase(_fromFile)
   const cache: Record<string, unknown> = {}
   requireCaches.add(cache)
 

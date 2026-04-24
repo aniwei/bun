@@ -5,6 +5,11 @@
   "type": "module",
   "license": "MIT",
   "sideEffects": false,
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
   "files": [
     "src"
   ],
@@ -14,5 +19,8 @@
   "dependencies": {
     "@mars/web-shared": "workspace:*",
     "@mars/web-vfs": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "6.0.2"
   }
 }

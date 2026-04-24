@@ -33,9 +33,12 @@ interface PackageJson {
   [key: string]: unknown
 }
 
-type ExportsValue = string | ExportsConditions | ExportsValue[] | null
-type ExportsConditions = Record<string, ExportsValue>
-type ExportsField = string | ExportsConditions | Record<string, ExportsValue>
+interface ExportsObject {
+  [key: string]: ExportsValue | undefined
+}
+
+type ExportsValue = string | ExportsObject | ExportsValue[] | null
+type ExportsField = string | ExportsObject
 type ImportsField = Record<string, ExportsValue>
 
 const DEFAULT_CONDITIONS = ['browser', 'import', 'default']
@@ -111,8 +114,9 @@ function readPackageJson(dir: string, fs: ResolverFs): PackageJson | null {
 // (implements Node.js PACKAGE_EXPORTS_RESOLVE algorithm)
 // ────────────────────────────────────────────────────────────────────────────
 
-function resolveCondition(value: ExportsValue, conditions: string[]): string | null {
+function resolveCondition(value: ExportsValue | undefined, conditions: string[]): string | null {
   if (value === null) return null
+  if (value === undefined) return null
   if (typeof value === 'string') return value
 
   if (Array.isArray(value)) {
@@ -167,7 +171,7 @@ export function resolveExports(
     if (isConditionsMap) {
       // Treat as conditions map for "."
       if (subpath === '.') {
-        return resolveCondition(exports as ExportsConditions, conditions)
+        return resolveCondition(exports as ExportsObject, conditions)
       }
       return null
     }

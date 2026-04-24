@@ -12,7 +12,7 @@ export function installBlobFilePatch(): void {
   // Blob.prototype.writer() — returns a writable stream backed by the blob
   // In M2 we provide a minimal writable sink that collects chunks.
   if (!('writer' in Blob.prototype)) {
-    ;(Blob.prototype as Record<string, unknown>)['writer'] = function blobWriter(
+    ;(Blob.prototype as unknown as Record<string, unknown>)['writer'] = function blobWriter(
       this: Blob
     ): WritableStreamDefaultWriter<Uint8Array> {
       const chunks: Uint8Array[] = []

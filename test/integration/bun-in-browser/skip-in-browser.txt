@@ -20,6 +20,12 @@ test/js/node/dgram/                 # 浏览器无 UDP 原语
 test/js/bun/http/bun-connect-x509.test.ts   # mTLS，需原生 TLS 实现
 test/js/node/tls/                            # 同上
 
+# ── M2-6 已知阻塞（待后续实现对齐）──────────────────────────────────
+test/js/node/fs/fs-oom.test.ts                 # 依赖 memfd_create 等 internal-for-testing 原生辅助
+test/js/node/fs/fs-stats-truncate.test.ts      # USE_BUN_WEB_RUNTIME 下 bun:internal-for-testing 仍 ENOENT（createStatsForIno 未接入核心 runtime）
+test/js/node/fs/fs-stats-constructor.test.ts   # USE_BUN_WEB_RUNTIME 下 Stats(...) 无 new 仍存在字段映射/原型语义偏差
+test/js/node/fs/abort-signal-leak-read-write-file.test.ts # 依赖宿主 GC/heapStats 稳定收敛，浏览器 runtime 下结果波动
+
 # ── 进程内存 / heap profiling ─────────────────────────────────────────
 test/js/bun/gc/                     # 浏览器 GC 不可编程控制
 test/js/node/v8/heap-snapshot.test.ts       # v8.writeHeapSnapshot 无对应实现

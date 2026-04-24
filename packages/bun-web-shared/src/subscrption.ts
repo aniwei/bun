@@ -1,5 +1,5 @@
-import { TypedEventEmitter } from '../event-emitter'
-import type { Events } from '../event-emitter'
+import { TypedEventEmitter } from './event-emitter'
+import type { Events } from './event-emitter'
 
 type UnSubscribe = () => void
 type SubscribeEvent = Events
@@ -15,7 +15,15 @@ export class Subscription<T extends SubscribeEvent = SubscribeEvent> extends Typ
   }
 
   subscribe<K extends keyof T>(type: K, callback: T[K], once: boolean = false): UnSubscribe {
-    return once ? this.once(type, callback) : this.on(type, callback)
+    if (once) {
+      this.once(type, callback)
+    } else {
+      this.on(type, callback)
+    }
+
+    return () => {
+      this.off(type, callback)
+    }
   }
 
   subscribeAll(callback: (...args: unknown[]) => void): UnSubscribe {

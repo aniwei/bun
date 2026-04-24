@@ -54,7 +54,7 @@ export function installCryptoExt(): void {
     bun['hash'] = {
       async sha256(data: string | Uint8Array): Promise<string> {
         const encoder = new TextEncoder()
-        const bytes = typeof data === 'string' ? encoder.encode(data) : data
+        const bytes = typeof data === 'string' ? encoder.encode(data) : new Uint8Array(data)
         const buf = await crypto.subtle.digest('SHA-256', bytes)
         return Array.from(new Uint8Array(buf))
           .map(b => b.toString(16).padStart(2, '0'))

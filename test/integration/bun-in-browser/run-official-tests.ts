@@ -18,7 +18,7 @@ import { join, relative } from "node:path";
 // 配置
 // ---------------------------------------------------------------------------
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = new URL("../../../", import.meta.url).pathname;
 
 /** 各目录的最低通过率要求 */
 const THRESHOLDS: Record<string, number> = {
@@ -34,6 +34,25 @@ const THRESHOLDS: Record<string, number> = {
 const BASELINE_FILE = join(ROOT, "test/integration/bun-in-browser/baseline.json");
 const SKIP_FILE = join(ROOT, "test/integration/bun-in-browser/skip-in-browser.txt");
 
+function resolveThreshold(dir: string): number {
+  if (THRESHOLDS[dir] !== undefined) {
+    return THRESHOLDS[dir];
+  }
+
+  let matched = 1.0;
+  let matchedLen = -1;
+  for (const [baseDir, threshold] of Object.entries(THRESHOLDS)) {
+    if (dir === baseDir || dir.startsWith(`${baseDir}/`)) {
+      if (baseDir.length > matchedLen) {
+        matched = threshold;
+        matchedLen = baseDir.length;
+      }
+    }
+  }
+
+  return matched;
+}
+
 // ---------------------------------------------------------------------------
 // 读取跳过清单
 // ---------------------------------------------------------------------------
@@ -48,6 +67,20 @@ function loadSkipList(): Set<string> {
   );
 }
 
+function shouldSkip(relPath: string, skip: Set<string>): boolean {
+  if (skip.has(relPath)) {
+    return true;
+  }
+
+  for (const rule of skip) {
+    if (rule.endsWith("/") && relPath.startsWith(rule)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // 收集测试文件
 // ---------------------------------------------------------------------------
@@ -57,7 +90,7 @@ async function collectTests(dir: string, skip: Set<string>): Promise<string[]> {
   const files: string[] = [];
   for await (const f of glob.scan({ cwd: join(ROOT, dir), absolute: false })) {
     const rel = join(dir, f);
-    if (!skip.has(rel)) files.push(rel);
+    if (!shouldSkip(rel, skip)) files.push(rel);
   }
   return files;
 }
@@ -74,6 +107,27 @@ interface RunResult {
   error?: string;
 }
 
+function extractErrorSummary(output: string): string | undefined {
+  const lines = output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (line.startsWith("error:")) {
+      return line;
+    }
+  }
+
+  for (const line of lines) {
+    if (line.startsWith("SyntaxError:") || line.startsWith("TypeError:") || line.startsWith("ReferenceError:")) {
+      return line;
+    }
+  }
+
+  return undefined;
+}
+
 async function runFile(relPath: string): Promise<RunResult> {
   await using proc = Bun.spawn({
     cmd: [process.execPath, "test", join(ROOT, relPath)],
@@ -81,17 +135,22 @@ async function runFile(relPath: string): Promise<RunResult> {
       ...process.env,
       USE_BUN_WEB_RUNTIME: "1",
       BUN_DEBUG_QUIET_LOGS: "1",
+      // Enable bun:internal-for-testing exports in non-debug binaries when available.
+      BUN_GARBAGE_COLLECTOR_LEVEL: process.env.BUN_GARBAGE_COLLECTOR_LEVEL ?? "1",
+      BUN_FEATURE_FLAG_INTERNAL_FOR_TESTING: process.env.BUN_FEATURE_FLAG_INTERNAL_FOR_TESTING ?? "1",
     },
     stdout: "pipe",
     stderr: "pipe",
     timeout: 60_000,
   });
 
-  const [stdout, , exitCode] = await Promise.all([
+  const [stdout, stderr, exitCode] = await Promise.all([
     proc.stdout.text(),
     proc.stderr.text(),
     proc.exited,
   ]);
+
+  const combinedOutput = `${stdout}\n${stderr}`;
 
   // 解析 bun test 输出
   const passMatch = stdout.match(/(\d+) pass/);
@@ -103,6 +162,7 @@ async function runFile(relPath: string): Promise<RunResult> {
     passed: passMatch ? Number(passMatch[1]) : (exitCode === 0 ? 1 : 0),
     failed: failMatch ? Number(failMatch[1]) : (exitCode !== 0 ? 1 : 0),
     skipped: skipMatch ? Number(skipMatch[1]) : 0,
+    error: exitCode !== 0 ? extractErrorSummary(combinedOutput) : undefined,
   };
 }
 
@@ -142,7 +202,8 @@ for (const dir of dirsToRun) {
       passed += r.passed;
       failed += r.failed;
       if (r.failed > 0) {
-        console.error(`  ✗ ${r.file}  (${r.failed} 失败)`);
+        const detail = r.error ? ` - ${r.error}` : "";
+        console.error(`  ✗ ${r.file}  (${r.failed} 失败${detail})`);
       }
     }
     process.stdout.write(".");
@@ -176,8 +237,12 @@ if (updateBaseline) {
 let exitCode = 0;
 console.log("\n=== 门禁检查 ===");
 
-for (const [dir, threshold] of Object.entries(THRESHOLDS)) {
-  if (!dirResults[dir]) continue;
+const checks = targetDir ? [[targetDir, resolveThreshold(targetDir)] as const] : Object.entries(THRESHOLDS);
+
+for (const [dir, threshold] of checks) {
+  if (!dirResults[dir]) {
+    continue;
+  }
   const { rate } = dirResults[dir];
   const base = baseline[dir]?.rate ?? 0;
 
