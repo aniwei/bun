@@ -8,6 +8,7 @@ export default defineConfig({
   root: packageRoot,
   resolve: {
     alias: {
+      '@mars/web-net': resolve(packageRoot, '../bun-web-net/src/index.ts'),
       harness: resolve(packageRoot, '../../test/harness.ts'),
       'node-harness': resolve(packageRoot, '../../test/js/node/harness.ts'),
       'deno:harness': resolve(packageRoot, '../../test/js/deno/harness.ts'),

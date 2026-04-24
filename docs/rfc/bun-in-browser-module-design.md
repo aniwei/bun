@@ -1267,46 +1267,39 @@ export class VirtualSocket extends EventTarget {
 packages/bun-web-dns/
   src/
     index.ts
-    doh.ts         # DoH 客户端（1.1.1.1 JSON API）
-    cache.ts       # DNS 结果缓存（TTL 维护）
-    dns.types.ts
+    doh.ts         # DoH 客户端（默认 cloudflare endpoint，可配置）
 ```
 
 ### 核心类设计
 
 ```ts
 // doh.ts
-export interface DNSRecord {
+export type DNSRecordType = 'A' | 'AAAA' | 'CNAME' | 'TXT';
+
+export interface DNSAnswer {
   name: string;
-  type: 'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'NS' | 'SOA';
-  ttl: number;
+  type: number;
+  TTL: number;
   data: string;
 }
 
-export interface LookupResult {
-  address: string;
-  family: 4 | 6;
+export interface DoHResponse {
+  Status: number;
+  Answer?: DNSAnswer[];
 }
 
-export class DoHResolver {
-  constructor(endpoint?: string);  // 默认 'https://1.1.1.1/dns-query'
-
-  lookup(hostname: string, family?: 4 | 6): Promise<LookupResult>;
-  resolve(hostname: string, rrtype?: string): Promise<DNSRecord[]>;
-  resolve4(hostname: string): Promise<string[]>;
-  resolve6(hostname: string): Promise<string[]>;
-  resolveMx(hostname: string): Promise<Array<{ exchange: string; priority: number }>>;
-  resolveTxt(hostname: string): Promise<string[][]>;
-  reverse(ip: string): Promise<string[]>;
+export interface ResolveDoHOptions {
+  endpoint?: string; // 默认 'https://cloudflare-dns.com/dns-query'
+  fetchFn?: (input: string | URL, init?: RequestInit) => Promise<Response>;
 }
 
-// re-export as bun-compatible API
-export const dns: {
-  lookup: DoHResolver['lookup'];
-  resolve: DoHResolver['resolve'];
-  resolve4: DoHResolver['resolve4'];
-  resolve6: DoHResolver['resolve6'];
-};
+export function resolveDoH(
+  hostname: string,
+  type?: DNSRecordType,
+  options?: ResolveDoHOptions,
+): Promise<DoHResponse>;
+
+export function lookup(hostname: string, options?: ResolveDoHOptions): Promise<string>;
 ```
 
 ---
@@ -1321,73 +1314,67 @@ export const dns: {
 packages/bun-web-installer/
   src/
     index.ts
-    registry.ts              # npm registry metadata 拉取（fetch + 缓存）
-    tarball.ts               # tarball 下载、brotli/gzip 解压、SHA 校验
-    lockfile.ts              # bun.lock TOML 读写与最小增量更新
-    node-modules-layout.ts   # 扁平化 node_modules 布局与去重
-    lifecycle.ts             # postinstall 脚本（受限执行）
-    installer.types.ts
+    install.ts               # install 主链路（metadata/tarball/lockfile/layout/cache/retry）
+    registry.ts              # npm registry metadata 拉取 + semver 版本解析
+    tarball.ts               # tarball 下载、gzip 解压、SRI 校验、最小 tar 提取
+    lockfile.ts              # lockfile 读写与增量 upsert
+    node-modules-layout.ts   # 扁平化 node_modules 布局规划与 hoist
+    semver.ts
 ```
 
-### 核心类设计
+### 核心 API 设计（函数式）
 
 ```ts
-// installer.types.ts
-export interface PackageSpec {
-  name: string;
-  version: string;     // 精确版本或 range
-  resolved?: string;   // tarball URL
-  integrity?: string;  // sha512
-}
-
 // registry.ts
-export class RegistryClient {
-  constructor(registryUrl?: string);  // 默认 'https://registry.npmjs.org'
+export type NpmPackageMetadata = {
+  name: string;
+  'dist-tags': Record<string, string>;
+  versions: Record<string, unknown>;
+};
 
-  getPackument(name: string): Promise<Packument>;
-  resolveVersion(name: string, range: string): Promise<PackageSpec>;
-  downloadTarball(spec: PackageSpec): Promise<ReadableStream<Uint8Array>>;
-}
+export function fetchPackageMetadata(
+  packageName: string,
+  options?: { registryUrl?: string; fetchFn?: (input: string | URL, init?: RequestInit) => Promise<Response> },
+): Promise<NpmPackageMetadata>;
+
+export function resolveVersion(metadata: NpmPackageMetadata, spec?: string): string;
 
 // tarball.ts
-export class TarballExtractor {
-  extract(
-    stream: ReadableStream<Uint8Array>,
-    destPath: string,
-    vfs: VFS,
-  ): Promise<void>;
+export function downloadTarball(
+  tarballUrl: string,
+  options?: { fetchFn?: (input: string | URL, init?: RequestInit) => Promise<Response>; integrity?: string },
+): Promise<Uint8Array>;
 
-  verify(data: Uint8Array, integrity: string): boolean;  // sha512-<base64>
-}
+export function verifyIntegrity(data: Uint8Array, integrity: string): Promise<void>;
+export function extractTarball(tarballData: Uint8Array): Promise<Map<string, { path: string; type: 'file' | 'directory'; data: Uint8Array }>>;
 
 // lockfile.ts
-export interface LockfileEntry {
+export interface LockfilePackageEntry {
   name: string;
   version: string;
-  resolved: string;
-  integrity: string;
+  resolved?: string;
+  integrity?: string;
   dependencies?: Record<string, string>;
 }
 
-export class LockfileManager {
-  static read(vfs: VFS, cwd: string): Promise<LockfileManager>;
-  write(vfs: VFS, cwd: string): Promise<void>;
+export type BunWebLockfile = {
+  lockfileVersion: 1;
+  packages: Record<string, LockfilePackageEntry>;
+};
 
-  has(name: string, version: string): boolean;
-  add(entry: LockfileEntry): void;
-  remove(name: string): void;
-  diff(previous: LockfileManager): { added: LockfileEntry[]; removed: LockfileEntry[] };
-}
+export function readLockfile(content: string | Uint8Array): BunWebLockfile;
+export function writeLockfile(lockfile: BunWebLockfile): string;
+export function upsertLockfilePackage(lockfile: BunWebLockfile, packageKey: string, entry: LockfilePackageEntry): BunWebLockfile;
 
 // node-modules-layout.ts
-export class NodeModulesLayout {
-  constructor(vfs: VFS, cwd: string);
+export type NodeModulesLayoutPlan = {
+  entries: Array<{ packageKey: string; installPath: string }>;
+  links: Array<{ fromPackageKey: string; dependencyName: string; toInstallPath: string }>;
+};
 
-  install(packages: LockfileEntry[]): Promise<void>;
-  uninstall(names: string[]): Promise<void>;
-  // 去重策略：尽可能提升到最近公共父目录
-  hoist(tree: PackageTree): HoistedTree;
-}
+export function buildLayoutGraphFromLockfile(lockfile: BunWebLockfile): Record<string, unknown>;
+export function resolveRootPackageKeys(lockfile: BunWebLockfile, rootDependencies: Record<string, string>): string[];
+export function planNodeModulesLayoutFromLockfile(lockfile: BunWebLockfile, rootDependencies: Record<string, string>): NodeModulesLayoutPlan;
 ```
 
 ---
@@ -1466,11 +1453,19 @@ packages/bun-web-shell/
 
 ```ts
 // parser.ts
-export type ShellNode =
-  | { type: 'Command'; argv: string[]; redirects: Array<{ kind: '<' | '>' | '>>'; target: string }> }
-  | { type: 'Pipeline'; commands: ShellNode[] };
+export interface ParsedCommand {
+  command: string;
+  args: string[];
+  redirectIn?: string;
+  redirectOut?: string;
+  appendOut?: string;
+}
 
-export function parseShell(input: string): ShellNode;
+export interface ParsedPipeline {
+  commands: ParsedCommand[];
+}
+
+export function parseShellPipeline(input: string): ParsedPipeline;
 
 // runner.ts
 export interface ShellRunOptions {

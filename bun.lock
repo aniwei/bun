@@ -10,6 +10,7 @@
         "@types/bun": "workspace:*",
         "bun-tracestrings": "github:oven-sh/bun.report#912ca63e26c51429d3e6799aa2a6ab079b188fd8",
         "esbuild": "^0.21.5",
+        "filenamify": "^7.0.1",
         "mitata": "^0.1.14",
         "nx": "^21.6.0",
         "peechy": "0.4.34",
@@ -17,6 +18,8 @@
         "prettier-plugin-organize-imports": "^4.3.0",
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
+        "reflect-metadata": "^0.2.2",
+        "source-map": "^0.7.6",
         "source-map-js": "^1.2.1",
         "tsdown": "^0.14.2",
         "typescript": "6.0.2",
@@ -35,8 +38,22 @@
         "@types/node": "*",
       },
     },
+    "packages/bun-web-bundler": {
+      "name": "@mars/web-bundler",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
     "packages/bun-web-client": {
       "name": "@mars/web-client",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-crypto": {
+      "name": "@mars/web-crypto",
       "version": "0.0.0",
       "devDependencies": {
         "typescript": "6.0.2",
@@ -136,6 +153,13 @@
         "typescript": "6.0.2",
       },
     },
+    "packages/bun-web-sqlite": {
+      "name": "@mars/web-sqlite",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
     "packages/bun-web-sw": {
       "name": "@mars/web-sw",
       "version": "0.0.0",
@@ -153,6 +177,13 @@
         "tsdown": "^0.14.2",
         "typescript": "6.0.2",
         "vitest": "^2.1.8",
+      },
+    },
+    "packages/bun-web-transpiler": {
+      "name": "@mars/web-transpiler",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
       },
     },
     "packages/bun-web-vfs": {
@@ -260,7 +291,11 @@
 
     "@lezer/lr": ["@lezer/lr@1.4.3", "https://registry.npmmirror.com/@lezer/lr/-/lr-1.4.3.tgz", { "dependencies": { "@lezer/common": "^1.0.0" } }, "sha512-yenN5SqAxAPv/qMnpWW0AT7l+SxVrgG+u0tNsRQWqbrz66HIl8DnEbBObvy21J5K7+I1v7gsAnlE2VQ5yYVSeA=="],
 
+    "@mars/web-bundler": ["@mars/web-bundler@workspace:packages/bun-web-bundler"],
+
     "@mars/web-client": ["@mars/web-client@workspace:packages/bun-web-client"],
+
+    "@mars/web-crypto": ["@mars/web-crypto@workspace:packages/bun-web-crypto"],
 
     "@mars/web-dns": ["@mars/web-dns@workspace:packages/bun-web-dns"],
 
@@ -284,9 +319,13 @@
 
     "@mars/web-shell-builtins": ["@mars/web-shell-builtins@workspace:packages/bun-web-shell-builtins"],
 
+    "@mars/web-sqlite": ["@mars/web-sqlite@workspace:packages/bun-web-sqlite"],
+
     "@mars/web-sw": ["@mars/web-sw@workspace:packages/bun-web-sw"],
 
     "@mars/web-test": ["@mars/web-test@workspace:packages/bun-web-test"],
+
+    "@mars/web-transpiler": ["@mars/web-transpiler@workspace:packages/bun-web-transpiler"],
 
     "@mars/web-vfs": ["@mars/web-vfs@workspace:packages/bun-web-vfs"],
 
@@ -638,6 +677,10 @@
 
     "figures": ["figures@3.2.0", "https://registry.npmmirror.com/figures/-/figures-3.2.0.tgz", { "dependencies": { "escape-string-regexp": "^1.0.5" } }, "sha512-yaduQFRKLXYOGgEn6AZau90j3ggSOyiqXU0F9JZfeXYhNa+Jk4X+s45A2zg5jns87GAFa34BBm2kXw4XpNcbdg=="],
 
+    "filename-reserved-regex": ["filename-reserved-regex@4.0.0", "https://registry.npmmirror.com/filename-reserved-regex/-/filename-reserved-regex-4.0.0.tgz", {}, "sha512-9ZT504KxEQDamsOogZImAWGEN24R1uFAxU3ZS4AZqn2ooidmN68Olh7n4/RcA4lLatZztjA0ZSuxeLHVoCc8JA=="],
+
+    "filenamify": ["filenamify@7.0.1", "https://registry.npmmirror.com/filenamify/-/filenamify-7.0.1.tgz", { "dependencies": { "filename-reserved-regex": "^4.0.0" } }, "sha512-9b4rfnaX2MkJCgp27wypV6DAMvj4WMOSgJ+TdcpJIO84Dql+Cv6iJjdG4XDTLubOWkfNiBv3joO59sau/TXw+Q=="],
+
     "flat": ["flat@5.0.2", "https://registry.npmmirror.com/flat/-/flat-5.0.2.tgz", { "bin": { "flat": "cli.js" } }, "sha512-b6suED+5/3rTpUBdG1gupIl8MPFCAMA0QXwmljLhvCUKcUvdE4gWky9zpuGCcXHOsz4J9wPGNWq6OKpmIzz3hQ=="],
 
     "follow-redirects": ["follow-redirects@1.16.0", "https://registry.npmmirror.com/follow-redirects/-/follow-redirects-1.16.0.tgz", {}, "sha512-y5rN/uOsadFT/JfYwhxRS5R7Qce+g3zG97+JrtFZlC9klX/W5hD7iiLzScI4nZqUS7DNUdhPgw4xI8W2LuXlUw=="],
@@ -846,6 +889,8 @@
 
     "readdirp": ["readdirp@4.1.2", "https://registry.npmmirror.com/readdirp/-/readdirp-4.1.2.tgz", {}, "sha512-GDhwkLfywWL2s6vEjyhri+eXmfH6j1L7JE27WhqLeYzoh/A3DBaYGEj2H/HFZCn/kMfim73FXxEJTw06WtxQwg=="],
 
+    "reflect-metadata": ["reflect-metadata@0.2.2", "https://registry.npmmirror.com/reflect-metadata/-/reflect-metadata-0.2.2.tgz", {}, "sha512-urBwgfrvVP/eAyXx4hluJivBKzuEbSQs9rKWCrCkbSxNv8mxPcUZKeuoF3Uy4mJl3Lwprp6yy5/39VWigZ4K6Q=="],
+
     "relateurl": ["relateurl@0.2.7", "https://registry.npmmirror.com/relateurl/-/relateurl-0.2.7.tgz", {}, "sha512-G08Dxvm4iDN3MLM0EsP62EDV9IuhXPR6blNz6Utcp7zyV3tr4HVNINt6MpaRWbxoOHT3Q7YN2P+jaHX8vUbgog=="],
 
     "require-directory": ["require-directory@2.1.1", "https://registry.npmmirror.com/require-directory/-/require-directory-2.1.1.tgz", {}, "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q=="],
@@ -876,7 +921,7 @@
 
     "snake-case": ["snake-case@3.0.4", "https://registry.npmmirror.com/snake-case/-/snake-case-3.0.4.tgz", { "dependencies": { "dot-case": "^3.0.4", "tslib": "^2.0.3" } }, "sha512-LAOh4z89bGQvl9pFfNF8V146i7o7/CqFPbqzYgP+yYzDIDeS9HaNFtXABamRW+AQzEVODcvE79ljJ+8a9YSdMg=="],
 
-    "source-map": ["source-map@0.6.1", "https://registry.npmmirror.com/source-map/-/source-map-0.6.1.tgz", {}, "sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g=="],
+    "source-map": ["source-map@0.7.6", "https://registry.npmmirror.com/source-map/-/source-map-0.7.6.tgz", {}, "sha512-i5uvt8C3ikiWeNZSVZNWcfZPItFQOsYTUAOkcUPGd8DqDy1uOUikjt5dG+uRlwyvR108Fb9DOd4GvXfT0N2/uQ=="],
 
     "source-map-js": ["source-map-js@1.2.1", "https://registry.npmmirror.com/source-map-js/-/source-map-js-1.2.1.tgz", {}, "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA=="],
 
@@ -983,6 +1028,8 @@
     "change-case/camel-case": ["camel-case@4.1.2", "https://registry.npmmirror.com/camel-case/-/camel-case-4.1.2.tgz", { "dependencies": { "pascal-case": "^3.1.2", "tslib": "^2.0.3" } }, "sha512-gxGWBrTT1JuMx6R+o5PTXMmUnhnVzLQ9SNutD4YqKtI6ap897t3tKECYla6gCWEkplXnlNybEkZg9GEGxKFCgw=="],
 
     "change-case/param-case": ["param-case@3.0.4", "https://registry.npmmirror.com/param-case/-/param-case-3.0.4.tgz", { "dependencies": { "dot-case": "^3.0.4", "tslib": "^2.0.3" } }, "sha512-RXlj7zCYokReqWpOPH9oYivUzLYZ5vAPIfEmCTNViosC78F8F0H9y7T7gG2M39ymgutxF5gcFEsyZQSph9Bp3A=="],
+
+    "clean-css/source-map": ["source-map@0.6.1", "https://registry.npmmirror.com/source-map/-/source-map-0.6.1.tgz", {}, "sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g=="],
 
     "constant-case/upper-case": ["upper-case@2.0.2", "https://registry.npmmirror.com/upper-case/-/upper-case-2.0.2.tgz", { "dependencies": { "tslib": "^2.0.3" } }, "sha512-KgdgDGJt2TpuwBUIjgG6lzw2GWFRCW9Qkfkiv0DxqHHLYJHmtmdUIKcZd8rHgFSjopVTlw6ggzCm1b8MFQwikg=="],
 

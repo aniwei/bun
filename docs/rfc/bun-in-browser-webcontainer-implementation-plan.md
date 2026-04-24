@@ -236,12 +236,18 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | M4-4 | packages/bun-web-net/src/websocket-virtual.ts | VirtualWebSocket 协议与升级桥 | 100% | 已完成 | 同信道消息广播（ws echo 基线）回归通过 |
 | M4-5 | packages/bun-web-client/src/preview.ts | iframe 预览自动挂载 server-ready URL | 100% | 已完成 | server-ready -> iframe src 自动更新回归通过 |
 | M4-6 | packages/bun-web-test/tests/m4-*.test.ts | `serve` 兼容子集回归（bun-web-test） | 100% | 已完成 | M4 专项回归 5 文件 31/31 通过 |
-| M4-7 | packages/bun-web-node/src/http-net.ts | `node:http` / `node:https` / `node:net` / `node:tls` polyfill（RFC §8.2 A/B/C级）；`node:net` Socket→WS 隧道 | 100% | 已完成 | `http.get` / `http.createServer` 基础用例通过 |
-| M4-8 | packages/bun-web-dns/src/doh.ts | `Bun.dns.*` / `node:dns` / `dns/promises` DoH 客户端（RFC §8.1/8.2 C级，走 1.1.1.1 JSON API） | 100% | 已完成 | DoH 查询与 `lookup()` 解析回归通过 |
+| M4-7 | packages/bun-web-node/src/http-net.ts | `node:http` / `node:https` / `node:net` / `node:tls` polyfill（RFC §8.2 A/B/C级）；`node:net` Socket→WS 隧道 | 92% | 进行中 | 已补齐 `net`/`tls` 基线子集：`createNetServer/createConnection/connect`、`tls.connect/createSecureContext` 与 in-memory socket 数据通路；`connect/tlsConnect` 已支持通过 `configureNetTunnel()` 桥接到 `@mars/web-net` 的 `socket/ws-tunnel`，且 `tlsConnect` 在 tunnel 模式下走独立 `proto=tls` 通道；`http` 请求头读写与多次 `write()+end()` 拼接语义已补齐；`https.request/get` 已补齐 RequestOptions 默认 `https:` 归一化与请求错误回传（emit error）；真实代理服务端链路仍待补齐 |
+| M4-8 | packages/bun-web-dns/src/doh.ts | `Bun.dns.*` / `node:dns` / `dns/promises` DoH 客户端（RFC §8.1/8.2 C级，默认 `https://cloudflare-dns.com/dns-query`，可配置 endpoint） | 100% | 已完成 | DoH 查询与 `lookup()` 解析回归通过 |
 | M4-9 | packages/bun-web-sw/src/heartbeat.ts | SW 生命周期保活与自动复活（RFC §13 风险"SW 生命周期回收"） | 100% | 已完成 | 已提供 heartbeat + failures/recovery 机制与回归 |
 | M4-10 | packages/bun-web-proxy-server/src/server.ts | 可选 WS/TCP 隧道服务端（RFC §5.4）；无配置时跳过，注入 tunnelUrl 后解锁 postgres/redis 等原始 TCP | 100% | 已完成 | 未配置 tunnelUrl 抛 NotSupportedError；注入后可构造 tunnel URL |
 
-当前进展说明：M4 已完成全量基线实现与回归：新建 `@mars/web-sw/@mars/web-net/@mars/web-dns/@mars/web-client/@mars/web-proxy-server` 五个包，补齐 runtime `serve.ts` 与 node `http-net.ts`，并新增 SW runtime 入口（`installServiceWorkerRuntime`，统一装配 install/activate/fetch 监听）；M4 专项测试集（`m4-runtime-network.test.ts`、`m4-serve-routing.test.ts`、`m4-http-ws-bridge.test.ts`、`m4-dns-preview-proxy-heartbeat.test.ts`、`m4-node-http-net.test.ts`）共 31 条覆盖 M4-1~M4-10；`web:typecheck` 与 `web:build` 均通过。
+当前进展说明：M4 已完成主路径实现与回归：新建 `@mars/web-sw/@mars/web-net/@mars/web-dns/@mars/web-client/@mars/web-proxy-server` 五个包，补齐 runtime `serve.ts` 与 node `http-net.ts`，并新增 SW runtime 入口（`installServiceWorkerRuntime`，统一装配 install/activate/fetch 监听）；M4 专项测试集（`m4-runtime-network.test.ts`、`m4-serve-routing.test.ts`、`m4-http-ws-bridge.test.ts`、`m4-dns-preview-proxy-heartbeat.test.ts`、`m4-node-http-net.test.ts`）共 31 条覆盖 M4-1~M4-10；`web:typecheck` 与 `web:build` 均通过。M4-7 的 `https/net/tls` 与 Socket→WS 隧道能力仍在补齐中，状态已回调为“进行中”。
+当前进展说明：2026-04-25 本轮推进 M4-7：`packages/bun-web-node/src/http-net.ts` 已新增 `VirtualSocket`/`VirtualServer`、`createNetServer/createConnection/connect`、`tls.connect/createSecureContext` 基线；`packages/bun-web-test/tests/m4-node-http-net.test.ts` 扩展后为 5/5 通过（含 net/tls 用例）。
+当前进展说明：2026-04-25 本轮继续推进 M4-7：`packages/bun-web-net/src/ws-tunnel.ts`、`packages/bun-web-net/src/socket-polyfill.ts`、`packages/bun-web-net/src/tls-stub.ts` 已落地并接入包导出；`packages/bun-web-test/tests/m4-net-tunnel-socket.test.ts` 新增 3 条基线回归并通过。M4 网络相关测试组合 `m4-http-ws-bridge + m4-net-tunnel-socket + m4-node-http-net` 合计 11/11 通过。
+当前进展说明：2026-04-25 本轮继续推进 M4-7：`packages/bun-web-node/src/http-net.ts` 已新增 `configureNetTunnel()` 与 tunnel 适配器（`TunnelSocketAdapter`），`connect/tlsConnect` 可桥接到 `@mars/web-net` 的隧道 socket；`packages/bun-web-test/tests/m4-node-http-net.test.ts` 新增“configured ws tunnel bridge”用例后合计 6/6 通过。网络组合回归更新为 12/12 通过。
+当前进展说明：2026-04-25 本轮继续推进 M4-7：`packages/bun-web-net/src/socket-polyfill.ts` 已支持 `connectTLS()`，`packages/bun-web-node/src/http-net.ts` 将 `tlsConnect` 的 tunnel 路由切换为独立 `proto=tls` 通道；`m4-node-http-net.test.ts` 新增“tlsConnect bridges through configured ws tunnel using tls channel”后合计 7/7 通过。网络组合回归更新为 13/13 通过。
+当前进展说明：2026-04-25 本轮继续推进 M4-7：`packages/bun-web-node/src/http-net.ts` 已补齐 `ClientRequest` 的请求头 set/get/remove 与 body 多次写入拼接语义（`write()+end(chunk)`），并保留 tunnel + tls 独立通道路由；`m4-node-http-net.test.ts` 扩展后 9/9 通过。网络组合回归更新为 15/15 通过。
+当前进展说明：2026-04-25 本轮继续推进 M4-7：`packages/bun-web-node/src/http-net.ts` 已补齐 `https.request/get` 的 RequestOptions 协议归一化（默认 `https:`）与请求失败错误回传（`request.emit('error')`）；`m4-node-http-net.test.ts` 新增 2 条回归后 11/11 通过。网络组合回归更新为 17/17 通过。
 
 ---
 
@@ -272,6 +278,16 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | M5-7 | packages/bun-web-shell-builtins/src/*.ts | 独立包 `bun-web-shell-builtins/`（RFC §10 要求与 `bun-web-shell/` 分离）；Phase 1 全量内置命令（RFC §7 完整命令表） | 100% | 已完成 | 已抽象 `ShellCommandRegistry`（register/unregister/tryExecute/execute/has）并支持 hook 注册 |
 
 当前进展说明：M5 已完成全量闭环：shell/builtins 两包接线（workspace + Nx）、`spawnSync` 基线、`worker_threads`/`async_hooks` polyfill、registry/hook 扩展机制；新增回归 `m5-shell-parser-builtins.test.ts`、`m5-worker-async-hooks.test.ts` 共 8 条通过；`web:typecheck` 与 `web:build` 通过；官方 `test/js/bun/shell` 门禁通过（31/31, 100%）。
+
+### M3-M5 文档一致性审计（2026-04-25）
+
+| 项目 | 结论 | 说明 | 后续动作 |
+| --- | --- | --- | --- |
+| M3 模块设计签名对齐 | 🟨 存在偏差 | 模块设计文档使用类接口（RegistryClient/TarballExtractor/NodeModulesLayout），实现为函数式 API 导出 | 已在模块设计文档同步为函数式签名；后续若恢复类接口，需先改文档再改代码 |
+| M4-7 完成度标注 | 🟨 存在偏差 | 实现已覆盖 `http` 基础子集，但文档此前标注为 `http/https/net/tls` 全量完成 | 已将 M4-7 状态回调为“进行中（60%）”并拆分剩余项 |
+| M4-8 DoH 端点说明 | 🟨 存在偏差 | 实现默认端点为 `https://cloudflare-dns.com/dns-query`，与文档旧描述（1.1.1.1 JSON API）不一致 | 已更新实施文档与模块设计文档为“默认 cloudflare，可配置 endpoint” |
+| M5 parser 接口签名 | 🟨 存在偏差 | 模块设计文档写 `parseShell(): ShellNode`，实现为 `parseShellPipeline(): ParsedPipeline` | 已在模块设计文档同步为 `parseShellPipeline` 与 `ParsedPipeline` |
+| M3/M4/M5 回归状态 | ✅ 一致 | 在 `packages/bun-web-test` 直接执行 `m3-*.test.ts/m4-*.test.ts/m5-*.test.ts`，23 文件 164 测试通过 | 作为本轮一致性校验基线留档 |
 
 ---
 
@@ -491,7 +507,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §8.1 Bun.Transpiler | swc-wasm 包装，对齐选项 | M6-1 | ⬜ 未开始 |
 | §8.1 Bun.build / Bun.plugin | esbuild-wasm + hook 引擎 | M6-2, M7-2 | ⬜ 未开始 |
 | §8.1 Bun.CryptoHasher / Bun.password / Bun.hash.* | WebCrypto + argon2/bcrypt/blake3/sha3 WASM | M6-7 | ⬜ 未开始 |
-| §8.1 Bun.dns.* | DoH (1.1.1.1 JSON API) | M4-8 | ✅ 已完成（M4） |
+| §8.1 Bun.dns.* | DoH（默认 cloudflare endpoint，可配置） | M4-8 | ✅ 已完成（M4） |
 | §8.1 bun:sqlite | wa-sqlite + OPFS VFS | M6-5 | ⬜ 未开始 |
 | §8.1 测试能力（Vitest） | 统一 Vitest 门禁与 snapshot 策略 | M6-3, M6-4 | 🟨 进行中 |
 | §8.1 bun:ffi | 存根；允许 dlopen('.wasm') 扩展 | M7-3（compat registry 登记 D级） | ⬜ 未开始 |
@@ -501,8 +517,8 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §8.2 node:events / stream / stream/web | readable-stream | M2-8 | 🟨 进行中 |
 | §8.2 node:os | cpus=hardwareConcurrency；platform='browser' | M6-9 | ⬜ 未开始 |
 | §8.2 node:crypto | WebCrypto + crypto-browserify + WASM | M6-7（兼含） | ⬜ 未开始 |
-| §8.2 node:tls / net | SW 代理；Socket→WS 隧道 | M4-7 | ✅ 已完成（M4 基线） |
-| §8.2 node:http / https | net 之上构建 | M4-7 | ✅ 已完成（M4 基线） |
+| §8.2 node:tls / net | SW 代理；Socket→WS 隧道 | M4-7 | 🟨 进行中（已完成 net/tls、node connect/tlsConnect 到 ws tunnel 的桥接及 tls 独立通道；真实代理服务端链路待补齐） |
+| §8.2 node:http / https | net 之上构建 | M4-7 | 🟨 进行中（http 深度语义已补齐：headers + multi-write + error emit；https 已补齐协议归一化，剩余链路细节待补齐） |
 | §8.2 node:http2 | C级，仅 request-like 子集 | M4-7（含存根） | 🟨 进行中（M4 已交付 A/B 主路径） |
 | §8.2 node:zlib | pako + fflate + brotli-wasm | M6-8 | ⬜ 未开始 |
 | §8.2 node:child_process | Worker 模拟 exec/spawn/fork | M5-3（Bun.spawn 兼含） | ✅ 已完成（M5 基线） |
@@ -531,7 +547,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §10 `bun-web-test/` | Vitest 测试包与门禁入口 | M6-3, M6-4 | 🟨 进行中 |
 | §10 `bun-web-sqlite/` | wa-sqlite OPFS VFS 绑定 | M6-5 | ⬜ 未开始 |
 | §10 `bun-web-crypto/` | WebCrypto + argon2/bcrypt/blake3 WASM | M6-7 | ⬜ 未开始 |
-| §10 `bun-web-net/` | net/tls/http/http2 over WS 隧道 | M4-3, M4-4, M4-7 | ✅ 已完成（M4 基线） |
+| §10 `bun-web-net/` | net/tls/http/http2 over WS 隧道 | M4-3, M4-4, M4-7 | 🟨 进行中（M4 已交付 http/ws 主路径、net/tls 基线与 node->ws-tunnel 桥接；WS 隧道深度语义与 http2 待补齐） |
 | §10 `bun-web-dns/` | DoH 客户端 | M4-8 | ✅ 已完成（M4） |
 | §10 `bun-web-hooks/` | Hook 引擎与类型 | M7-1 | ⬜ 未开始 |
 | §10 `bun-web-plugin-api/` | 公共插件 SDK | M7-2 | ⬜ 未开始 |
