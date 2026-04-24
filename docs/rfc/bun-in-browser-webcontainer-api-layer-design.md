@@ -80,11 +80,15 @@
 - Bun.serve lifecycle
 - node:http / node:net 映射
 - stdio 输出与 exit 通知
+- shell command registry（register / unregister / tryExecute / execute / has）
+- shell hook 注册入口（hook 向 registry 注入命令）
 
 约束：
 
 - 业务输出走 MessagePort 控制面，不进入 SAB 数据面。
 - 同步 FS/NET syscall 仅走 SAB 桥。
+- shell 执行面必须先经 registry 查询命令，再进入 builtin/hook 注册实现。
+- hook 仅通过 registry 注册命令，不直接改写 runtime 内部状态。
 
 ---
 
@@ -137,7 +141,7 @@ ReadableStream / WritableStream
 ## 5. M4-M7 落地映射
 
 - M4: 固化 SW <-> Kernel <-> Runtime 的 HTTP/WS 调用链。
-- M5: 固化 spawn 与 shell 的控制面协议。
+- M5: 固化 spawn 与 shell 的控制面协议，并冻结 registry/hook 扩展点。
 - M6: 固化 build/test/sqlite 的调用入口与错误回传。
 - M7: 固化 Host SDK 对外 API，并对齐 WebContainer 风格。
 

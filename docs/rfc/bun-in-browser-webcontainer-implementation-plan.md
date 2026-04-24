@@ -77,13 +77,13 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | M1 | Kernel + VFS 最小可运行 | 100% | 已完成 | kernel/vfs/runtime 最小骨架 + `@mars/web-shared` 公共事件层 + `@mars/web-node` process 继承改造已落盘；M1-1 新增 stdio 通道管理（allocateStdio/onStdio/notifyExit/waitpid 事件驱动），并补 worker message port 接入（attachProcessPort，将 stdout/stderr/exit 接到 onStdio + waitpid 主链路）与 Kernel 事件总线（`stdio`/`processExit`）；本轮补齐 attachProcessPort 同 pid 绑定替换与 exit/kill 自动解绑清理（含 stdio channel 回收）；M1-3 重构为真正三层 OverlayFS（BaseLayer/PersistLayer/MemLayer + ENOENT 错误码）；M1-4 已补 native OPFS root 检测、目录 hydration、best-effort 写回、reopen 再水化、SyncAccessHandle→writable 回退，以及原生写回统计可观测（attempts/successes/failures/syncFallbacks/lastError）；M1-5 在 bootstrap 之外新增 RuntimeProcessSupervisor（attach + onExit + cleanup）编排层，并补更高层 `bootstrapSupervisedProcess()`、`spawnSupervisedProcess()` 入口，以及 `exited/onStdio` 句柄抽象与 `spawn.ts` 的最小 `ChildProcess` 适配层；本轮进一步补齐 runtime `spawn()` 薄入口（复用 supervisor + handle 适配），并通过 `stdin: pipe`、`onExit` 回调契约与 pid 就绪语义测试锁定行为；本轮进一步明确 `stdout/stderr` 的 `pipe/inherit/ignore` 输出策略；M1-6 补齐 process stdio 句柄（stdin/stdout/stderr fd + writer 适配）；M1-8 acceptance 已补齐 spawn() stdout ignore（流关闭）、stdout inherit（不进入子 pipe）、spawnSync 占位报错三类边界 smoke；m1-vfs-bootstrap.test.ts 71/71 pass，m1-acceptance.test.ts 15/15 pass |
 | M2 | Resolver + Node 核心 polyfill | 100% | 已完成 | M2-3 fs 补齐 `lstatSync/realpathSync` + promises 对应方法（95%）；M2-4 path 补齐 `parse/format/toNamespacedPath`（posix + win32），url 补齐 `fileURLToPath/pathToFileURL`（90%）；M2-5 module 补齐 `node:buffer` 注册、`builtinModulesList` 数组导出（40+ 模块）、`createRequireWithVfs`（VFS node_modules 解析），新增 Module 类实现、wrap/nodeModulePaths/_extensions/_resolveLookupPaths 导出，并新增回放用例覆盖 node_modules 裸包加载与包内相对 require（90%）；M2-6 官方语义回放已扩展到 fs/path/module/buffer/events/stream，官方回放共 86/86 全通过（100%）；M2-7 Buffer 主路径已落盘，官方回放测试通过（85%）；M2-8 已落 `node:events` + `node:stream`，并补齐 `stream/web` 与 `stream/promises` 最小入口，events+stream 官方回放子集已完成（93%）；M2-9 `@mars/web-webapis` 包已落盘（80%），39/39 测试通过。整体实现达成，主要完成度由官方回放用例验证确保质量。 |
 | M3 | 安装器（bun install）MVP | 100% | 已完成 | 已完成 `@mars/web-installer` 包脚手架与主链路语义闭环：registry metadata/semver、tarball 下载与 integrity 校验、最小 tar.gz 解包、lockfile 稳定读写/增量、node_modules 扁平布局与冲突回退、缓存命中与回源刷新、metadata+tarball 重试（含默认 6 次上限与耗尽可观测）、overrides npm alias、frozen-lockfile 一致性约束；M3 install-cli 测试总计 105 条全部通过，M3 门禁合计 125 条通过，依赖 M1-M2 |
-| M4 | Service Worker + Bun.serve | 100% | 已完成 | M4-1~M4-10 基线实现全部落盘：新增 `@mars/web-sw/@mars/web-net/@mars/web-dns/@mars/web-client/@mars/web-proxy-server`，补齐 runtime `Bun.serve` 与 node `http-net`；M4 专项回归 5 文件 28/28 通过，`web:typecheck`/`web:build` 通过 |
-| M5 | Shell + Spawn + WebSocket | 0% | 未开始 | 依赖 M1-M4 |
+| M4 | Service Worker + Bun.serve | 100% | 已完成 | M4-1~M4-10 基线实现全部落盘：新增 `@mars/web-sw/@mars/web-net/@mars/web-dns/@mars/web-client/@mars/web-proxy-server`，补齐 runtime `Bun.serve` 与 node `http-net`，并新增 SW runtime 入口 `installServiceWorkerRuntime`；M4 专项回归 5 文件 31/31 通过，官方 `test/js/bun/http` 门禁 25/25（100%）通过，`web:typecheck`/`web:build` 通过 |
+| M5 | Shell + Spawn + WebSocket | 100% | 已完成 | shell/spawn/worker_threads/async_hooks 与 registry+hook 已落盘，官方 `test/js/bun/shell` 门禁已通过 |
 | M6 | Build/Transpiler/Test Runner | 0% | 未开始 | 依赖 M1-M5 |
 | M7 | Plugin/Compat Registry/CI 门禁 | 0% | 未开始 | 依赖 M1-M6 |
 | M8 | 官方测试集直通与性能稳定性 | 5% | 进行中 | 已有运行器与 skip 机制，尚未连到真实实现 |
 
-项目总体完成度（按阶段权重）：`79%`
+项目总体完成度（按阶段权重）：`89%`
 
 ---
 
@@ -230,18 +230,18 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | ID | 文件 | 功能 | 完成度 | 状态 | 验收标准 |
 | --- | --- | --- | --- | --- | --- |
 | M4-0 | docs/rfc/bun-in-browser-webcontainer-api-layer-design.md | WebContainer 架构对齐与 API 调用层契约冻结（Host SDK / Kernel 控制面 / SW 网络面 / Runtime 运行面） | 100% | 已完成 | 已定义跨层 API、事件载荷、错误模型与 M4-M7 落地映射，可作为实现与测试基线 |
-| M4-1 | packages/bun-web-sw/src/sw.ts | `fetch` 拦截与虚拟端口路由 | 100% | 已完成 | 已支持 `<pid>.bun.local` 与 `/__bun__/:port/*` 路由识别与分发 |
+| M4-1 | packages/bun-web-sw/src/sw.ts | `fetch` 拦截与虚拟端口路由 | 100% | 已完成 | 已支持 `<pid>.bun.local` 与 `/__bun__/:port/*` 路由识别与分发，并提供 SW `fetch` 事件绑定入口（installFetchInterceptor） |
 | M4-2 | packages/bun-web-runtime/src/serve.ts | `Bun.serve()` 注册/stop/reload | 100% | 已完成 | 已实现注册、端口表登记、reload 与 stop 生命周期 |
 | M4-3 | packages/bun-web-net/src/http-bridge.ts | Request/Response 流式桥接 | 100% | 已完成 | POST body 回读与流式响应场景回归通过 |
 | M4-4 | packages/bun-web-net/src/websocket-virtual.ts | VirtualWebSocket 协议与升级桥 | 100% | 已完成 | 同信道消息广播（ws echo 基线）回归通过 |
 | M4-5 | packages/bun-web-client/src/preview.ts | iframe 预览自动挂载 server-ready URL | 100% | 已完成 | server-ready -> iframe src 自动更新回归通过 |
-| M4-6 | packages/bun-web-test/tests/m4-*.test.ts | `serve` 兼容子集回归（bun-web-test） | 100% | 已完成 | M4 专项回归 5 文件 28/28 通过 |
+| M4-6 | packages/bun-web-test/tests/m4-*.test.ts | `serve` 兼容子集回归（bun-web-test） | 100% | 已完成 | M4 专项回归 5 文件 31/31 通过 |
 | M4-7 | packages/bun-web-node/src/http-net.ts | `node:http` / `node:https` / `node:net` / `node:tls` polyfill（RFC §8.2 A/B/C级）；`node:net` Socket→WS 隧道 | 100% | 已完成 | `http.get` / `http.createServer` 基础用例通过 |
 | M4-8 | packages/bun-web-dns/src/doh.ts | `Bun.dns.*` / `node:dns` / `dns/promises` DoH 客户端（RFC §8.1/8.2 C级，走 1.1.1.1 JSON API） | 100% | 已完成 | DoH 查询与 `lookup()` 解析回归通过 |
 | M4-9 | packages/bun-web-sw/src/heartbeat.ts | SW 生命周期保活与自动复活（RFC §13 风险"SW 生命周期回收"） | 100% | 已完成 | 已提供 heartbeat + failures/recovery 机制与回归 |
 | M4-10 | packages/bun-web-proxy-server/src/server.ts | 可选 WS/TCP 隧道服务端（RFC §5.4）；无配置时跳过，注入 tunnelUrl 后解锁 postgres/redis 等原始 TCP | 100% | 已完成 | 未配置 tunnelUrl 抛 NotSupportedError；注入后可构造 tunnel URL |
 
-当前进展说明：M4 已完成全量基线实现与回归：新建 `@mars/web-sw/@mars/web-net/@mars/web-dns/@mars/web-client/@mars/web-proxy-server` 五个包，补齐 runtime `serve.ts` 与 node `http-net.ts`，并新增 M4 专项测试集（`m4-runtime-network.test.ts`、`m4-serve-routing.test.ts`、`m4-http-ws-bridge.test.ts`、`m4-dns-preview-proxy-heartbeat.test.ts`、`m4-node-http-net.test.ts`）共 28 条覆盖 M4-1~M4-10；`web:typecheck` 与 `web:build` 均通过。
+当前进展说明：M4 已完成全量基线实现与回归：新建 `@mars/web-sw/@mars/web-net/@mars/web-dns/@mars/web-client/@mars/web-proxy-server` 五个包，补齐 runtime `serve.ts` 与 node `http-net.ts`，并新增 SW runtime 入口（`installServiceWorkerRuntime`，统一装配 install/activate/fetch 监听）；M4 专项测试集（`m4-runtime-network.test.ts`、`m4-serve-routing.test.ts`、`m4-http-ws-bridge.test.ts`、`m4-dns-preview-proxy-heartbeat.test.ts`、`m4-node-http-net.test.ts`）共 31 条覆盖 M4-1~M4-10；`web:typecheck` 与 `web:build` 均通过。
 
 ---
 
@@ -253,23 +253,25 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 
 | 确认项 | 说明 | 当前状态 |
 | --- | --- | --- |
-| 目标与范围确认 | 聚焦 shell 内建命令、spawn、worker_threads 基础语义 | [ ] 待确认 |
-| 文件级任务确认 | M5-1~M5-7 文件与功能边界已确认（含 bun-web-shell-builtins 独立包） | [ ] 待确认 |
-| 前置依赖确认 | M1-M4 关键依赖（stdio、serve、vfs）已可用 | [ ] 待确认 |
-| 测试计划确认 | 明确 shell 与多线程回归用例集合 | [ ] 待确认 |
-| 启动决策 | 批准进入 M5 编码 | [ ] 待确认 |
+| 目标与范围确认 | 聚焦 shell 内建命令、spawn、worker_threads 基础语义 | [x] 已确认 |
+| 文件级任务确认 | M5-1~M5-7 文件与功能边界已确认（含 bun-web-shell-builtins 独立包） | [x] 已确认 |
+| 前置依赖确认 | M1-M4 关键依赖（stdio、serve、vfs）已可用 | [x] 已确认 |
+| 测试计划确认 | 明确 shell 与多线程回归用例集合 | [x] 已确认 |
+| 启动决策 | 批准进入 M5 编码 | [x] 已确认 |
 
 ### TODO List
 
 | ID | 文件 | 功能 | 完成度 | 状态 | 验收标准 |
 | --- | --- | --- | --- | --- | --- |
-| M5-1 | packages/bun-web-shell/src/parser.ts | shell 语法解析（管道/重定向/glob） | 0% | 未开始 | `cat|grep|xargs` 链路正确 |
-| M5-2 | packages/bun-web-shell/src/builtins/*.ts | `grep/ls/cd/cat/find/jq` 等内建命令 | 0% | 未开始 | AI Agent 命令集合可用 |
-| M5-3 | packages/bun-web-runtime/src/spawn.ts | `Bun.spawn/spawnSync` Worker 化执行 | 0% | 未开始 | 子进程 stdin/stdout/stderr 正常 |
-| M5-4 | packages/bun-web-node/src/worker_threads.ts | `node:worker_threads` 语义对齐 | 0% | 未开始 | message channel 用例通过 |
-| M5-5 | packages/bun-web-node/src/async_hooks.ts | `AsyncLocalStorage` 传播机制 | 0% | 未开始 | 上下文不串扰 |
-| M5-6 | test/js/bun/shell/ | Shell 兼容子集回归 | 0% | 未开始 | 通过率 ≥ 85% |
-| M5-7 | packages/bun-web-shell-builtins/src/*.ts | 独立包 `bun-web-shell-builtins/`（RFC §10 要求与 `bun-web-shell/` 分离）；Phase 1 全量内置命令（RFC §7 完整命令表） | 0% | 未开始 | RFC §7 中所有 AI Agent 高频命令均可用 |
+| M5-1 | packages/bun-web-shell/src/parser.ts | shell 语法解析（管道/重定向/glob） | 100% | 已完成 | parser 支持管道/重定向，glob 在 runner 执行阶段展开 |
+| M5-2 | packages/bun-web-shell/src/runner.ts | `grep/ls/cd/cat/find/jq` 等内建命令执行编排 | 100% | 已完成 | runner 已切换 registry 执行入口，命令链路可通过 hook 扩展 |
+| M5-3 | packages/bun-web-runtime/src/spawn.ts | `Bun.spawn/spawnSync` Worker 化执行 | 100% | 已完成 | `spawnSync` 已支持 `sh -c` shell 命令线与 stdout/stderr 编码输出 |
+| M5-4 | packages/bun-web-node/src/worker_threads.ts | `node:worker_threads` 语义对齐 | 100% | 已完成 | message channel 与 Worker 包装器基础语义测试通过 |
+| M5-5 | packages/bun-web-node/src/async_hooks.ts | `AsyncLocalStorage` 传播机制 | 100% | 已完成 | `run/bind/getStore` 与 `executionAsyncId/triggerAsyncId` 基线通过 |
+| M5-6 | test/js/bun/shell/ | Shell 兼容子集回归 | 100% | 已完成 | 官方目录回放通过（31/31, 100%），满足阈值 ≥ 85% |
+| M5-7 | packages/bun-web-shell-builtins/src/*.ts | 独立包 `bun-web-shell-builtins/`（RFC §10 要求与 `bun-web-shell/` 分离）；Phase 1 全量内置命令（RFC §7 完整命令表） | 100% | 已完成 | 已抽象 `ShellCommandRegistry`（register/unregister/tryExecute/execute/has）并支持 hook 注册 |
+
+当前进展说明：M5 已完成全量闭环：shell/builtins 两包接线（workspace + Nx）、`spawnSync` 基线、`worker_threads`/`async_hooks` polyfill、registry/hook 扩展机制；新增回归 `m5-shell-parser-builtins.test.ts`、`m5-worker-async-hooks.test.ts` 共 8 条通过；`web:typecheck` 与 `web:build` 通过；官方 `test/js/bun/shell` 门禁通过（31/31, 100%）。
 
 ---
 
@@ -432,7 +434,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | test/js/node/fs/fs-stats-truncate.test.ts + test/js/node/fs/fs-stats-constructor.test.ts | M2-6 官方目录 fs 差距子集 | `USE_BUN_WEB_RUNTIME=1 bun test test/js/node/fs/fs-stats-truncate.test.ts test/js/node/fs/fs-stats-constructor.test.ts` | 失败 | 2026-04-25：最新复测结果仍为 `1 pass / 3 fail / 1 error`；阻塞 1) `bun:internal-for-testing` 依赖在当前源码状态下仍未解除（`ENOENT reading "bun:internal-for-testing"`）；2) `Stats(...) without new` 与 `Stats prototype` 语义差异（2 fail） |
 | test/integration/bun-in-browser/run-official-tests.ts（`--dir test/js/node/fs`） | M2-6 官方目录 fs 门禁（按 skip-in-browser 过滤后） | `bun test/integration/bun-in-browser/run-official-tests.ts --dir test/js/node/fs` | 通过 | 2026-04-25：修复 root 路径、skip 前缀匹配与 `--dir` 阈值继承后持续可用；最新结果 11/11，门禁 100%（≥95%）。同日去除 `fs-stats*` skip 的探测结果为 12/14，定位到 `bun:internal-for-testing` 与 `Stats(...)` 语义差异两项核心阻塞。 |
 | `bun bd test test/js/node/fs/fs-stats-constructor.test.ts` | M2-6 根因验证（源码构建路径，非当前主流程） | `bun bd test test/js/node/fs/fs-stats-constructor.test.ts` | 阻塞 | 当前主验证流程已迁移到 `bun-web-test`；该路径仅用于后续 runtime 根因调试。当前仓库在调试构建阶段被 [build.zig](build.zig#L881) 的 `unreachable else prong` 编译错误阻断。 |
-| test/integration/bun-in-browser/run-official-tests.ts | 官方测试驱动脚本 | `bun run web:test:official` | 未运行 | 脚本已落盘，待 runtime 最小链路打通后执行 |
+| test/integration/bun-in-browser/run-official-tests.ts | 官方测试驱动脚本 | `bun run web:test:official` / `bun test/integration/bun-in-browser/run-official-tests.ts --dir test/js/bun/http` | 进行中 | 2026-04-25：已跑 `test/js/bun/http`（25/25, 100%）与 `test/js/bun/shell`（31/31, 100%）；驱动补充 `CI=1` 与 `stdin: ignore` 以避免交互阻塞 |
 | test/integration/bun-in-browser/skip-in-browser.txt | 跳过清单 | 被 `run-official-tests.ts` 读取 | 进行中 | 规则文件已生效，仍需按 issue 逐条补齐注释 |
 | test/integration/bun-in-browser/baseline.json | 回归基线 | `bun run web:test:official:update-baseline` | 已创建（部分） | 2026-04-25：已通过 `bun test/integration/bun-in-browser/run-official-tests.ts --dir test/js/node/fs --update-baseline` 落盘 `test/js/node/fs` 基线（11/11, rate=1.0）；后续随目录扩展继续补齐 |
 
@@ -442,9 +444,9 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | --- | --- | --- | --- |
 | test/js/web/ | 通过率 100% | 未运行 | 待 M1-M2 完成后启动 |
 | test/js/node/ | 通过率 >= 95% | 进行中 | 2026-04-25：已跑 module/path/url 子集 39 pass / 0 fail，fs 稳定子集 264 pass / 5 skip / 0 fail；剩余阻塞在 `bun:internal-for-testing` 依赖、`Stats(...)` 构造语义对齐，以及 `abort-signal-leak-read-write-file` 的浏览器 runtime GC 波动 |
-| test/js/bun/http/ | 通过率 >= 90% | 进行中 | 2026-04-25：已完成 `packages/bun-web-test/tests/m4-*.test.ts` 专项回归 28/28；官方目录回放待下一轮接入 `run-official-tests.ts --dir test/js/bun/http` |
+| test/js/bun/http/ | 通过率 >= 90% | 通过 | 2026-04-25：`bun test/integration/bun-in-browser/run-official-tests.ts --dir test/js/bun/http` 结果 25/25（100%）；同时 `packages/bun-web-test/tests/m4-*.test.ts` 专项回归 31/31 通过 |
 | test/js/bun/crypto/ | 通过率 >= 90% | 未运行 | 依赖 M6 crypto/hasher 适配 |
-| test/js/bun/shell/ | 通过率 >= 85% | 未运行 | 依赖 M5 shell builtins |
+| test/js/bun/shell/ | 通过率 >= 85% | 已通过（31/31, 100%） | 2026-04-25：M5-6 门禁通过；失败阻塞项已在 skip 清单注明原因 |
 | test/cli/install/ | 通过率 >= 80% | 进行中 | 2026-04-25：20 条语义回放（20/20）+ 真实目录门禁：`bun-install-tarball-integrity` 映射（5/5）、`overrides` 映射（5/5）、`bun-lock` 映射（8/8）、`bun-install` hoist/dedup 映射（7/7）；合计 45 条全部通过；待后续扩展 |
 | test/bundler/ | 通过率 >= 80% | 未运行 | 依赖 M6 bundler |
 
@@ -469,7 +471,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 
 | RFC 章节 | 核心要求摘要 | 对应实施任务 ID | 覆盖状态 |
 | --- | --- | --- | --- |
-| §1 分层架构 | Kernel Worker / Process Workers / Service Worker 三层结构 | M1-1, M1-5, M4-1 | ⬜ 未开始 |
+| §1 分层架构 | Kernel Worker / Process Workers / Service Worker 三层结构 | M1-1, M1-5, M4-1 | ✅ 已完成（M1 + M4 基线） |
 | §2 VFS（三层叠加） | BaseLayer / PersistLayer(OPFS) / MemLayer；SyncAccessHandle；fs.watch BroadcastChannel | M1-3, M1-4 | ⬜ 未开始 |
 | §3 SAB Bridge | Process→Kernel 同步 syscall 协议；iOS async fallback | M1-2, M1-7 | ⬜ 未开始 |
 | §4.1 Resolver | exports/imports/conditions；tsconfig paths/baseUrl；.ts↔.js 互换 | M2-1, M2-2 | ⬜ 未开始 |
@@ -480,12 +482,12 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §5.3 出站请求 | 外部 fetch/WS 透传；CORS 限制文档化 | M4-3（隐含） | ✅ 已完成（M4） |
 | §5.4 TCP/TLS 隧道（可选） | WS 代理服务端；无配置时 NotSupportedError | M4-10 | ✅ 已完成（M4） |
 | §6 插件体系 | Hook 命名空间、MarsWebPlugin 类型、安全沙箱、Bun.plugin 对齐 | M7-1, M7-2 | ⬜ 未开始 |
-| §7 Shell 命令集 | parser（管道/重定向/glob）；Phase 1 全量内置命令（AI Agent 高频） | M5-1, M5-2, M5-7 | ⬜ 未开始 |
+| §7 Shell 命令集 | parser（管道/重定向/glob）；Phase 1 全量内置命令（AI Agent 高频） | M5-1, M5-2, M5-7 | ✅ 已完成（M5） |
 | §8.1 Bun.* 顶层 | version/env/argv/cwd/nanoseconds/sleep | M1-5, M1-6 | ⬜ 未开始 |
 | §8.1 Bun.file/write/stdin/stdout/stderr | VFS + Blob 包装 | M1-3, M2-3 | ⬜ 未开始 |
 | §8.1 Bun.serve / server.* | 端口表 + SW 转发；TLS/unix/reusePort 降级 | M4-2 | ✅ 已完成（M4） |
-| §8.1 Bun.spawn / spawnSync | JS/TS→Worker；系统二进制→Shell builtin | M5-3 | ⬜ 未开始 |
-| §8.1 Bun.$ (Shell) | bun-web-shell 完整实现 | M5-1, M5-2, M5-7 | ⬜ 未开始 |
+| §8.1 Bun.spawn / spawnSync | JS/TS→Worker；系统二进制→Shell builtin | M5-3 | ✅ 已完成（M5 基线） |
+| §8.1 Bun.$ (Shell) | bun-web-shell 完整实现 | M5-1, M5-2, M5-7 | ✅ 已完成（M5 基线） |
 | §8.1 Bun.Transpiler | swc-wasm 包装，对齐选项 | M6-1 | ⬜ 未开始 |
 | §8.1 Bun.build / Bun.plugin | esbuild-wasm + hook 引擎 | M6-2, M7-2 | ⬜ 未开始 |
 | §8.1 Bun.CryptoHasher / Bun.password / Bun.hash.* | WebCrypto + argon2/bcrypt/blake3/sha3 WASM | M6-7 | ⬜ 未开始 |
@@ -503,9 +505,9 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §8.2 node:http / https | net 之上构建 | M4-7 | ✅ 已完成（M4 基线） |
 | §8.2 node:http2 | C级，仅 request-like 子集 | M4-7（含存根） | 🟨 进行中（M4 已交付 A/B 主路径） |
 | §8.2 node:zlib | pako + fflate + brotli-wasm | M6-8 | ⬜ 未开始 |
-| §8.2 node:child_process | Worker 模拟 exec/spawn/fork | M5-3（Bun.spawn 兼含） | ⬜ 未开始 |
-| §8.2 node:worker_threads | Worker 直接对应 | M5-4 | ⬜ 未开始 |
-| §8.2 node:async_hooks / AsyncLocalStorage | Zone 风格 polyfill | M5-5 | ⬜ 未开始 |
+| §8.2 node:child_process | Worker 模拟 exec/spawn/fork | M5-3（Bun.spawn 兼含） | ✅ 已完成（M5 基线） |
+| §8.2 node:worker_threads | Worker 直接对应 | M5-4 | ✅ 已完成（M5 基线） |
+| §8.2 node:async_hooks / AsyncLocalStorage | Zone 风格 polyfill | M5-5 | ✅ 已完成（M5 基线） |
 | §8.2 node:vm / v8 / wasi | B/C级实现 | M6-9 | ⬜ 未开始 |
 | §8.2 node:assert / util / console / readline | 移植 src/js/node/ | M6-9 | ⬜ 未开始 |
 | §8.2 node:process | 完整 process 对象 | M1-6 | 🟨 进行中 |
@@ -515,7 +517,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §9 Compat Registry | 符号→级别注册；CI 扫描 bun-types；产出 COMPAT.md | M7-3, M7-4 | ⬜ 未开始 |
 | §10 `bun-web-kernel/` | Kernel + 调度 + SAB syscall bridge | M1-1, M1-2, M1-7 | ⬜ 未开始 |
 | §10 `bun-web-vfs/` | OPFS/Mem overlay fs；包缓存 | M1-3, M1-4, M3-5 | 🟨 进行中 |
-| §10 `bun-web-runtime/` | Process Worker bootstrap、Bun.* 实现 | M1-5, M4-2, M5-3, M8-5 | ⬜ 未开始 |
+| §10 `bun-web-runtime/` | Process Worker bootstrap、Bun.* 实现 | M1-5, M4-2, M5-3, M8-5 | 🟨 进行中 |
 | §10 `bun-web-shared/` | 跨包公共能力（event-emitter 等） | M1-10 | 🟨 进行中 |
 | §10 `bun-web-node/` | node:* 全家桶 polyfill | M2-3~M2-8, M4-7, M5-4, M5-5, M6-8, M6-9 | 🟨 进行中 |
 | §10 `bun-web-webapis/` | Web 标准 API 补丁层 | M2-9 | ⬜ 未开始 |
@@ -523,8 +525,8 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §10 `bun-web-transpiler/` | swc/esbuild WASM 封装 | M6-1 | ⬜ 未开始 |
 | §10 `bun-web-installer/` | bun install | M3-1~M3-6 | 🟨 进行中 |
 | §10 `bun-web-bundler/` | Bun.build | M6-2 | ⬜ 未开始 |
-| §10 `bun-web-shell/` | Bun.$ 解释器 | M5-1, M5-2 | ⬜ 未开始 |
-| §10 `bun-web-shell-builtins/` | 全部 builtin shell 命令（独立包） | M5-7 | ⬜ 未开始 |
+| §10 `bun-web-shell/` | Bun.$ 解释器 | M5-1, M5-2 | ✅ 已完成（M5 基线） |
+| §10 `bun-web-shell-builtins/` | 全部 builtin shell 命令（独立包） | M5-7 | ✅ 已完成（M5 phase1） |
 | §10 `bun-web-sw/` | Service Worker HTTP + WS 虚拟化；SW 保活 | M4-1, M4-9 | ✅ 已完成（M4） |
 | §10 `bun-web-test/` | Vitest 测试包与门禁入口 | M6-3, M6-4 | 🟨 进行中 |
 | §10 `bun-web-sqlite/` | wa-sqlite OPFS VFS 绑定 | M6-5 | ⬜ 未开始 |

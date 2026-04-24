@@ -131,8 +131,10 @@ function extractErrorSummary(output: string): string | undefined {
 async function runFile(relPath: string): Promise<RunResult> {
   await using proc = Bun.spawn({
     cmd: [process.execPath, "test", join(ROOT, relPath)],
+    stdin: "ignore",
     env: {
       ...process.env,
+      CI: process.env.CI ?? "1",
       USE_BUN_WEB_RUNTIME: "1",
       BUN_DEBUG_QUIET_LOGS: "1",
       // Enable bun:internal-for-testing exports in non-debug binaries when available.

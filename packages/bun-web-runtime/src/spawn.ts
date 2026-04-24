@@ -1,6 +1,7 @@
 import { Kernel, type KernelConfig } from '@mars/web-kernel'
 import type { SpawnedSupervisedProcess } from './process-supervisor'
 import { RuntimeProcessSupervisor } from './process-supervisor'
+import { runShellCommandSync } from '@mars/web-shell'
 
 const HOST_PROCESS = (globalThis as Record<string, unknown>).process as
   | {
@@ -13,7 +14,7 @@ export interface SpawnOptions {
   cmd: string[]
   cwd?: string
   env?: Record<string, string>
-  stdin?: 'pipe' | 'inherit' | 'ignore' | Blob | ReadableStream
+  stdin?: 'pipe' | 'inherit' | 'ignore' | Blob | ReadableStream | string
   stdout?: 'pipe' | 'inherit' | 'ignore'
   stderr?: 'pipe' | 'inherit' | 'ignore'
   onExit?(proc: ChildProcess, exitCode: number, signal: number | null): void
@@ -257,5 +258,29 @@ export function spawn(options: RuntimeSpawnOptions): ChildProcess {
 }
 
 export function spawnSync(_options: SpawnOptions): SyncSubprocess {
-  throw new Error('spawnSync is not implemented in bun-web-runtime M1')
+  if (_options.cmd.length === 0) {
+    throw new Error('spawnSync requires a non-empty cmd array')
+  }
+
+  const isShellScript = _options.cmd[0] === 'sh' && _options.cmd[1] === '-c' && typeof _options.cmd[2] === 'string'
+  const commandLine = isShellScript ? _options.cmd[2] : _options.cmd.join(' ')
+  const stdin =
+    typeof _options.stdin === 'string' &&
+    _options.stdin !== 'pipe' &&
+    _options.stdin !== 'inherit' &&
+    _options.stdin !== 'ignore'
+      ? _options.stdin
+      : ''
+
+  const result = runShellCommandSync(commandLine, {
+    cwd: _options.cwd,
+    env: _options.env,
+    stdin,
+  })
+
+  return {
+    exitCode: result.exitCode,
+    stdout: new TextEncoder().encode(result.stdout),
+    stderr: new TextEncoder().encode(result.stderr),
+  }
 }

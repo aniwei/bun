@@ -35,6 +35,27 @@
         "@types/node": "*",
       },
     },
+    "packages/bun-web-client": {
+      "name": "@mars/web-client",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-dns": {
+      "name": "@mars/web-dns",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-installer": {
+      "name": "@mars/web-installer",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
     "packages/bun-web-kernel": {
       "name": "@mars/web-kernel",
       "version": "0.0.0",
@@ -42,6 +63,13 @@
         "@mars/web-shared": "workspace:*",
         "@mars/web-vfs": "workspace:*",
       },
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-net": {
+      "name": "@mars/web-net",
+      "version": "0.0.0",
       "devDependencies": {
         "typescript": "6.0.2",
       },
@@ -54,6 +82,13 @@
         "@mars/web-shared": "workspace:*",
         "@mars/web-vfs": "workspace:*",
       },
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-proxy-server": {
+      "name": "@mars/web-proxy-server",
+      "version": "0.0.0",
       "devDependencies": {
         "typescript": "6.0.2",
       },
@@ -71,6 +106,7 @@
       "dependencies": {
         "@mars/web-kernel": "workspace:*",
         "@mars/web-node": "workspace:*",
+        "@mars/web-shell": "workspace:*",
       },
       "devDependencies": {
         "typescript": "6.0.2",
@@ -79,6 +115,33 @@
     "packages/bun-web-shared": {
       "name": "@mars/web-shared",
       "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-shell": {
+      "name": "@mars/web-shell",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mars/web-shell-builtins": "workspace:*",
+      },
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-shell-builtins": {
+      "name": "@mars/web-shell-builtins",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-sw": {
+      "name": "@mars/web-sw",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mars/web-kernel": "workspace:*",
+      },
       "devDependencies": {
         "typescript": "6.0.2",
       },
@@ -197,15 +260,31 @@
 
     "@lezer/lr": ["@lezer/lr@1.4.3", "https://registry.npmmirror.com/@lezer/lr/-/lr-1.4.3.tgz", { "dependencies": { "@lezer/common": "^1.0.0" } }, "sha512-yenN5SqAxAPv/qMnpWW0AT7l+SxVrgG+u0tNsRQWqbrz66HIl8DnEbBObvy21J5K7+I1v7gsAnlE2VQ5yYVSeA=="],
 
+    "@mars/web-client": ["@mars/web-client@workspace:packages/bun-web-client"],
+
+    "@mars/web-dns": ["@mars/web-dns@workspace:packages/bun-web-dns"],
+
+    "@mars/web-installer": ["@mars/web-installer@workspace:packages/bun-web-installer"],
+
     "@mars/web-kernel": ["@mars/web-kernel@workspace:packages/bun-web-kernel"],
 
+    "@mars/web-net": ["@mars/web-net@workspace:packages/bun-web-net"],
+
     "@mars/web-node": ["@mars/web-node@workspace:packages/bun-web-node"],
+
+    "@mars/web-proxy-server": ["@mars/web-proxy-server@workspace:packages/bun-web-proxy-server"],
 
     "@mars/web-resolver": ["@mars/web-resolver@workspace:packages/bun-web-resolver"],
 
     "@mars/web-runtime": ["@mars/web-runtime@workspace:packages/bun-web-runtime"],
 
     "@mars/web-shared": ["@mars/web-shared@workspace:packages/bun-web-shared"],
+
+    "@mars/web-shell": ["@mars/web-shell@workspace:packages/bun-web-shell"],
+
+    "@mars/web-shell-builtins": ["@mars/web-shell-builtins@workspace:packages/bun-web-shell-builtins"],
+
+    "@mars/web-sw": ["@mars/web-sw@workspace:packages/bun-web-sw"],
 
     "@mars/web-test": ["@mars/web-test@workspace:packages/bun-web-test"],
 

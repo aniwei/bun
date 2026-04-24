@@ -1458,78 +1458,37 @@ export function build(opts: BuildOptions): Promise<BuildOutput>;
 packages/bun-web-shell/
   src/
     index.ts
-    parser.ts          # shell 语法解析（AST）
-    executor.ts        # AST 执行器（管道/重定向/glob 展开）
-    context.ts         # ShellContext 构建与生命周期
-    glob-expand.ts     # glob 展开（复用 Bun.Glob）
-    pipeline.ts        # 管道 ReadableStream ↔ WritableStream 桥接
-    shell.types.ts
+    parser.ts          # shell 语法解析（管道/重定向）
+    runner.ts          # 同步执行器（registry + hook 驱动）
 ```
 
 ### 核心类设计
 
 ```ts
-// shell.types.ts
-export interface ShellContext {
-  argv: string[];
-  env: Record<string, string>;
-  cwd: string;
-  stdin: ReadableStream<Uint8Array>;
-  stdout: WritableStream<Uint8Array>;
-  stderr: WritableStream<Uint8Array>;
-  fs: import('@mars/web-vfs').VFS;
-  signal: AbortSignal;
-  builtins: Map<string, ShellBuiltin>;
-}
-
-export interface ShellBuiltin {
-  name: string;
-  run(ctx: ShellContext): Promise<number>;    // 返回 exit code
-}
-
-export interface ShellResult {
-  exitCode: number;
-  stdout: Uint8Array;
-  stderr: Uint8Array;
-}
-
 // parser.ts
 export type ShellNode =
-  | { type: 'Command'; argv: ShellWord[]; redirects: Redirect[] }
-  | { type: 'Pipeline'; commands: ShellNode[] }
-  | { type: 'Sequence'; left: ShellNode; right: ShellNode; op: ';' | '&&' | '||' }
-  | { type: 'Subshell'; body: ShellNode };
+  | { type: 'Command'; argv: string[]; redirects: Array<{ kind: '<' | '>' | '>>'; target: string }> }
+  | { type: 'Pipeline'; commands: ShellNode[] };
 
 export function parseShell(input: string): ShellNode;
 
-// executor.ts
-export class ShellExecutor {
-  constructor(ctx: ShellContext);
-
-  run(node: ShellNode): Promise<number>;
-  exec(argv: string[]): Promise<number>;
-
-  /** 注册额外 builtin（由 plugin 调用） */
-  registerBuiltin(builtin: ShellBuiltin): void;
+// runner.ts
+export interface ShellRunOptions {
+  cwd?: string;
+  env?: Record<string, string>;
+  stdin?: string;
+  registry?: import('@mars/web-shell-builtins').ShellCommandRegistry;
+  hooks?: import('@mars/web-shell-builtins').ShellCommandRegisterHook[];
 }
 
-// index.ts（Bun.$ 实现）
-export function createShellTag(ctx: ShellContext): ShellTag;
-export type ShellTag = (
-  template: TemplateStringsArray,
-  ...values: unknown[]
-) => ShellPromise;
-
-export interface ShellPromise extends Promise<ShellResult> {
-  text(): Promise<string>;
-  lines(): Promise<string[]>;
-  json<T = unknown>(): Promise<T>;
-  nothrow(): ShellPromise;
-  quiet(): ShellPromise;
-  stdin(input: string | Uint8Array | ReadableStream): ShellPromise;
-  env(vars: Record<string, string>): ShellPromise;
-  cwd(dir: string): ShellPromise;
+export interface ShellRunResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  cwd: string;
 }
+
+export function runShellCommandSync(commandLine: string, options?: ShellRunOptions): ShellRunResult;
 ```
 
 ---
@@ -1543,58 +1502,44 @@ export interface ShellPromise extends Promise<ShellResult> {
 ```
 packages/bun-web-shell-builtins/
   src/
-    index.ts             # 注册所有 builtin
-    # 文件浏览
-    ls.ts  tree.ts  pwd.ts  cd.ts  stat.ts  file.ts  which.ts  readlink.ts
-    # 文件读写
-    cat.ts  head.ts  tail.ts  wc.ts  cp.ts  mv.ts  rm.ts  mkdir.ts  rmdir.ts
-    touch.ts  ln.ts  chmod.ts  echo.ts  tee.ts
-    # 查找过滤
-    grep.ts  find.ts  fd.ts  sed.ts  awk.ts  sort.ts  uniq.ts  cut.ts  tr.ts  xargs.ts
-    # 差异补丁
-    diff.ts  patch.ts
-    # 压缩
-    tar.ts  gzip.ts  gunzip.ts  zip.ts  unzip.ts
-    # 网络
-    curl.ts  wget.ts
-    # 进程环境
-    ps.ts  kill.ts  env.ts  export.ts  sleep.ts  time.ts  true.ts  false.ts
-    # 管道助手
-    jq.ts  yq.ts  base64.ts  sha256sum.ts  md5sum.ts
-    # 版本控制
-    git.ts        # isomorphic-git 封装
-    # 包管理
-    bun-cmd.ts    # bun / bunx / npm→bun / npx→bunx / node→bun 统一入口
+    index.ts             # 对外导出
+    types.ts             # BuiltinContext/BuiltinResult/Registry/Hook
+    commands.ts          # Phase 1 内建命令（cd/ls/cat/grep/find/jq）
+    registry.ts          # ShellCommandRegistry（register/unregister/tryExecute/execute/has）
+    hook.ts              # 命令注册 hook（applyShellCommandRegisterHooks）
+    fs-adapter.ts        # in-memory fs 适配器
 ```
 
 ### 核心类设计（统一 builtin 接口）
 
 ```ts
-// index.ts
-export const BUILTINS: ShellBuiltin[] = [
-  /* 所有命令实例 */
-];
+// types.ts
+export interface ShellCommandRegistry {
+  register(name: string, command: BuiltinCommand): void;
+  unregister(name: string): boolean;
+  has(name: string): boolean;
+  tryExecute(name: string, args: string[], context: BuiltinContext): BuiltinResult | null;
+  execute(name: string, args: string[], context: BuiltinContext): BuiltinResult;
+}
 
-export function registerAllBuiltins(executor: ShellExecutor): void;
+export type ShellCommandRegisterHook = (registry: ShellCommandRegistry) => void;
 
-// 每个命令文件导出同样形状
-// grep.ts 示例：
-export const grep: ShellBuiltin = {
-  name: 'grep',
-  async run(ctx: ShellContext): Promise<number> {
-    // 解析 ctx.argv，从 ctx.stdin 或 ctx.fs 读文件
-    // 写出到 ctx.stdout / ctx.stderr
-    // 返回 exit code
-  },
-};
+// registry.ts
+export class BuiltinCommandRegistry implements ShellCommandRegistry {
+  register(name: string, command: BuiltinCommand): void;
+  unregister(name: string): boolean;
+  has(name: string): boolean;
+  tryExecute(name: string, args: string[], context: BuiltinContext): BuiltinResult | null;
+  execute(name: string, args: string[], context: BuiltinContext): BuiltinResult;
+}
 
-// git.ts 使用 isomorphic-git
-export const git: ShellBuiltin = {
-  name: 'git',
-  async run(ctx: ShellContext): Promise<number> {
-    // 封装 isomorphic-git，使用 ctx.fs 作为 fs 参数
-  },
-};
+export function createBuiltinCommandRegistry(initialCommands?: Record<string, BuiltinCommand>): ShellCommandRegistry;
+
+// hook.ts
+export function applyShellCommandRegisterHooks(
+  registry: ShellCommandRegistry,
+  hooks?: ShellCommandRegisterHook[],
+): ShellCommandRegistry;
 ```
 
 ---

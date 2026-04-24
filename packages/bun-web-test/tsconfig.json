@@ -21,6 +21,8 @@
     "../bun-web-dns/src/**/*.ts",
     "../bun-web-client/src/**/*.ts",
     "../bun-web-proxy-server/src/**/*.ts",
+    "../bun-web-shell/src/**/*.ts",
+    "../bun-web-shell-builtins/src/**/*.ts",
     "../bun-web-vfs/src/**/*.ts",
     "../bun-web-runtime/src/**/*.ts",
     "../bun-web-node/src/**/*.ts",

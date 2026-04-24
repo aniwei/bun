@@ -4,6 +4,29 @@ export type PortResolver = {
 
 export type DispatchToKernel = (pid: number, request: Request) => Promise<Response>
 
+export type FetchEventLike = {
+  request: Request
+  respondWith(response: Response | Promise<Response>): void
+}
+
+export type FetchEventTargetLike = {
+  addEventListener(type: 'fetch', listener: (event: FetchEventLike) => void): void
+  removeEventListener?(type: 'fetch', listener: (event: FetchEventLike) => void): void
+}
+
+export type ExtendableEventLike = {
+  waitUntil(promise: Promise<unknown>): void
+}
+
+export type ServiceWorkerGlobalLike = FetchEventTargetLike & {
+  addEventListener(type: 'install' | 'activate', listener: (event: ExtendableEventLike) => void): void
+  removeEventListener?(type: 'install' | 'activate', listener: (event: ExtendableEventLike) => void): void
+  skipWaiting?(): Promise<void> | void
+  clients?: {
+    claim?(): Promise<void> | void
+  }
+}
+
 const BUN_LOCAL_SUFFIX = '.bun.local'
 
 function parsePortSegment(pathname: string): number | null {
@@ -69,5 +92,68 @@ export function createFetchRouter(
     }
 
     return dispatchVirtualRequest(request, resolver, dispatchToKernel)
+  }
+}
+
+export function createFetchEventHandler(
+  router: (request: Request) => Promise<Response | null>,
+): (event: FetchEventLike) => void {
+  return event => {
+    event.respondWith(
+      (async () => {
+        const routed = await router(event.request)
+        if (routed) return routed
+        return fetch(event.request)
+      })(),
+    )
+  }
+}
+
+/**
+ * Install fetch interception on a Service Worker-like global scope.
+ * Returns an unsubscribe function.
+ */
+export function installFetchInterceptor(
+  target: FetchEventTargetLike,
+  resolver: PortResolver,
+  dispatchToKernel: DispatchToKernel,
+): () => void {
+  const router = createFetchRouter(resolver, dispatchToKernel)
+  const handler = createFetchEventHandler(router)
+  target.addEventListener('fetch', handler)
+
+  return () => {
+    target.removeEventListener?.('fetch', handler)
+  }
+}
+
+/**
+ * Install Service Worker runtime listeners:
+ * - install: best-effort skipWaiting
+ * - activate: best-effort clients.claim
+ * - fetch: virtual request interception
+ */
+export function installServiceWorkerRuntime(
+  target: ServiceWorkerGlobalLike,
+  resolver: PortResolver,
+  dispatchToKernel: DispatchToKernel,
+): () => void {
+  const removeFetch = installFetchInterceptor(target, resolver, dispatchToKernel)
+
+  const installHandler = (event: ExtendableEventLike) => {
+    event.waitUntil(Promise.resolve(target.skipWaiting?.()))
+  }
+
+  const activateHandler = (event: ExtendableEventLike) => {
+    event.waitUntil(Promise.resolve(target.clients?.claim?.()))
+  }
+
+  target.addEventListener('install', installHandler)
+  target.addEventListener('activate', activateHandler)
+
+  return () => {
+    removeFetch()
+    target.removeEventListener?.('install', installHandler)
+    target.removeEventListener?.('activate', activateHandler)
   }
 }

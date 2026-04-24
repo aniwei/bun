@@ -1,5 +1,5 @@
 {
-  "name": "@mars/web-runtime",
+  "name": "@mars/web-shell",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -17,9 +17,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@mars/web-kernel": "workspace:*",
-    "@mars/web-node": "workspace:*",
-    "@mars/web-shell": "workspace:*"
+    "@mars/web-shell-builtins": "workspace:*"
   },
   "devDependencies": {
     "typescript": "6.0.2"
