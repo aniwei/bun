@@ -323,4 +323,79 @@ describe('overrides (web installer port of test/cli/install/overrides.test.ts)',
     expect(result.lockfile.packages['bytes@1.0.0']).toBeDefined()
     expect(result.lockfile.packages['bytes@3.0.0']).toBeUndefined()
   })
+
+  // Maps to: "overrides to npm specifier"
+  test('override supports npm alias specifier for transitive dependency', async () => {
+    const lodash400 = await makePkg('lodash', '4.0.0')
+    const bytes300 = await makePkg('bytes', '3.0.0')
+    const express = await makePkg('express', '4.18.2', { bytes: '3.0.0' })
+
+    const { metadataMap, tarballMap } = buildRegistry([lodash400, bytes300, express])
+    const requested: string[] = []
+
+    const fetchFn = async (input: string | URL): Promise<Response> => {
+      const url = String(input)
+      requested.push(url)
+      if (url in metadataMap) {
+        return new Response(JSON.stringify(metadataMap[url]), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url in tarballMap) {
+        return new Response(toStrictUint8Array(tarballMap[url]), { status: 200 })
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const result = await installFromManifest(
+      {
+        dependencies: { express: '4.18.2' },
+        overrides: { bytes: 'npm:lodash@4.0.0' },
+      },
+      { registryUrl: REGISTRY, fetchFn },
+    )
+
+    expect(result.lockfile.packages['bytes@4.0.0']).toBeDefined()
+    expect(result.lockfile.packages['bytes@3.0.0']).toBeUndefined()
+    expect(requested).toContain(`${REGISTRY}lodash`)
+    expect(requested).not.toContain(`${REGISTRY}bytes`)
+  })
+
+  test('override supports scoped npm alias specifier for transitive dependency', async () => {
+    const scoped = await makePkg('@scope/lodashish', '1.2.3')
+    const bytes300 = await makePkg('bytes', '3.0.0')
+    const express = await makePkg('express', '4.18.2', { bytes: '3.0.0' })
+
+    const { metadataMap, tarballMap } = buildRegistry([scoped, bytes300, express])
+    const requested: string[] = []
+
+    const fetchFn = async (input: string | URL): Promise<Response> => {
+      const url = String(input)
+      requested.push(url)
+      if (url in metadataMap) {
+        return new Response(JSON.stringify(metadataMap[url]), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url in tarballMap) {
+        return new Response(toStrictUint8Array(tarballMap[url]), { status: 200 })
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const result = await installFromManifest(
+      {
+        dependencies: { express: '4.18.2' },
+        overrides: { bytes: 'npm:@scope/lodashish@1.2.3' },
+      },
+      { registryUrl: REGISTRY, fetchFn },
+    )
+
+    expect(result.lockfile.packages['bytes@1.2.3']).toBeDefined()
+    expect(result.lockfile.packages['bytes@3.0.0']).toBeUndefined()
+    expect(requested).toContain(`${REGISTRY}${encodeURIComponent('@scope/lodashish')}`)
+    expect(requested).not.toContain(`${REGISTRY}bytes`)
+  })
 })

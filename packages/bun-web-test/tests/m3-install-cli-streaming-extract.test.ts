@@ -108,6 +108,16 @@ function installWithFetch(fetchFn: (input: string | URL) => Promise<Response>) {
   )
 }
 
+function installWithFetchAndRetry(
+  fetchFn: (input: string | URL) => Promise<Response>,
+  retryCount: number,
+) {
+  return installFromManifest(
+    { dependencies: { 'stream-pkg': '1.0.0' } },
+    { registryUrl: REGISTRY, fetchFn, retryCount },
+  )
+}
+
 describe('bun-install-streaming-extract (web installer port)', () => {
   test('installs correctly from chunked tarball response', async () => {
     const tarballUrl = `${REGISTRY}/stream-pkg/-/stream-pkg-1.0.0.tgz`
@@ -259,5 +269,66 @@ describe('bun-install-streaming-extract (web installer port)', () => {
       installPath: '/node_modules/stream-pkg',
       packageKey: 'stream-pkg@1.0.0',
     })
+  })
+
+  test('damaged tarball retries and succeeds on next attempt', async () => {
+    const tarballUrl = `${REGISTRY}/stream-pkg/-/stream-pkg-1.0.0.tgz`
+    const goodTgz = await gzip(createTar([{ path: 'package/package.json', data: '{"name":"stream-pkg","version":"1.0.0"}' }]))
+    const damagedTgz = goodTgz.slice(0, Math.max(8, Math.floor(goodTgz.length / 3)))
+    let tarballRequests = 0
+
+    const fetchFn = async (input: string | URL): Promise<Response> => {
+      const url = String(input)
+      if (url === `${REGISTRY}/stream-pkg`) {
+        return new Response(
+          JSON.stringify({
+            name: 'stream-pkg',
+            'dist-tags': { latest: '1.0.0' },
+            versions: { '1.0.0': { dist: { tarball: tarballUrl } } },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url === tarballUrl) {
+        tarballRequests += 1
+        return tarballRequests === 1
+          ? createChunkedResponse(damagedTgz, 2)
+          : createChunkedResponse(goodTgz, 97)
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const result = await installWithFetchAndRetry(fetchFn, 1)
+    expect(tarballRequests).toBe(2)
+    expect(result.lockfile.packages['stream-pkg@1.0.0']).toBeDefined()
+  })
+
+  test('damaged tarball retry exhaustion surfaces attempt count', async () => {
+    const tarballUrl = `${REGISTRY}/stream-pkg/-/stream-pkg-1.0.0.tgz`
+    const goodTgz = await gzip(createTar([{ path: 'package/package.json', data: '{"name":"stream-pkg","version":"1.0.0"}' }]))
+    const damagedTgz = goodTgz.slice(0, Math.max(8, Math.floor(goodTgz.length / 3)))
+    let tarballRequests = 0
+
+    const fetchFn = async (input: string | URL): Promise<Response> => {
+      const url = String(input)
+      if (url === `${REGISTRY}/stream-pkg`) {
+        return new Response(
+          JSON.stringify({
+            name: 'stream-pkg',
+            'dist-tags': { latest: '1.0.0' },
+            versions: { '1.0.0': { dist: { tarball: tarballUrl } } },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url === tarballUrl) {
+        tarballRequests += 1
+        return createChunkedResponse(damagedTgz, 2)
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    await expect(() => installWithFetchAndRetry(fetchFn, 1)).rejects.toThrow(/after 2 attempts/)
+    expect(tarballRequests).toBe(2)
   })
 })

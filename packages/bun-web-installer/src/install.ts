@@ -1,7 +1,9 @@
 import {
   createEmptyLockfile,
   type BunWebLockfile,
+  normalizeLockfile,
   upsertLockfilePackage,
+  writeLockfile,
 } from './lockfile'
 import { 
   fetchPackageMetadata, 
@@ -32,6 +34,7 @@ export type InstallFromManifestOptions = {
   tarballCache?: TarballCache
   mode?: 'full' | 'lockfile-only'
   retryCount?: number
+  frozenLockfile?: boolean
 }
 
 export type InstallFromManifestResult = {
@@ -75,6 +78,52 @@ function pickVersion(metadata: NpmPackageMetadata, spec: string): string {
 function resolveDependencySpec(manifest: InstallManifest, name: string, fallbackSpec: string): string {
   const override = manifest.overrides?.[name]
   return typeof override === 'string' && override.length > 0 ? override : fallbackSpec
+}
+
+type DependencyRequest = {
+  packageName: string
+  spec: string
+}
+
+function parseNpmAliasOverride(overrideSpec: string): DependencyRequest | null {
+  if (!overrideSpec.startsWith('npm:')) {
+    return null
+  }
+
+  const aliased = overrideSpec.slice(4)
+  if (aliased.length === 0) {
+    return null
+  }
+
+  const separatorIndex = aliased.startsWith('@') ? aliased.lastIndexOf('@') : aliased.indexOf('@')
+  if (separatorIndex <= 0 || separatorIndex >= aliased.length - 1) {
+    return null
+  }
+
+  const packageName = aliased.slice(0, separatorIndex)
+  const spec = aliased.slice(separatorIndex + 1)
+  if (packageName.length === 0 || spec.length === 0) {
+    return null
+  }
+
+  return { packageName, spec }
+}
+
+function resolveDependencyRequest(
+  manifest: InstallManifest,
+  name: string,
+  fallbackSpec: string,
+): DependencyRequest {
+  const spec = resolveDependencySpec(manifest, name, fallbackSpec)
+  const alias = parseNpmAliasOverride(spec)
+  if (alias) {
+    return alias
+  }
+
+  return {
+    packageName: name,
+    spec,
+  }
 }
 
 function getVersionManifest(metadata: NpmPackageMetadata, version: string): VersionManifest {
@@ -218,7 +267,14 @@ export async function installFromManifest(
 ): Promise<InstallFromManifestResult> {
   assertManifest(manifest)
 
+  if (options.frozenLockfile && !options.lockfile) {
+    throw new Error('Frozen lockfile requires an existing lockfile')
+  }
+
   let lockfile = options.lockfile ?? createEmptyLockfile()
+  const originalLockfileFingerprint = options.lockfile
+    ? writeLockfile(normalizeLockfile(options.lockfile))
+    : null
   const fetchOptions: FetchPackageMetadataOptions = {
     registryUrl: options.registryUrl,
     fetchFn: options.fetchFn,
@@ -243,24 +299,24 @@ export async function installFromManifest(
   const resolvedRootDependencies: Record<string, string> = {}
 
   const mode = options.mode ?? 'full'
-  const retryCount = Math.max(0, options.retryCount ?? 0)
+  const retryCount = Math.max(0, options.retryCount ?? 5)
 
   while (queue.length > 0) {
     const task = queue.shift()!
-    const taskSpec = resolveDependencySpec(manifest, task.name, task.spec)
+    const request = resolveDependencyRequest(manifest, task.name, task.spec)
 
     try {
-      let metadata = metadataCache.get(task.name)
+      let metadata = metadataCache.get(request.packageName)
       if (!metadata) {
         metadata = await withRetries(
-          async () => await fetchPackageMetadata(task.name, fetchOptions),
+          async () => await fetchPackageMetadata(request.packageName, fetchOptions),
           retryCount,
           shouldRetryMetadataError,
         )
-        metadataCache.set(task.name, metadata)
+        metadataCache.set(request.packageName, metadata)
       }
 
-      const version = pickVersion(metadata, taskSpec)
+      const version = pickVersion(metadata, request.spec)
       const packageKey = `${task.name}@${version}`
 
       if (task.isRoot) {
@@ -275,6 +331,7 @@ export async function installFromManifest(
       if (mode === 'full') {
         const cacheKey = packageKey
         let tarballBytes = await options.tarballCache?.getTarball(cacheKey)
+        let shouldPersistTarball = false
 
         // A stale/corrupted cache entry must not bypass integrity guarantees.
         if (tarballBytes && versionManifest.dist.integrity) {
@@ -285,20 +342,32 @@ export async function installFromManifest(
           }
         }
 
-        if (!tarballBytes) {
-          tarballBytes = await withRetries(
-            async () => await downloadTarball(versionManifest.dist.tarball, {
-              fetchFn: options.fetchFn,
-              integrity: versionManifest.dist.integrity,
-            }),
-            retryCount,
-            shouldRetryTarballError,
-          )
+        await withRetries(
+          async () => {
+            if (!tarballBytes) {
+              tarballBytes = await downloadTarball(versionManifest.dist.tarball, {
+                fetchFn: options.fetchFn,
+                integrity: versionManifest.dist.integrity,
+              })
+              shouldPersistTarball = true
+            }
+
+            // Ensure the downloaded/cached archive is parseable before mutating lockfile state.
+            try {
+              await extractTarball(tarballBytes)
+            } catch (error) {
+              // Retry path should refetch bytes instead of reusing a corrupted archive.
+              tarballBytes = null
+              throw error
+            }
+          },
+          retryCount,
+          shouldRetryTarballError,
+        )
+
+        if (shouldPersistTarball && tarballBytes) {
           await options.tarballCache?.setTarball(cacheKey, tarballBytes)
         }
-
-        // Ensure the downloaded/cached archive is parseable before mutating lockfile state.
-        await extractTarball(tarballBytes)
       }
 
       lockfile = upsertLockfilePackage(lockfile, packageKey, {
@@ -339,6 +408,14 @@ export async function installFromManifest(
   }
 
   const normalizedLockfile = pruneUnresolvableDependencies(lockfile)
+
+  if (options.frozenLockfile && originalLockfileFingerprint !== null) {
+    const nextFingerprint = writeLockfile(normalizeLockfile(normalizedLockfile))
+    if (nextFingerprint !== originalLockfileFingerprint) {
+      throw new Error('Frozen lockfile mismatch')
+    }
+  }
+
   const layoutPlan = planNodeModulesLayoutFromLockfile(normalizedLockfile, resolvedRootDependencies)
 
   return {

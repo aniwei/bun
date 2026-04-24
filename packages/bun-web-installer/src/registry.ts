@@ -15,6 +15,10 @@ export type FetchPackageMetadataOptions = {
   fetchFn?: FetchLike
 }
 
+function looksLikeDistTag(spec: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9._-]*$/.test(spec)
+}
+
 function normalizeRegistryUrl(registryUrl: string): string {
   return registryUrl.replace(/\/+$/, '')
 }
@@ -81,6 +85,10 @@ export function resolveVersion(metadata: NpmPackageMetadata, spec = 'latest'): s
   const allVersions = Object.keys(metadata.versions)
   const best = maxSatisfying(allVersions, spec)
   if (best) return best
+
+  if (looksLikeDistTag(spec)) {
+    throw new Error(`dist-tag '${spec}' not found for package '${metadata.name}'`)
+  }
 
   throw new Error(`No version matching '${spec}' found for package '${metadata.name}'`)
 }

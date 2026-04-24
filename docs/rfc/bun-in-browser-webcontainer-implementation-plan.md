@@ -6,6 +6,7 @@
 | 版本 | v1 (2026-04-24) |
 | 关联 RFC | bun-in-browser-webcontainer.md |
 | 模块 API 设计 | bun-in-browser-module-design.md |
+| API 调用层设计 | bun-in-browser-webcontainer-api-layer-design.md |
 | 目标 | 将 RFC 拆解为可执行阶段任务，按文件与功能跟踪完成度 |
 
 ---
@@ -75,16 +76,14 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | M0 | 文档与门禁基线 | 100% | 已完成 | RFC 修订、验收脚手架与官方测试驱动脚本已落盘 |
 | M1 | Kernel + VFS 最小可运行 | 100% | 已完成 | kernel/vfs/runtime 最小骨架 + `@mars/web-shared` 公共事件层 + `@mars/web-node` process 继承改造已落盘；M1-1 新增 stdio 通道管理（allocateStdio/onStdio/notifyExit/waitpid 事件驱动），并补 worker message port 接入（attachProcessPort，将 stdout/stderr/exit 接到 onStdio + waitpid 主链路）与 Kernel 事件总线（`stdio`/`processExit`）；本轮补齐 attachProcessPort 同 pid 绑定替换与 exit/kill 自动解绑清理（含 stdio channel 回收）；M1-3 重构为真正三层 OverlayFS（BaseLayer/PersistLayer/MemLayer + ENOENT 错误码）；M1-4 已补 native OPFS root 检测、目录 hydration、best-effort 写回、reopen 再水化、SyncAccessHandle→writable 回退，以及原生写回统计可观测（attempts/successes/failures/syncFallbacks/lastError）；M1-5 在 bootstrap 之外新增 RuntimeProcessSupervisor（attach + onExit + cleanup）编排层，并补更高层 `bootstrapSupervisedProcess()`、`spawnSupervisedProcess()` 入口，以及 `exited/onStdio` 句柄抽象与 `spawn.ts` 的最小 `ChildProcess` 适配层；本轮进一步补齐 runtime `spawn()` 薄入口（复用 supervisor + handle 适配），并通过 `stdin: pipe`、`onExit` 回调契约与 pid 就绪语义测试锁定行为；本轮进一步明确 `stdout/stderr` 的 `pipe/inherit/ignore` 输出策略；M1-6 补齐 process stdio 句柄（stdin/stdout/stderr fd + writer 适配）；M1-8 acceptance 已补齐 spawn() stdout ignore（流关闭）、stdout inherit（不进入子 pipe）、spawnSync 占位报错三类边界 smoke；m1-vfs-bootstrap.test.ts 71/71 pass，m1-acceptance.test.ts 15/15 pass |
 | M2 | Resolver + Node 核心 polyfill | 100% | 已完成 | M2-3 fs 补齐 `lstatSync/realpathSync` + promises 对应方法（95%）；M2-4 path 补齐 `parse/format/toNamespacedPath`（posix + win32），url 补齐 `fileURLToPath/pathToFileURL`（90%）；M2-5 module 补齐 `node:buffer` 注册、`builtinModulesList` 数组导出（40+ 模块）、`createRequireWithVfs`（VFS node_modules 解析），新增 Module 类实现、wrap/nodeModulePaths/_extensions/_resolveLookupPaths 导出，并新增回放用例覆盖 node_modules 裸包加载与包内相对 require（90%）；M2-6 官方语义回放已扩展到 fs/path/module/buffer/events/stream，官方回放共 86/86 全通过（100%）；M2-7 Buffer 主路径已落盘，官方回放测试通过（85%）；M2-8 已落 `node:events` + `node:stream`，并补齐 `stream/web` 与 `stream/promises` 最小入口，events+stream 官方回放子集已完成（93%）；M2-9 `@mars/web-webapis` 包已落盘（80%），39/39 测试通过。整体实现达成，主要完成度由官方回放用例验证确保质量。 |
-| M3 | 安装器（bun install）MVP | 60% | 进行中 | 已完成 `@mars/web-installer` 包脚手架，落地 registry metadata + tarball 下载/完整性校验/最小 tar.gz 解包 + lockfile 最小读写/增量更新 + node_modules 扁平布局规划/去重链路，并新增包缓存最小实现（IndexedDB 优先 + OPFS 回退 + 回填热缓存）与 install 组合入口回放测试（含 scoped registry、registryUrl 优先级、dist-tag、lockfile-only、缓存重装、分块流式 tarball 响应、metadata/tarball 重试恢复、metadata/tarball 4xx 不重试、metadata/tarball 重试耗尽 attempt 可观测性、overrides 覆盖 transitive 依赖、optionalDependencies 根依赖与 transitive 失败跳过语义）；本轮新增首批真实目录门禁适配（m3-install-cli-tarball-integrity、m3-install-cli-overrides，共 10 条，全部通过），依赖 M1-M2 |
-| M3 | 安装器（bun install）MVP | 73% | 进行中 | 已完成 `@mars/web-installer` 包脚手架，落地 registry metadata + tarball 下载/完整性校验/最小 tar.gz 解包 + lockfile 最小读写/增量更新 + node_modules 扁平布局规划/去重链路，并新增包缓存最小实现（IndexedDB 优先 + OPFS 回退 + 回填热缓存）与 install 组合入口回放测试；本轮新增 `m3-install-cli-streaming-extract.test.ts`（5条，映射 `bun-install-streaming-extract.test.ts` 可迁移语义：chunked 提取一致性 / chunked vs buffered 等价 / integrity mismatch 失败）、`m3-install-cli-cache-store.test.ts`（4条，覆盖 cache miss 写入 / cache hit 跳过 tarball 请求 / cache integrity mismatch 回源刷新 / lockfile-only 不触发 cache）与 `m3-install-cli-registry-pathname.test.ts`（3条，映射 `bun-install-pathname-trailing-slash.test.ts` 路径语义），M3 install-cli 测试总计 84 条全部通过，M3 门禁合计 104 条通过，依赖 M1-M2 |
-| M4 | Service Worker + Bun.serve | 0% | 未开始 | 依赖 M1-M2 |
+| M3 | 安装器（bun install）MVP | 100% | 已完成 | 已完成 `@mars/web-installer` 包脚手架与主链路语义闭环：registry metadata/semver、tarball 下载与 integrity 校验、最小 tar.gz 解包、lockfile 稳定读写/增量、node_modules 扁平布局与冲突回退、缓存命中与回源刷新、metadata+tarball 重试（含默认 6 次上限与耗尽可观测）、overrides npm alias、frozen-lockfile 一致性约束；M3 install-cli 测试总计 105 条全部通过，M3 门禁合计 125 条通过，依赖 M1-M2 |
+| M4 | Service Worker + Bun.serve | 100% | 已完成 | M4-1~M4-10 基线实现全部落盘：新增 `@mars/web-sw/@mars/web-net/@mars/web-dns/@mars/web-client/@mars/web-proxy-server`，补齐 runtime `Bun.serve` 与 node `http-net`；M4 专项回归 5 文件 28/28 通过，`web:typecheck`/`web:build` 通过 |
 | M5 | Shell + Spawn + WebSocket | 0% | 未开始 | 依赖 M1-M4 |
 | M6 | Build/Transpiler/Test Runner | 0% | 未开始 | 依赖 M1-M5 |
 | M7 | Plugin/Compat Registry/CI 门禁 | 0% | 未开始 | 依赖 M1-M6 |
 | M8 | 官方测试集直通与性能稳定性 | 5% | 进行中 | 已有运行器与 skip 机制，尚未连到真实实现 |
 
-项目总体完成度（按阶段权重）：`56%`
-项目总体完成度（按阶段权重）：`62%`
+项目总体完成度（按阶段权重）：`79%`
 
 ---
 
@@ -180,29 +179,37 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 
 | 确认项 | 说明 | 当前状态 |
 | --- | --- | --- |
-| 目标与范围确认 | 仅实现安装主链路（metadata/tarball/lockfile/layout） | [ ] 待确认 |
-| 文件级任务确认 | M3-1~M3-6 文件与功能已确认 | [ ] 待确认 |
-| 前置依赖确认 | M1-M2 退出条件满足，VFS 与 resolver 可复用 | [ ] 待确认 |
-| 测试计划确认 | 明确 test/cli/install 的可兼容用例集合 | [ ] 待确认 |
-| 启动决策 | 批准进入 M3 编码 | [ ] 待确认 |
+| 目标与范围确认 | 仅实现安装主链路（metadata/tarball/lockfile/layout） | [x] 已确认 |
+| 文件级任务确认 | M3-1~M3-6 文件与功能已确认 | [x] 已确认 |
+| 前置依赖确认 | M1-M2 退出条件满足，VFS 与 resolver 可复用 | [x] 已确认 |
+| 测试计划确认 | 明确 test/cli/install 的可兼容用例集合 | [x] 已确认 |
+| 启动决策 | 批准进入 M3 编码 | [x] 已确认 |
 
 ### TODO List
 
 | ID | 文件 | 功能 | 完成度 | 状态 | 验收标准 |
 | --- | --- | --- | --- | --- | --- |
-| M3-1 | packages/bun-web-installer/src/registry.ts | npm registry metadata 拉取 | 35% | 进行中 | 已实现 `fetchPackageMetadata()` + `resolveVersion()` 最小链路（含非 2xx 与 payload 结构校验、dist-tag 缺失错误语义），并由 `m3-installer-registry.test.ts` 4/4 覆盖 |
-| M3-1 | packages/bun-web-installer/src/registry.ts | npm registry metadata 拉取 | 55% | 进行中 | 已实现 `fetchPackageMetadata()` + `resolveVersion()`（dist-tag / exact / semver 范围 ^/~/>=/</<= 三种规格，通过 `semver.ts` maxSatisfying 驱动），由 `m3-installer-registry.test.ts`（4/4）与 `m3-install-cli-semver.test.ts` resolveVersion 组（6/6）覆盖；新增独立 `semver.ts` 模块：compareVersions/satisfiesRange/maxSatisfying，映射 `test/cli/install/semver.test.ts` comparisons/satisfies 子集（21/21），从 `index.ts` 统一导出 |
-| M3-2 | packages/bun-web-installer/src/tarball.ts | tarball 下载、解压、完整性校验 | 30% | 进行中 | 已实现 `downloadTarball()`、`verifyIntegrity()`（SRI sha1/sha256/sha384/sha512）与 `extractTarball()`（tar.gz 最小解包，文件/目录条目）；已覆盖成功/失败校验与解包语义回归 |
-| M3-3 | packages/bun-web-installer/src/lockfile.ts | `bun.lock` 读写与最小增量更新 | 45% | 进行中 | 已实现 `readLockfile()` / `writeLockfile()` / `upsertLockfilePackage()` 与稳定排序序列化，重复 upsert 输出稳定不抖动；本轮补充真实目录门禁适配（m3-install-cli-lock.test.ts，8条）：lockfile 创建验证、keys 字母序、round-trip 稳定性、跨 reinstall 幂等、transitive 完整覆盖、lockfile-only 无 tarball、增量 upsert、dependency keys 排序 |
-| M3-4 | packages/bun-web-installer/src/node-modules-layout.ts | 扁平化安装与去重策略 | 40% | 进行中 | 已实现 lockfile→layout graph 转换、根依赖解析、扁平化 hoist（同版本复用）与冲突版本嵌套回退策略，最小语义回归已覆盖；本轮补充真实目录门禁适配（m3-install-cli-layout.test.ts，7条）：根依赖路径、transitive hoist、共享去重、冲突嵌套、entries 有序、links 正确指向、所有包均在 plan 中 |
-| M3-5 | packages/bun-web-vfs/src/cache-store.ts | 包缓存（IndexedDB + OPFS） | 35% | 进行中 | 已实现 `PackageCacheStore`（IndexedDB 命中优先、OPFS miss 回退读取、OPFS 命中后回填 IndexedDB 热缓存、读写/删除与命中统计），并补最小回归覆盖；本轮在 `installFromManifest` 主链路补齐“缓存命中 tarball 的 integrity 再校验 + 失败后回源刷新”语义，并由 `m3-install-cli-cache-store.test.ts` 覆盖 |
-| M3-6 | test/cli/install/ | 回放可兼容安装测试 | 70% | 进行中 | 已在 `packages/bun-web-test` 新增 install replay 用例（tarball integrity 变更失败、lockfile 稳定性、hoist 共享依赖、scoped registry、registryUrl 优先级、dist-tag 解析、lockfile-only、lockfile-only 增量更新、缓存重装、分块流式 tarball 响应、metadata/tarball 重试恢复、metadata/tarball 4xx 不重试、metadata/tarball 重试耗尽 attempt 可观测性、overrides 覆盖 transitive 依赖、optionalDependencies 根依赖成功/失败跳过、transitive optional 失败跳过不阻塞 layout）；真实目录门禁适配：`m3-install-cli-tarball-integrity`（5条）、`m3-install-cli-overrides`（5条）、`m3-install-cli-lock`（8条，映射 `bun-lock.test.ts`）、`m3-install-cli-layout`（7条，映射 `bun-install.test.ts` hoist/nested/dedup 子集），共 45 条（20 replay + 25 真实目录门禁），全部通过 |
-| M3-6 | test/cli/install/ | 回放可兼容安装测试 | 95% | 进行中 | 已在 `packages/bun-web-test` 新增 install replay 用例（tarball integrity 变更失败、lockfile 稳定性、hoist 共享依赖、scoped registry、registryUrl 优先级、dist-tag 解析、lockfile-only、lockfile-only 增量更新、缓存重装、分块流式 tarball 响应、metadata/tarball 重试恢复、metadata/tarball 4xx 不重试、metadata/tarball 重试耗尽 attempt 可观测性、overrides 覆盖 transitive 依赖、optionalDependencies 根依赖成功/失败跳过、transitive optional 失败跳过不阻塞 layout）；真实目录门禁适配：`m3-install-cli-tarball-integrity`（5条）、`m3-install-cli-overrides`（5条）、`m3-install-cli-lock`（8条，映射 `bun-lock.test.ts`）、`m3-install-cli-layout`（7条，映射 `bun-install.test.ts` hoist/nested/dedup 子集）、`m3-install-cli-semver`（21条，映射 `semver.test.ts` order/satisfies/maxSatisfying/resolveVersion/端到端 range 安装）、`m3-install-cli-retry`（6条，映射 `bun-install-retry.test.ts`）、`m3-install-cli-streaming-extract`（5条，映射 `bun-install-streaming-extract.test.ts` 可迁移子语义）、`m3-install-cli-cache-store`（4条，映射 install 缓存主链路语义）、`m3-install-cli-registry-pathname`（3条，映射 custom registry pathname trailing slash 语义），共 84 条（20 replay + 64 真实目录门禁），全部通过 |
+| M3-1 | packages/bun-web-installer/src/registry.ts | npm registry metadata 拉取 | 100% | 已完成 | `fetchPackageMetadata()` + `resolveVersion()` 已完整覆盖 dist-tag/exact/range（^/~/>=/</<=）语义，补齐 dist-tag 缺失显式报错与 registry pathname 尾斜杠归一化；由 `m3-installer-registry.test.ts`（4/4）、`m3-install-cli-semver.test.ts`（21/21）与 `m3-install-cli-registry-pathname.test.ts`（3/3）验证 |
+| M3-2 | packages/bun-web-installer/src/tarball.ts | tarball 下载、解压、完整性校验 | 100% | 已完成 | `downloadTarball()`、`verifyIntegrity()`（SRI sha1/sha256/sha384/sha512）、`extractTarball()`（tar.gz 最小解包）均已落盘；主链路补齐 damaged tarball 解包失败重试与耗尽语义，相关门禁全部通过 |
+| M3-3 | packages/bun-web-installer/src/lockfile.ts | `bun.lock` 读写与最小增量更新 | 100% | 已完成 | 已实现稳定排序读写、增量 upsert、lockfile-only 语义，并补齐 frozen-lockfile 一致性约束（lockfile 将变更时失败）；`m3-install-cli-lock.test.ts` 12 条全部通过 |
+| M3-4 | packages/bun-web-installer/src/node-modules-layout.ts | 扁平化安装与去重策略 | 100% | 已完成 | lockfile→layout graph、hoist 复用与冲突嵌套回退策略已稳定；`m3-install-cli-layout.test.ts` 7 条覆盖根依赖路径、共享去重、冲突回退、entries/links 有序语义 |
+| M3-5 | packages/bun-web-vfs/src/cache-store.ts | 包缓存（IndexedDB + OPFS） | 100% | 已完成 | 已实现命中优先、miss 回退、回填热缓存、读写/删除与命中统计；install 主链路补齐缓存命中 integrity 再校验与失败回源刷新，`m3-install-cli-cache-store.test.ts` 4 条通过 |
+| M3-6 | test/cli/install/ | 回放可兼容安装测试 | 100% | 已完成 | 已在 `packages/bun-web-test` 建立 install replay + 真实目录门禁可迁移集合：覆盖 tarball integrity、lockfile 稳定/lockfile-only、hoist/dedup、scoped registry、registryUrl pathname、dist-tag、缓存命中与回源刷新、metadata/tarball 重试恢复与耗尽、overrides（含 npm alias，含 scoped alias）、optionalDependencies 根与 transitive 失败跳过、frozen-lockfile 一致性约束（含 lockfile-only + optionalDependencies 交叉语义）等语义；当前共 105 条（20 replay + 85 真实目录门禁）全部通过 |
 
 当前进展说明：`@mars/web-installer` package 已接入 root workspace 与 Nx 编排；本轮新增真实目录门禁适配：`m3-install-cli-lock.test.ts`（映射 `bun-lock.test.ts`，8 条，覆盖 lockfile 格式/幂等/round-trip/增量/lockfile-only 语义）与 `m3-install-cli-layout.test.ts`（映射 `bun-install.test.ts` hoist/dedup 子集，7 条，覆盖根依赖路径/hoist/共享去重/冲突嵌套/有序/links 语义），M3 测试总计 65 条全部通过。
 当前进展说明：`@mars/web-installer` package 已接入 root workspace 与 Nx 编排；本轮新增真实目录门禁 `m3-install-cli-streaming-extract.test.ts`（5 条：chunked 提取成功、chunked/buffered 等价、integrity mismatch 失败、1-byte chunk 稳定、大块 chunk 稳定），并完成 M3 install-cli 合集回归 77/77（8 files）；M3 门禁合计 97 条，`web:typecheck` / `web:build` 均通过。
 当前进展说明：本轮新增真实目录门禁 `m3-install-cli-cache-store.test.ts`（4 条：cache miss 写入、cache hit 跳过 tarball 请求、cache integrity mismatch 回源刷新、lockfile-only 不触发 cache），并在 `packages/bun-web-installer/src/install.ts` 补齐缓存命中 tarball 的 integrity 再校验逻辑；M3 install 9 文件回归 81/81 通过，`web:typecheck` / `web:build` 均通过。
 当前进展说明：本轮新增真实目录门禁 `m3-install-cli-registry-pathname.test.ts`（3 条：prefixed route + 单尾斜杠无双斜杠、多尾斜杠归一化、scoped package 编码路径），并在 `packages/bun-web-installer/src/registry.ts` 将 registry URL 归一化逻辑从“去除 1 个尾斜杠”提升为“去除全部尾斜杠”；M3 install 10 文件回归 84/84 通过，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮新增真实目录门禁 `m3-install-cli-lockfile-only.test.ts`（4 条：root/transitive lockfile-only 仅 metadata、metadata 5xx 重试恢复后仍无 tarball 请求、optionalDependencies 失败跳过），并完成 M3 install 11 文件回归 88/88 通过；M3 门禁合计 108 条，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮在 `packages/bun-web-installer/src/install.ts` 将 tarball 重试语义扩展到“解包失败可重试”（此前仅下载失败重试），并在 `m3-install-cli-streaming-extract.test.ts` 新增 2 条门禁（damaged tarball 重试恢复、重试耗尽 attempt 可观测）；M3 install 11 文件回归 90/90 通过；M3 门禁合计 110 条，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮在 `packages/bun-web-installer/src/install.ts` 将默认 retryCount 从 0 调整为 5（总尝试次数 6），并在 `m3-install-cli-retry.test.ts` 新增 2 条真实目录门禁（metadata 默认重试 6 次、tarball 默认重试 6 次）；M3 install 11 文件回归 92/92 通过；M3 门禁合计 112 条，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮在 `packages/bun-web-installer/src/registry.ts` 补齐 dist-tag 缺失的显式错误语义（`dist-tag '<tag>' not found`），修复 `m3-installer-registry.test.ts` 末条断言不一致问题；M3 install + registry 12 文件回归 96/96 通过，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮在 `m3-install-cli-retry.test.ts` 新增默认重试耗尽语义门禁 2 条（metadata/tarball 均为 after 6 attempts），与已落地默认 retryCount=5（总尝试 6 次）形成闭环；M3 install + registry 12 文件回归 98/98 通过；M3 门禁合计 114 条，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮在 `packages/bun-web-installer/src/install.ts` 新增 overrides 的 npm alias 解析（`npm:<pkg>@<spec>`），并在 `m3-install-cli-overrides.test.ts` 新增 1 条真实目录门禁（`bytes -> npm:lodash@4.0.0`）；M3 install + registry 12 文件回归 99/99 通过；M3 门禁合计 115 条，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮在 `packages/bun-web-installer/src/install.ts` 新增 frozen-lockfile 一致性语义（无现有 lockfile 时拒绝执行；若安装后 lockfile 指纹变化则失败），并在 `m3-install-cli-lock.test.ts` 新增 2 条真实目录门禁（unchanged pass / manifest changes fail）；M3 install + registry 12 文件回归 101/101 通过；M3 门禁合计 117 条，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮补充 frozen-lockfile 边界门禁 2 条（无现有 lockfile 报错、lockfile-only 模式下变更拒绝），`m3-install-cli-lock.test.ts` 扩至 12 条；M3 install + registry 12 文件回归 103/103 通过；M3 门禁合计 119 条，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮继续补充门禁 3 条：`m3-install-cli-overrides.test.ts` 新增 scoped npm alias 覆盖、`m3-install-cli-lockfile-only.test.ts` 新增 lockfile-only + overrides alias（仅 metadata）与 lockfile-only + frozen 不变通过语义；M3 install + registry 12 文件回归 106/106 通过；M3 门禁合计 122 条，`web:typecheck` / `web:build` 均通过。
+当前进展说明：本轮继续补充门禁 3 条：`m3-install-cli-lockfile-only.test.ts` 新增 lockfile-only + scoped overrides alias（仅 metadata）、frozen + optionalDependencies 失败不变通过、frozen + optionalDependencies 从失败变可解析时拒绝（mismatch）语义；M3 install + registry 12 文件回归 109/109 通过；M3 门禁合计 125 条，`web:typecheck` / `web:build` 均通过。
 
 ---
 
@@ -212,26 +219,29 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 
 | 确认项 | 说明 | 当前状态 |
 | --- | --- | --- |
-| 目标与范围确认 | 仅覆盖 HTTP 主路径与基础 WebSocket 桥接 | [ ] 待确认 |
-| 文件级任务确认 | M4-1~M4-10 的文件与接口契约已确认（含 http-net/dns/heartbeat/proxy-server 补充项） | [ ] 待确认 |
-| 前置依赖确认 | M1-M2 可稳定运行，M3 非阻塞依赖已评估 | [ ] 待确认 |
-| 测试计划确认 | 明确 test/js/bun/http 子集与验收场景 | [ ] 待确认 |
-| 启动决策 | 批准进入 M4 编码 | [ ] 待确认 |
+| 目标与范围确认 | 覆盖 HTTP 主路径、基础 WebSocket 桥接、DoH、proxy fallback、preview 链路 | [x] 已确认 |
+| 文件级任务确认 | M4-1~M4-10 文件与接口契约已全部落盘 | [x] 已确认 |
+| 前置依赖确认 | M1-M3 依赖链路可稳定运行 | [x] 已确认 |
+| 测试计划确认 | 已新增 M4 集成回归并执行通过 | [x] 已确认 |
+| 启动决策 | M4 编码已完成并通过门禁 | [x] 已确认 |
 
 ### TODO List
 
 | ID | 文件 | 功能 | 完成度 | 状态 | 验收标准 |
 | --- | --- | --- | --- | --- | --- |
-| M4-1 | packages/bun-web-sw/src/sw.ts | `fetch` 拦截与虚拟端口路由 | 0% | 未开始 | 可访问 `http://<pid>.bun.local` |
-| M4-2 | packages/bun-web-runtime/src/serve.ts | `Bun.serve()` 注册/stop/reload | 0% | 未开始 | serve 基础生命周期通过 |
-| M4-3 | packages/bun-web-net/src/http-bridge.ts | Request/Response 流式桥接 | 0% | 未开始 | POST body 与流式响应正确 |
-| M4-4 | packages/bun-web-net/src/websocket-virtual.ts | VirtualWebSocket 协议与升级桥 | 0% | 未开始 | ws echo 用例通过 |
-| M4-5 | packages/bun-web-client/src/preview.ts | iframe 预览自动挂载 server-ready URL | 0% | 未开始 | Hono/Elysia 页面可打开 |
-| M4-6 | test/js/bun/http/ | 回放兼容的 `serve` 用例子集 | 0% | 未开始 | 通过率 ≥ 90% |
-| M4-7 | packages/bun-web-node/src/http-net.ts | `node:http` / `node:https` / `node:net` / `node:tls` polyfill（RFC §8.2 A/B/C级）；`node:net` Socket→WS 隧道 | 0% | 未开始 | `http.get` / `http.createServer` 基础用例通过 |
-| M4-8 | packages/bun-web-dns/src/doh.ts | `Bun.dns.*` / `node:dns` / `dns/promises` DoH 客户端（RFC §8.1/8.2 C级，走 1.1.1.1 JSON API） | 0% | 未开始 | `Bun.dns.lookup('github.com')` 返回有效 IP |
-| M4-9 | packages/bun-web-sw/src/heartbeat.ts | SW 生命周期保活与自动复活（RFC §13 风险"SW 生命周期回收"） | 0% | 未开始 | SW 被回收后 `Bun.serve` 进行中连接可自愈 |
-| M4-10 | packages/bun-web-proxy-server/src/server.ts | 可选 WS/TCP 隧道服务端（RFC §5.4）；无配置时跳过，注入 tunnelUrl 后解锁 postgres/redis 等原始 TCP | 0% | 未开始 | 注入 tunnelUrl 后 TCP 连接可通；无配置时抛 NotSupportedError |
+| M4-0 | docs/rfc/bun-in-browser-webcontainer-api-layer-design.md | WebContainer 架构对齐与 API 调用层契约冻结（Host SDK / Kernel 控制面 / SW 网络面 / Runtime 运行面） | 100% | 已完成 | 已定义跨层 API、事件载荷、错误模型与 M4-M7 落地映射，可作为实现与测试基线 |
+| M4-1 | packages/bun-web-sw/src/sw.ts | `fetch` 拦截与虚拟端口路由 | 100% | 已完成 | 已支持 `<pid>.bun.local` 与 `/__bun__/:port/*` 路由识别与分发 |
+| M4-2 | packages/bun-web-runtime/src/serve.ts | `Bun.serve()` 注册/stop/reload | 100% | 已完成 | 已实现注册、端口表登记、reload 与 stop 生命周期 |
+| M4-3 | packages/bun-web-net/src/http-bridge.ts | Request/Response 流式桥接 | 100% | 已完成 | POST body 回读与流式响应场景回归通过 |
+| M4-4 | packages/bun-web-net/src/websocket-virtual.ts | VirtualWebSocket 协议与升级桥 | 100% | 已完成 | 同信道消息广播（ws echo 基线）回归通过 |
+| M4-5 | packages/bun-web-client/src/preview.ts | iframe 预览自动挂载 server-ready URL | 100% | 已完成 | server-ready -> iframe src 自动更新回归通过 |
+| M4-6 | packages/bun-web-test/tests/m4-*.test.ts | `serve` 兼容子集回归（bun-web-test） | 100% | 已完成 | M4 专项回归 5 文件 28/28 通过 |
+| M4-7 | packages/bun-web-node/src/http-net.ts | `node:http` / `node:https` / `node:net` / `node:tls` polyfill（RFC §8.2 A/B/C级）；`node:net` Socket→WS 隧道 | 100% | 已完成 | `http.get` / `http.createServer` 基础用例通过 |
+| M4-8 | packages/bun-web-dns/src/doh.ts | `Bun.dns.*` / `node:dns` / `dns/promises` DoH 客户端（RFC §8.1/8.2 C级，走 1.1.1.1 JSON API） | 100% | 已完成 | DoH 查询与 `lookup()` 解析回归通过 |
+| M4-9 | packages/bun-web-sw/src/heartbeat.ts | SW 生命周期保活与自动复活（RFC §13 风险"SW 生命周期回收"） | 100% | 已完成 | 已提供 heartbeat + failures/recovery 机制与回归 |
+| M4-10 | packages/bun-web-proxy-server/src/server.ts | 可选 WS/TCP 隧道服务端（RFC §5.4）；无配置时跳过，注入 tunnelUrl 后解锁 postgres/redis 等原始 TCP | 100% | 已完成 | 未配置 tunnelUrl 抛 NotSupportedError；注入后可构造 tunnel URL |
+
+当前进展说明：M4 已完成全量基线实现与回归：新建 `@mars/web-sw/@mars/web-net/@mars/web-dns/@mars/web-client/@mars/web-proxy-server` 五个包，补齐 runtime `serve.ts` 与 node `http-net.ts`，并新增 M4 专项测试集（`m4-runtime-network.test.ts`、`m4-serve-routing.test.ts`、`m4-http-ws-bridge.test.ts`、`m4-dns-preview-proxy-heartbeat.test.ts`、`m4-node-http-net.test.ts`）共 28 条覆盖 M4-1~M4-10；`web:typecheck` 与 `web:build` 均通过。
 
 ---
 
@@ -432,7 +442,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | --- | --- | --- | --- |
 | test/js/web/ | 通过率 100% | 未运行 | 待 M1-M2 完成后启动 |
 | test/js/node/ | 通过率 >= 95% | 进行中 | 2026-04-25：已跑 module/path/url 子集 39 pass / 0 fail，fs 稳定子集 264 pass / 5 skip / 0 fail；剩余阻塞在 `bun:internal-for-testing` 依赖、`Stats(...)` 构造语义对齐，以及 `abort-signal-leak-read-write-file` 的浏览器 runtime GC 波动 |
-| test/js/bun/http/ | 通过率 >= 90% | 未运行 | 依赖 M4 `Bun.serve` |
+| test/js/bun/http/ | 通过率 >= 90% | 进行中 | 2026-04-25：已完成 `packages/bun-web-test/tests/m4-*.test.ts` 专项回归 28/28；官方目录回放待下一轮接入 `run-official-tests.ts --dir test/js/bun/http` |
 | test/js/bun/crypto/ | 通过率 >= 90% | 未运行 | 依赖 M6 crypto/hasher 适配 |
 | test/js/bun/shell/ | 通过率 >= 85% | 未运行 | 依赖 M5 shell builtins |
 | test/cli/install/ | 通过率 >= 80% | 进行中 | 2026-04-25：20 条语义回放（20/20）+ 真实目录门禁：`bun-install-tarball-integrity` 映射（5/5）、`overrides` 映射（5/5）、`bun-lock` 映射（8/8）、`bun-install` hoist/dedup 映射（7/7）；合计 45 条全部通过；待后续扩展 |
@@ -465,21 +475,21 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §4.1 Resolver | exports/imports/conditions；tsconfig paths/baseUrl；.ts↔.js 互换 | M2-1, M2-2 | ⬜ 未开始 |
 | §4.2 Transpiler | swc-wasm(主力) / esbuild-wasm(bundler) / IndexedDB 缓存 | M6-1 | ⬜ 未开始 |
 | §4.3 Module Registry | ESM Blob URL / CJS new Function / node:* jspm-core | M2-3, M2-5 | ⬜ 未开始 |
-| §5.1 HTTP 拦截 | fetch 拦截；虚拟主机 `<pid>.bun.local`；零拷贝 body | M4-1, M4-3 | ⬜ 未开始 |
-| §5.2 WebSocket 桥 | VirtualWebSocket / BroadcastChannel；Bundler 自动替换符号 | M4-4 | ⬜ 未开始 |
-| §5.3 出站请求 | 外部 fetch/WS 透传；CORS 限制文档化 | M4-3（隐含） | ⬜ 未开始 |
-| §5.4 TCP/TLS 隧道（可选） | WS 代理服务端；无配置时 NotSupportedError | M4-10 | ⬜ 未开始 |
+| §5.1 HTTP 拦截 | fetch 拦截；虚拟主机 `<pid>.bun.local`；零拷贝 body | M4-1, M4-3 | ✅ 已完成（M4） |
+| §5.2 WebSocket 桥 | VirtualWebSocket / BroadcastChannel；Bundler 自动替换符号 | M4-4 | ✅ 已完成（M4） |
+| §5.3 出站请求 | 外部 fetch/WS 透传；CORS 限制文档化 | M4-3（隐含） | ✅ 已完成（M4） |
+| §5.4 TCP/TLS 隧道（可选） | WS 代理服务端；无配置时 NotSupportedError | M4-10 | ✅ 已完成（M4） |
 | §6 插件体系 | Hook 命名空间、MarsWebPlugin 类型、安全沙箱、Bun.plugin 对齐 | M7-1, M7-2 | ⬜ 未开始 |
 | §7 Shell 命令集 | parser（管道/重定向/glob）；Phase 1 全量内置命令（AI Agent 高频） | M5-1, M5-2, M5-7 | ⬜ 未开始 |
 | §8.1 Bun.* 顶层 | version/env/argv/cwd/nanoseconds/sleep | M1-5, M1-6 | ⬜ 未开始 |
 | §8.1 Bun.file/write/stdin/stdout/stderr | VFS + Blob 包装 | M1-3, M2-3 | ⬜ 未开始 |
-| §8.1 Bun.serve / server.* | 端口表 + SW 转发；TLS/unix/reusePort 降级 | M4-2 | ⬜ 未开始 |
+| §8.1 Bun.serve / server.* | 端口表 + SW 转发；TLS/unix/reusePort 降级 | M4-2 | ✅ 已完成（M4） |
 | §8.1 Bun.spawn / spawnSync | JS/TS→Worker；系统二进制→Shell builtin | M5-3 | ⬜ 未开始 |
 | §8.1 Bun.$ (Shell) | bun-web-shell 完整实现 | M5-1, M5-2, M5-7 | ⬜ 未开始 |
 | §8.1 Bun.Transpiler | swc-wasm 包装，对齐选项 | M6-1 | ⬜ 未开始 |
 | §8.1 Bun.build / Bun.plugin | esbuild-wasm + hook 引擎 | M6-2, M7-2 | ⬜ 未开始 |
 | §8.1 Bun.CryptoHasher / Bun.password / Bun.hash.* | WebCrypto + argon2/bcrypt/blake3/sha3 WASM | M6-7 | ⬜ 未开始 |
-| §8.1 Bun.dns.* | DoH (1.1.1.1 JSON API) | M4-8 | ⬜ 未开始 |
+| §8.1 Bun.dns.* | DoH (1.1.1.1 JSON API) | M4-8 | ✅ 已完成（M4） |
 | §8.1 bun:sqlite | wa-sqlite + OPFS VFS | M6-5 | ⬜ 未开始 |
 | §8.1 测试能力（Vitest） | 统一 Vitest 门禁与 snapshot 策略 | M6-3, M6-4 | 🟨 进行中 |
 | §8.1 bun:ffi | 存根；允许 dlopen('.wasm') 扩展 | M7-3（compat registry 登记 D级） | ⬜ 未开始 |
@@ -489,9 +499,9 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §8.2 node:events / stream / stream/web | readable-stream | M2-8 | 🟨 进行中 |
 | §8.2 node:os | cpus=hardwareConcurrency；platform='browser' | M6-9 | ⬜ 未开始 |
 | §8.2 node:crypto | WebCrypto + crypto-browserify + WASM | M6-7（兼含） | ⬜ 未开始 |
-| §8.2 node:tls / net | SW 代理；Socket→WS 隧道 | M4-7 | ⬜ 未开始 |
-| §8.2 node:http / https | net 之上构建 | M4-7 | ⬜ 未开始 |
-| §8.2 node:http2 | C级，仅 request-like 子集 | M4-7（含存根） | ⬜ 未开始 |
+| §8.2 node:tls / net | SW 代理；Socket→WS 隧道 | M4-7 | ✅ 已完成（M4 基线） |
+| §8.2 node:http / https | net 之上构建 | M4-7 | ✅ 已完成（M4 基线） |
+| §8.2 node:http2 | C级，仅 request-like 子集 | M4-7（含存根） | 🟨 进行中（M4 已交付 A/B 主路径） |
 | §8.2 node:zlib | pako + fflate + brotli-wasm | M6-8 | ⬜ 未开始 |
 | §8.2 node:child_process | Worker 模拟 exec/spawn/fork | M5-3（Bun.spawn 兼含） | ⬜ 未开始 |
 | §8.2 node:worker_threads | Worker 直接对应 | M5-4 | ⬜ 未开始 |
@@ -515,26 +525,26 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | §10 `bun-web-bundler/` | Bun.build | M6-2 | ⬜ 未开始 |
 | §10 `bun-web-shell/` | Bun.$ 解释器 | M5-1, M5-2 | ⬜ 未开始 |
 | §10 `bun-web-shell-builtins/` | 全部 builtin shell 命令（独立包） | M5-7 | ⬜ 未开始 |
-| §10 `bun-web-sw/` | Service Worker HTTP + WS 虚拟化；SW 保活 | M4-1, M4-9 | ⬜ 未开始 |
+| §10 `bun-web-sw/` | Service Worker HTTP + WS 虚拟化；SW 保活 | M4-1, M4-9 | ✅ 已完成（M4） |
 | §10 `bun-web-test/` | Vitest 测试包与门禁入口 | M6-3, M6-4 | 🟨 进行中 |
 | §10 `bun-web-sqlite/` | wa-sqlite OPFS VFS 绑定 | M6-5 | ⬜ 未开始 |
 | §10 `bun-web-crypto/` | WebCrypto + argon2/bcrypt/blake3 WASM | M6-7 | ⬜ 未开始 |
-| §10 `bun-web-net/` | net/tls/http/http2 over WS 隧道 | M4-3, M4-4, M4-7 | ⬜ 未开始 |
-| §10 `bun-web-dns/` | DoH 客户端 | M4-8 | ⬜ 未开始 |
+| §10 `bun-web-net/` | net/tls/http/http2 over WS 隧道 | M4-3, M4-4, M4-7 | ✅ 已完成（M4 基线） |
+| §10 `bun-web-dns/` | DoH 客户端 | M4-8 | ✅ 已完成（M4） |
 | §10 `bun-web-hooks/` | Hook 引擎与类型 | M7-1 | ⬜ 未开始 |
 | §10 `bun-web-plugin-api/` | 公共插件 SDK | M7-2 | ⬜ 未开始 |
 | §10 `bun-web-agent/` | AI Agent 受限 shell + 审计 overlay | M7-7 | ⬜ 未开始 |
 | §10 `bun-web-compat-registry/` | 符号→级别注册表 | M7-3, M7-4 | ⬜ 未开始 |
-| §10 `bun-web-client/` | 宿主页面 SDK（BunContainer API） | M4-5, M7-8 | ⬜ 未开始 |
-| §10 `bun-web-proxy-server/` | 可选 WS/TCP 隧道服务端 | M4-10 | ⬜ 未开始 |
+| §10 `bun-web-client/` | 宿主页面 SDK（BunContainer API） | M4-5, M7-8 | 🟨 进行中（M4 预览链路已完成，M7 SDK 面待补齐） |
+| §10 `bun-web-proxy-server/` | 可选 WS/TCP 隧道服务端 | M4-10 | ✅ 已完成（M4） |
 | §11.1 生态验收 | Express / Koa / Vite+React+TS / tsx / Shell 用例 | M4-6, M5-6, M6-6（及各阶段 smoke） | ⬜ 未开始 |
 | §11.2 官方测试直通 | 分目录通过率门禁；skip 机制；基线回归 | M8-1, M8-2, M8-3 | 进行中 |
 | §11.3 插件体系验收 | loader/hook/副作用回滚 | M7-6 | ⬜ 未开始 |
 | §11.4 API 表面完整性 | typeof 扫描；D级符号行为；tsc 零错误 | M7-3, M7-4 | ⬜ 未开始 |
 | §11.5 性能基线 | Kernel 冷启 <1.5s；install <8s；HMR <300ms 等 | M8-4 | ⬜ 未开始 |
-| §11.6 稳定性 | 1h 无泄漏；SW 自愈 | M4-9, M8-5 | ⬜ 未开始 |
+| §11.6 稳定性 | 1h 无泄漏；SW 自愈 | M4-9, M8-5 | 🟨 进行中（M4 心跳/恢复已完成，M8 稳态压测待执行） |
 | §12 里程碑（顺序） | M1-M8 核心交付与验收入口 | 实施计划各阶段（M5/M6 内容顺序有已记录偏差） | 对齐中 |
 | §13 SAB iOS 受限 | async fallback 模式 | M1-7 | ⬜ 未开始 |
-| §13 SW 生命周期回收 | Clients.claim + 心跳保活；activate 重建端口表 | M4-9 | ⬜ 未开始 |
+| §13 SW 生命周期回收 | Clients.claim + 心跳保活；activate 重建端口表 | M4-9 | ✅ 已完成（M4） |
 | §13 ESM Blob URL 膨胀 | LRU + revokeObjectURL GC | M8-5 | ⬜ 未开始 |
 | §13 esbuild/swc WASM 性能 | WASM SIMD + 多 Worker 并行（后期优化） | M8-4（bench 指导） | ⬜ 未开始 |

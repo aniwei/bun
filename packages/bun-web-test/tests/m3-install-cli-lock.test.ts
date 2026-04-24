@@ -293,4 +293,96 @@ describe('bun-lock (web installer port of test/cli/install/bun-lock.test.ts)', (
     const depKeys = Object.keys(midEntry!.dependencies ?? {})
     expect(depKeys).toEqual([...depKeys].sort())
   })
+
+  // Maps to: "frozen-lockfile check" — unchanged lockfile should pass
+  test('frozenLockfile passes when computed lockfile is unchanged', async () => {
+    const noDeps = await makePackage('no-deps', '1.0.0')
+    const fetchFn = buildRegistryFetch([noDeps])
+
+    const first = await installFromManifest(
+      { dependencies: { 'no-deps': '1.0.0' } },
+      { registryUrl: REGISTRY, fetchFn },
+    )
+
+    const second = await installFromManifest(
+      { dependencies: { 'no-deps': '1.0.0' } },
+      {
+        registryUrl: REGISTRY,
+        fetchFn,
+        lockfile: first.lockfile,
+        frozenLockfile: true,
+      },
+    )
+
+    expect(JSON.stringify(second.lockfile)).toBe(JSON.stringify(first.lockfile))
+  })
+
+  // Maps to: "frozen-lockfile check" — lockfile changes should fail
+  test('frozenLockfile fails when manifest changes would modify lockfile', async () => {
+    const bytes100 = await makePackage('bytes', '1.0.0')
+    const bytes300 = await makePackage('bytes', '3.0.0')
+    const express = await makePackage('express', '4.18.2', { bytes: '3.0.0' })
+
+    const fetchFn = buildRegistryFetch([bytes100, bytes300, express])
+
+    const first = await installFromManifest(
+      { dependencies: { express: '4.18.2' } },
+      { registryUrl: REGISTRY, fetchFn },
+    )
+
+    await expect(() =>
+      installFromManifest(
+        {
+          dependencies: { express: '4.18.2' },
+          overrides: { bytes: '1.0.0' },
+        },
+        {
+          registryUrl: REGISTRY,
+          fetchFn,
+          lockfile: first.lockfile,
+          frozenLockfile: true,
+        },
+      ),
+    ).rejects.toThrow('Frozen lockfile mismatch')
+  })
+
+  test('frozenLockfile rejects when no existing lockfile is provided', async () => {
+    const noDeps = await makePackage('no-deps', '1.0.0')
+    const fetchFn = buildRegistryFetch([noDeps])
+
+    await expect(() =>
+      installFromManifest(
+        { dependencies: { 'no-deps': '1.0.0' } },
+        {
+          registryUrl: REGISTRY,
+          fetchFn,
+          frozenLockfile: true,
+        },
+      ),
+    ).rejects.toThrow('Frozen lockfile requires an existing lockfile')
+  })
+
+  test('frozenLockfile also fails in lockfile-only mode when lockfile would change', async () => {
+    const app100 = await makePackage('app', '1.0.0')
+    const app200 = await makePackage('app', '2.0.0')
+    const fetchFn = buildRegistryFetch([app100, app200])
+
+    const first = await installFromManifest(
+      { dependencies: { app: '1.0.0' } },
+      { registryUrl: REGISTRY, fetchFn, mode: 'lockfile-only' },
+    )
+
+    await expect(() =>
+      installFromManifest(
+        { dependencies: { app: '2.0.0' } },
+        {
+          registryUrl: REGISTRY,
+          fetchFn,
+          lockfile: first.lockfile,
+          frozenLockfile: true,
+          mode: 'lockfile-only',
+        },
+      ),
+    ).rejects.toThrow('Frozen lockfile mismatch')
+  })
 })

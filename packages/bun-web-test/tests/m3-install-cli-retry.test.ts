@@ -275,4 +275,134 @@ describe('bun-install-retry (web installer port)', () => {
 
     expect(tarballRequests).toBe(3)
   })
+
+  test('default retryCount retries metadata up to 6 attempts', async () => {
+    const tarballUrl = `${REGISTRY}/default-meta/-/default-meta-1.0.0.tgz`
+    const tarball = await gzip(createTar([{ path: 'package/package.json', data: '{"name":"default-meta","version":"1.0.0"}' }]))
+
+    let metadataRequests = 0
+    const fetchFn = async (input: string | URL): Promise<Response> => {
+      const url = String(input)
+      if (url === `${REGISTRY}/default-meta`) {
+        metadataRequests += 1
+        if (metadataRequests <= 5) {
+          return new Response('temporary failure', { status: 503, statusText: 'Service Unavailable' })
+        }
+        return new Response(
+          JSON.stringify({
+            name: 'default-meta',
+            'dist-tags': { latest: '1.0.0' },
+            versions: {
+              '1.0.0': { dist: { tarball: tarballUrl } },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url === tarballUrl) return new Response(toStrict(tarball), { status: 200 })
+      return new Response('not found', { status: 404, statusText: 'Not Found' })
+    }
+
+    const result = await installFromManifest(
+      { dependencies: { 'default-meta': 'latest' } },
+      { registryUrl: REGISTRY, fetchFn },
+    )
+
+    expect(metadataRequests).toBe(6)
+    expect(result.lockfile.packages['default-meta@1.0.0']).toBeDefined()
+  })
+
+  test('default retryCount retries tarball up to 6 attempts', async () => {
+    const tarballUrl = `${REGISTRY}/default-tar/-/default-tar-1.0.0.tgz`
+    const tarball = await gzip(createTar([{ path: 'package/package.json', data: '{"name":"default-tar","version":"1.0.0"}' }]))
+
+    let tarballRequests = 0
+    const fetchFn = async (input: string | URL): Promise<Response> => {
+      const url = String(input)
+      if (url === `${REGISTRY}/default-tar`) {
+        return new Response(
+          JSON.stringify({
+            name: 'default-tar',
+            'dist-tags': { latest: '1.0.0' },
+            versions: {
+              '1.0.0': { dist: { tarball: tarballUrl } },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url === tarballUrl) {
+        tarballRequests += 1
+        if (tarballRequests <= 5) {
+          return new Response('bad gateway', { status: 502, statusText: 'Bad Gateway' })
+        }
+        return new Response(toStrict(tarball), { status: 200 })
+      }
+      return new Response('not found', { status: 404, statusText: 'Not Found' })
+    }
+
+    const result = await installFromManifest(
+      { dependencies: { 'default-tar': 'latest' } },
+      { registryUrl: REGISTRY, fetchFn },
+    )
+
+    expect(tarballRequests).toBe(6)
+    expect(result.lockfile.packages['default-tar@1.0.0']).toBeDefined()
+  })
+
+  test('default retryCount metadata exhaustion reports after 6 attempts', async () => {
+    let metadataRequests = 0
+    const fetchFn = async (input: string | URL): Promise<Response> => {
+      const url = String(input)
+      if (url === `${REGISTRY}/default-meta-always-503`) {
+        metadataRequests += 1
+        return new Response('unavailable', { status: 503, statusText: 'Service Unavailable' })
+      }
+      return new Response('not found', { status: 404, statusText: 'Not Found' })
+    }
+
+    await expect(() =>
+      installFromManifest(
+        { dependencies: { 'default-meta-always-503': 'latest' } },
+        { registryUrl: REGISTRY, fetchFn },
+      ),
+    ).rejects.toThrow('after 6 attempts')
+
+    expect(metadataRequests).toBe(6)
+  })
+
+  test('default retryCount tarball exhaustion reports after 6 attempts', async () => {
+    const tarballUrl = `${REGISTRY}/default-tar-always-502/-/default-tar-always-502-1.0.0.tgz`
+    let tarballRequests = 0
+
+    const fetchFn = async (input: string | URL): Promise<Response> => {
+      const url = String(input)
+      if (url === `${REGISTRY}/default-tar-always-502`) {
+        return new Response(
+          JSON.stringify({
+            name: 'default-tar-always-502',
+            'dist-tags': { latest: '1.0.0' },
+            versions: {
+              '1.0.0': { dist: { tarball: tarballUrl } },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url === tarballUrl) {
+        tarballRequests += 1
+        return new Response('bad gateway', { status: 502, statusText: 'Bad Gateway' })
+      }
+      return new Response('not found', { status: 404, statusText: 'Not Found' })
+    }
+
+    await expect(() =>
+      installFromManifest(
+        { dependencies: { 'default-tar-always-502': 'latest' } },
+        { registryUrl: REGISTRY, fetchFn },
+      ),
+    ).rejects.toThrow('after 6 attempts')
+
+    expect(tarballRequests).toBe(6)
+  })
 })
