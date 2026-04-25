@@ -13,11 +13,13 @@ import {
 import { Kernel } from '../../../packages/bun-web-kernel/src/kernel'
 
 import {
+  ProcessBootstrap,
   bootstrapProcessWorker,
   StdioWriter,
   type ProcessBootstrapOptions,
 } from '../../../packages/bun-web-runtime/src/process-bootstrap'
 import { RuntimeProcessSupervisor } from '../../../packages/bun-web-runtime/src/process-supervisor'
+import { runtimeProcessExecutor } from '../../../packages/bun-web-runtime/src/process-executor'
 import { createChildProcessHandle, spawn as runtimeSpawn } from '../../../packages/bun-web-runtime/src/spawn'
 import { createProcess } from '../../../packages/bun-web-node/src/process'
 import { OPFSAdapter } from '../../../packages/bun-web-vfs/src/opfs-adapter'
@@ -700,7 +702,7 @@ describe('OverlayFS (VFS) — 3-layer merge', () => {
 // ---------------------------------------------------------------------------
 describe('Kernel stdio channels', () => {
   test('allocateStdio returns two MessagePorts', async () => {
-    const k = await Kernel.boot({ asyncFallback: true })
+    const k = await Kernel.boot({})
     const proc = await k.spawn({ argv: ['bun', 'test.ts'] })
     const { stdoutPort, stderrPort } = k.allocateStdio(proc.pid)
     expect(stdoutPort).toBeTruthy()
@@ -711,7 +713,7 @@ describe('Kernel stdio channels', () => {
   })
 
   test('onStdio receives data posted through stdoutPort', async () => {
-    const k = await Kernel.boot({ asyncFallback: true })
+    const k = await Kernel.boot({})
     const proc = await k.spawn({ argv: ['bun', 'test.ts'] })
     const { stdoutPort } = k.allocateStdio(proc.pid)
 
@@ -733,12 +735,12 @@ describe('Kernel stdio channels', () => {
     await Kernel.shutdown()
   })
 
-  test('waitpid resolves when notifyExit is called', async () => {
-    const k = await Kernel.boot({ asyncFallback: true })
+  test('waitpid resolves when exit is called', async () => {
+    const k = await Kernel.boot({})
     const proc = await k.spawn({ argv: ['bun', 'run.ts'] })
 
     const waitPromise = k.waitpid(proc.pid)
-    k.notifyExit(proc.pid, 42)
+    k.exit(proc.pid, 42)
     const code = await waitPromise
     expect(code).toBe(42)
 
@@ -746,14 +748,688 @@ describe('Kernel stdio channels', () => {
   })
 
   test('waitpid returns 0 for already-gone pid', async () => {
-    const k = await Kernel.boot({ asyncFallback: true })
+    const k = await Kernel.boot({})
     const code = await k.waitpid(99999)
     expect(code).toBe(0)
     await Kernel.shutdown()
   })
 
+  test('waitpid reaps real exit code after process already exited', async () => {
+    const k = await Kernel.boot({})
+    const proc = await k.spawn({ argv: ['bun', 'reap.ts'] })
+
+    k.exit(proc.pid, 33)
+
+    const first = await k.waitpid(proc.pid)
+    const second = await k.waitpid(proc.pid)
+
+    expect(first).toBe(33)
+    expect(second).toBe(0)
+
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand spawn/mount/registerPort/unregisterPort/kill work via unified control plane', async () => {
+    const vfs = new VFS()
+    const k = await Kernel.boot({}, vfs)
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'cmd.ts'],
+        cwd: '/workspace',
+        env: { NODE_ENV: 'test' },
+      },
+    })
+
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+    expect(spawnResult.process.pid).toBeGreaterThan(0)
+
+    const mountResult = await k.handleCommand({
+      type: 'mount',
+      files: [
+        { path: '/workspace/a.txt', content: 'hello' },
+        { path: '/workspace/b.bin', content: new Uint8Array([1, 2, 3]) },
+      ],
+    })
+    expect(mountResult.type).toBe('mount')
+    if (mountResult.type !== 'mount') {
+      throw new Error('expected mount result type')
+    }
+    expect(mountResult.changedPaths).toEqual(['/workspace/a.txt', '/workspace/b.bin'])
+    expect(vfs.readFileSync('/workspace/a.txt').toString()).toBe('hello')
+    expect(Array.from(vfs.readFileSync('/workspace/b.bin'))).toEqual([1, 2, 3])
+
+    const registerResult = await k.handleCommand({
+      type: 'registerPort',
+      pid: spawnResult.process.pid,
+      port: 3000,
+    })
+    expect(registerResult.type).toBe('registerPort')
+    expect(k.resolvePort(3000)).toBe(spawnResult.process.pid)
+
+    const unregisterResult = await k.handleCommand({
+      type: 'unregisterPort',
+      port: 3000,
+    })
+    expect(unregisterResult.type).toBe('unregisterPort')
+    expect(k.resolvePort(3000)).toBeNull()
+
+    const killResult = await k.handleCommand({
+      type: 'kill',
+      pid: spawnResult.process.pid,
+      signal: 9,
+    })
+    expect(killResult.type).toBe('kill')
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(0)
+
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand stdio and exit forward through kernel event lifecycle', async () => {
+    const k = await Kernel.boot({})
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'notify.ts'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    const received: string[] = []
+    const unsubscribeStdio = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stdout') {
+        received.push(data)
+      }
+    })
+
+    await k.handleCommand({
+      type: 'stdio',
+      pid: spawnResult.process.pid,
+      kind: 'stdout',
+      data: 'hello-control-plane',
+    })
+
+    await k.handleCommand({
+      type: 'exit',
+      pid: spawnResult.process.pid,
+      code: 19,
+    })
+
+    expect(received).toContain('hello-control-plane')
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(19)
+
+    unsubscribeStdio()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess runs echo command and emits stdout/exit', async () => {
+    const k = await Kernel.boot({})
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['echo', 'boot'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    const stdout: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stdout') stdout.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['echo', 'hello-control-plane'],
+      stdin: '',
+    })
+
+    expect(stdout).toContain('hello-control-plane\n')
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(0)
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess routes bun i through installer path', async () => {
+    const vfs = new VFS()
+    const k = await Kernel.boot({}, vfs)
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'i'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/package.json',
+          content: JSON.stringify({
+            name: 'app',
+            version: '1.0.0',
+            dependencies: {},
+          }),
+        },
+      ],
+    })
+
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stdout') stdout.push(data)
+      if (kind === 'stderr') stderr.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['bun', 'i'],
+      cwd: '/workspace',
+      stdin: '',
+    })
+
+    expect(stdout.join('')).not.toContain('bun install failed')
+    expect(stderr).toEqual([])
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(0)
+    expect(vfs.readFileSync('/workspace/bun.lock').toString()).toContain('"lockfileVersion": 1')
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess validates bun add arguments in kernel route', async () => {
+    const vfs = new VFS()
+    const k = await Kernel.boot({}, vfs)
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'add'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/package.json',
+          content: JSON.stringify({
+            name: 'app',
+            version: '1.0.0',
+            dependencies: {},
+          }),
+        },
+      ],
+    })
+
+    const stderr: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stderr') stderr.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['bun', 'add'],
+      cwd: '/workspace',
+      stdin: '',
+    })
+
+    expect(stderr.join('')).toContain('bun add requires at least one package specifier')
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(1)
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess supports bun add --no-install and updates dependencies', async () => {
+    const vfs = new VFS()
+    const k = await Kernel.boot({}, vfs)
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'add', '--no-install'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/package.json',
+          content: JSON.stringify({
+            name: 'app',
+            version: '1.0.0',
+            dependencies: {},
+          }),
+        },
+      ],
+    })
+
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stdout') stdout.push(data)
+      if (kind === 'stderr') stderr.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['bun', 'add', '--no-install', 'lodash@4.17.21'],
+      cwd: '/workspace',
+      stdin: '',
+    })
+
+    const manifest = JSON.parse(vfs.readFileSync('/workspace/package.json').toString()) as {
+      dependencies?: Record<string, string>
+    }
+
+    expect(manifest.dependencies?.lodash).toBe('4.17.21')
+    expect(stdout.join('')).toContain('Added lodash@4.17.21 (no install)')
+    expect(stderr).toEqual([])
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(0)
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess supports bun add -d --no-install and updates devDependencies', async () => {
+    const vfs = new VFS()
+    const k = await Kernel.boot({}, vfs)
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'add', '-d', '--no-install'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/package.json',
+          content: JSON.stringify({
+            name: 'app',
+            version: '1.0.0',
+            dependencies: {},
+          }),
+        },
+      ],
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['bun', 'add', '-d', '--no-install', 'typescript@5.6.0'],
+      cwd: '/workspace',
+      stdin: '',
+    })
+
+    const manifest = JSON.parse(vfs.readFileSync('/workspace/package.json').toString()) as {
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+    }
+
+    expect(manifest.dependencies?.typescript).toBeUndefined()
+    expect(manifest.devDependencies?.typescript).toBe('5.6.0')
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(0)
+
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess validates bun add --cwd value', async () => {
+    const vfs = new VFS()
+    const k = await Kernel.boot({}, vfs)
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'add', '--cwd'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/package.json',
+          content: JSON.stringify({
+            name: 'app',
+            version: '1.0.0',
+            dependencies: {},
+          }),
+        },
+      ],
+    })
+
+    const stderr: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stderr') stderr.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['bun', 'add', '--cwd'],
+      cwd: '/workspace',
+      stdin: '',
+    })
+
+    expect(stderr.join('')).toContain('bun add --cwd requires a value')
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(1)
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess uses injected processExecutor when provided', async () => {
+    const k = await Kernel.boot({
+      processExecutor: runtimeProcessExecutor,
+    })
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'run', '/workspace/app.ts'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stdout') stdout.push(data)
+      if (kind === 'stderr') stderr.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/app.ts',
+          content: `console.log('runtime:ok')`,
+        },
+      ],
+    })
+
+    const executeResult = await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['bun', 'run', '/workspace/app.ts'],
+      cwd: '/workspace',
+      env: { NODE_ENV: 'test' },
+      stdin: '',
+    })
+
+    expect(executeResult.type).toBe('executeProcess')
+  expect(stdout).toContain('runtime:ok\n')
+  expect(stderr).toEqual([])
+  expect(await k.waitpid(spawnResult.process.pid)).toBe(0)
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess returns command-not-found for unknown command via runtime executor', async () => {
+    const k = await Kernel.boot({
+      processExecutor: runtimeProcessExecutor,
+    })
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['sdk-unknown-cmd'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    const stderr: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stderr') stderr.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['sdk-unknown-cmd'],
+      stdin: '',
+    })
+
+    expect(stderr.join('')).toContain('command not found: sdk-unknown-cmd')
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(127)
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess fails when worker runtime is unavailable', async () => {
+    const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker
+    ;(globalThis as { Worker?: typeof Worker }).Worker = undefined
+
+    try {
+      const k = await Kernel.boot({
+        processExecutor: runtimeProcessExecutor,
+      })
+
+      const spawnResult = await k.handleCommand({
+        type: 'spawn',
+        options: {
+          argv: ['bun', 'run', '/workspace/app.ts'],
+        },
+      })
+      if (spawnResult.type !== 'spawn') {
+        throw new Error('expected spawn result type')
+      }
+
+      const stderr: string[] = []
+      const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+        if (kind === 'stderr') stderr.push(data)
+      })
+
+      await k.handleCommand({
+        type: 'mount',
+        files: [
+          {
+            path: '/workspace/app.ts',
+            content: `console.log('runtime:ok')`,
+          },
+        ],
+      })
+
+      await k.handleCommand({
+        type: 'executeProcess',
+        pid: spawnResult.process.pid,
+        argv: ['bun', 'run', '/workspace/app.ts'],
+        cwd: '/workspace',
+        stdin: '',
+      })
+
+      expect(stderr.join('')).toContain('bun command requires Worker runtime')
+      expect(await k.waitpid(spawnResult.process.pid)).toBe(1)
+
+      unsubscribe()
+      await Kernel.shutdown()
+    } finally {
+      ;(globalThis as { Worker?: typeof Worker }).Worker = originalWorker
+    }
+  })
+
+  test('handleCommand executeProcess returns non-zero when bun script throws', async () => {
+    const k = await Kernel.boot({
+      processExecutor: runtimeProcessExecutor,
+    })
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'run', '/workspace/crash.ts'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    const stderr: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stderr') stderr.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/crash.ts',
+          content: `throw new Error('boom')`,
+        },
+      ],
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['bun', 'run', '/workspace/crash.ts'],
+      cwd: '/workspace',
+      stdin: '',
+    })
+
+    expect(stderr.join('')).toContain('Error: boom')
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(1)
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
+  test('handleCommand executeProcess respects process.exit and Bun.exit code in runtime executor', async () => {
+    const k = await Kernel.boot({
+      processExecutor: runtimeProcessExecutor,
+    })
+
+    const spawnResult = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'run', '/workspace/exit.ts'],
+      },
+    })
+    expect(spawnResult.type).toBe('spawn')
+    if (spawnResult.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const unsubscribe = k.onStdio(spawnResult.process.pid, (kind, data) => {
+      if (kind === 'stdout') stdout.push(data)
+      if (kind === 'stderr') stderr.push(data)
+    })
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/exit.ts',
+          content: `
+            console.log('before-process-exit')
+            process.exit(7)
+            console.log('after-process-exit')
+          `,
+        },
+      ],
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult.process.pid,
+      argv: ['bun', 'run', '/workspace/exit.ts'],
+      cwd: '/workspace',
+      stdin: '',
+    })
+
+    expect(stdout.join('')).toContain('before-process-exit')
+    expect(stdout.join('')).not.toContain('after-process-exit')
+    expect(stderr).toEqual([])
+    expect(await k.waitpid(spawnResult.process.pid)).toBe(7)
+
+    const spawnResult2 = await k.handleCommand({
+      type: 'spawn',
+      options: {
+        argv: ['bun', 'run', '/workspace/bun-exit.ts'],
+      },
+    })
+    if (spawnResult2.type !== 'spawn') {
+      throw new Error('expected spawn result type')
+    }
+
+    await k.handleCommand({
+      type: 'mount',
+      files: [
+        {
+          path: '/workspace/bun-exit.ts',
+          content: `Bun.exit(9)`,
+        },
+      ],
+    })
+
+    await k.handleCommand({
+      type: 'executeProcess',
+      pid: spawnResult2.process.pid,
+      argv: ['bun', 'run', '/workspace/bun-exit.ts'],
+      cwd: '/workspace',
+      stdin: '',
+    })
+
+    expect(await k.waitpid(spawnResult2.process.pid)).toBe(9)
+
+    unsubscribe()
+    await Kernel.shutdown()
+  })
+
   test('attachProcessPort routes stdout and exit messages to onStdio and waitpid', async () => {
-    const k = await Kernel.boot({ asyncFallback: true })
+    const k = await Kernel.boot({})
     const proc = await k.spawn({ argv: ['bun', 'worker.ts'] })
     k.allocateStdio(proc.pid)
 
@@ -780,7 +1456,7 @@ describe('Kernel stdio channels', () => {
   })
 
   test('emits processExit event when process exits', async () => {
-    const k = await Kernel.boot({ asyncFallback: true })
+    const k = await Kernel.boot({})
     const proc = await k.spawn({ argv: ['bun', 'event-exit.ts'] })
 
     const seen: Array<{ pid: number; code: number }> = []
@@ -788,14 +1464,40 @@ describe('Kernel stdio channels', () => {
       seen.push(payload)
     })
 
-    k.notifyExit(proc.pid, 17)
+    k.exit(proc.pid, 17)
     expect(seen).toContainEqual({ pid: proc.pid, code: 17 })
 
     await Kernel.shutdown()
   })
 
+  test('emits portRegistered event when registerPort command is handled', async () => {
+    const k = await Kernel.boot({})
+    const proc = await k.spawn({ argv: ['bun', 'serve.ts'] })
+
+    const seen: Array<{ pid: number; port: number; host: string; protocol: 'http' | 'https' }> = []
+    k.on('portRegistered', payload => {
+      seen.push(payload)
+    })
+
+    await k.handleCommand({
+      type: 'registerPort',
+      pid: proc.pid,
+      port: 4321,
+      host: '0.0.0.0',
+      protocol: 'https',
+    })
+
+    expect(seen).toContainEqual({
+      pid: proc.pid,
+      port: 4321,
+      host: '0.0.0.0',
+      protocol: 'https',
+    })
+    await Kernel.shutdown()
+  })
+
   test('attachProcessPort listener is cleaned up after process exit', async () => {
-    const k = await Kernel.boot({ asyncFallback: true })
+    const k = await Kernel.boot({})
     const proc = await k.spawn({ argv: ['bun', 'cleanup.ts'] })
     const ch = new MessageChannel()
     k.attachProcessPort(proc.pid, ch.port1)
@@ -823,8 +1525,110 @@ describe('Kernel stdio channels', () => {
 // ---------------------------------------------------------------------------
 describe('bootstrapProcessWorker', () => {
   async function makeKernel() {
-    return Kernel.boot({ asyncFallback: true })
+    return Kernel.boot({})
   }
+
+  test('ProcessBootstrap runs initializer queue in registration order', async () => {
+    const bootstrap = new ProcessBootstrap()
+    const calls: string[] = []
+
+    bootstrap.registerInitializer({
+      id: 'first',
+      run: () => {
+        calls.push('first')
+      },
+    })
+    bootstrap.registerInitializer({
+      id: 'second',
+      run: () => {
+        calls.push('second')
+      },
+    })
+
+    await bootstrap.bootstrap({
+      kernel: { vfs: null } as any,
+      pid: 1,
+      argv: ['bun', 'queue.ts'],
+      env: {},
+      cwd: '/',
+      sabBuffer: null,
+    })
+
+    expect(calls).toEqual(['first', 'second'])
+  })
+
+  test('ProcessBootstrap initializer can be gated and unregistered', async () => {
+    const bootstrap = new ProcessBootstrap()
+    const calls: string[] = []
+
+    const unregister = bootstrap.registerInitializer({
+      id: 'flagged',
+      shouldRun: ({ opts }) => opts.initializeTranspiler === true,
+      run: () => {
+        calls.push('flagged')
+      },
+    })
+
+    await bootstrap.bootstrap({
+      kernel: { vfs: null } as any,
+      pid: 2,
+      argv: ['bun', 'skip.ts'],
+      env: {},
+      cwd: '/',
+      sabBuffer: null,
+      initializeTranspiler: false,
+    })
+    expect(calls).toEqual([])
+
+    await bootstrap.bootstrap({
+      kernel: { vfs: null } as any,
+      pid: 3,
+      argv: ['bun', 'run.ts'],
+      env: {},
+      cwd: '/',
+      sabBuffer: null,
+      initializeTranspiler: true,
+    })
+    expect(calls).toEqual(['flagged'])
+
+    unregister()
+    await bootstrap.bootstrap({
+      kernel: { vfs: null } as any,
+      pid: 4,
+      argv: ['bun', 'off.ts'],
+      env: {},
+      cwd: '/',
+      sabBuffer: null,
+      initializeTranspiler: true,
+    })
+    expect(calls).toEqual(['flagged'])
+  })
+
+  test('ProcessBootstrap can run selected initializer ids regardless of default gate', async () => {
+    const bootstrap = new ProcessBootstrap()
+    const calls: string[] = []
+
+    bootstrap.registerInitializer({
+      id: 'default-gated',
+      shouldRun: ({ opts }) => opts.initializeTranspiler === true,
+      run: () => {
+        calls.push('default-gated')
+      },
+    })
+
+    await bootstrap.bootstrap({
+      kernel: { vfs: null } as any,
+      pid: 5,
+      argv: ['bun', 'selected.ts'],
+      env: {},
+      cwd: '/',
+      sabBuffer: null,
+      initializeTranspiler: false,
+      bootstrapInitializers: ['default-gated'],
+    })
+
+    expect(calls).toEqual(['default-gated'])
+  })
 
   test('returns process with correct pid/argv/cwd', async () => {
     const k = await makeKernel()
@@ -854,6 +1658,59 @@ describe('bootstrapProcessWorker', () => {
     }
     await bootstrapProcessWorker(opts)
     expect((globalThis as Record<string, unknown>).process).toBeTruthy()
+    await Kernel.shutdown()
+  })
+
+  test('installs bun-web Bun mirror with version/stdin/stdout/stderr and VFS-backed file/write', async () => {
+    const vfs = new VFS()
+    const k = await Kernel.boot({}, vfs)
+    const proc = await k.spawn({ argv: ['bun', 'bun-globals.ts'], env: { NODE_ENV: 'test' }, cwd: '/workspace' })
+    const opts: ProcessBootstrapOptions = {
+      kernel: k,
+      pid: proc.pid,
+      argv: ['bun', 'bun-globals.ts'],
+      env: { NODE_ENV: 'test' },
+      cwd: '/workspace',
+      sabBuffer: null,
+    }
+
+    await bootstrapProcessWorker(opts)
+
+    const scope = globalThis as Record<string, unknown>
+    const bun = scope.__BUN_WEB_BUN__ as {
+      argv: string[]
+      cwd(): string
+      env: Record<string, string>
+      nanoseconds(): bigint
+      sleep(ms: number): Promise<void>
+      version: string
+      stdin: { fd: number }
+      stdout: { fd: number }
+      stderr: { fd: number }
+      file(path: string): { text(): Promise<string> }
+      write(path: string, data: string): Promise<number>
+    }
+
+    expect(bun).toBeTruthy()
+    expect(scope.Bun).toBeTruthy()
+    expect(bun.version).toMatch(/^\d+\.\d+\.\d+/)
+    expect(bun.argv).toEqual(['bun', 'bun-globals.ts'])
+    expect(bun.cwd()).toBe('/workspace')
+    expect(bun.env.NODE_ENV).toBe('test')
+    expect(bun.stdin.fd).toBe(0)
+    expect(bun.stdout.fd).toBe(1)
+    expect(bun.stderr.fd).toBe(2)
+
+    const t1 = bun.nanoseconds()
+    await bun.sleep(0)
+    const t2 = bun.nanoseconds()
+    expect(typeof t1).toBe('bigint')
+    expect(typeof t2).toBe('bigint')
+    expect(t2 >= t1).toBe(true)
+
+    await bun.write('/tmp/bunfile.txt', 'bun-write-content')
+    await expect(bun.file('/tmp/bunfile.txt').text()).resolves.toBe('bun-write-content')
+
     await Kernel.shutdown()
   })
 

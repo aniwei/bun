@@ -4,10 +4,13 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
+      "@mars/web-bundler": ["packages/bun-web-bundler/src/index.ts"],
       "@mars/web-kernel": ["packages/bun-web-kernel/src/index.ts"],
       "@mars/web-node": ["packages/bun-web-node/src/index.ts"],
       "@mars/web-runtime": ["packages/bun-web-runtime/src/index.ts"],
+      "@mars/web-shell": ["packages/bun-web-shell/src/index.ts"],
       "@mars/web-shared": ["packages/bun-web-shared/src/index.ts"],
+      "@mars/web-transpiler": ["packages/bun-web-transpiler/src/index.ts"],
       "@mars/web-vfs": ["packages/bun-web-vfs/src/index.ts"]
     },
     "noEmit": true,

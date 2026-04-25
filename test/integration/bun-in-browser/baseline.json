@@ -1,8 +1,48 @@
 {
-  "test/js/node/fs": {
+  "_meta": {
+    "updated": "2026-04-25",
+    "note": "初始基线（M8-3）。各目录通过率为当前可执行测试的实测值或占位值（0 = 尚未跑通）。使用 --update-baseline 更新。"
+  },
+  "test/js/web": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "rate": 0
+  },
+  "test/js/node": {
     "total": 11,
     "passed": 11,
     "failed": 0,
     "rate": 1
+  },
+  "test/js/bun/http": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "rate": 0
+  },
+  "test/js/bun/crypto": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "rate": 0
+  },
+  "test/js/bun/shell": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "rate": 0
+  },
+  "test/cli/install": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "rate": 0
+  },
+  "test/bundler": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "rate": 0
   }
 }

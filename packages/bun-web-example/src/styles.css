@@ -1,0 +1,180 @@
+:root {
+  font-family: 'Inter', 'SF Pro Text', 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  color: #0f172a;
+  background: radial-gradient(circle at 20% -10%, #dbeafe 0%, transparent 38%),
+    radial-gradient(circle at 80% 0%, #e0e7ff 0%, transparent 42%),
+    #f8fafc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+.dify-shell {
+  width: min(980px, 100%);
+  border-radius: 24px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 28px 60px rgba(15, 23, 42, 0.16);
+  border: 1px solid rgba(148, 163, 184, 0.26);
+}
+
+.dify-header {
+  padding: 18px 22px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dify-brand {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #334155;
+}
+
+.dify-status {
+  font-size: 12px;
+  color: #475569;
+  background: #ecfeff;
+  border: 1px solid #bae6fd;
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.dify-main {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+}
+
+.dify-side {
+  border-right: 1px solid rgba(148, 163, 184, 0.2);
+  padding: 16px;
+  background: linear-gradient(180deg, #f8fafc, #f1f5f9);
+}
+
+.dify-side-item {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  color: #475569;
+}
+
+.dify-side-item.active {
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.dify-content {
+  padding: 24px;
+}
+
+.dify-title {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.2;
+  color: #0f172a;
+}
+
+.dify-subtitle {
+  margin-top: 10px;
+  color: #334155;
+}
+
+.dify-card {
+  margin-top: 20px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: #fff;
+  padding: 16px;
+}
+
+.dify-card-title {
+  margin: 0;
+  font-size: 14px;
+  color: #334155;
+}
+
+.dify-card-body {
+  margin-top: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  color: #0f172a;
+  white-space: pre-wrap;
+}
+
+.dify-scenario-grid {
+  margin-top: 12px;
+}
+
+.dify-scenario-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.dify-scenario-select {
+  width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #0f172a;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.dify-scenario-select:disabled {
+  opacity: 0.65;
+}
+
+.dify-actions {
+  margin-top: 12px;
+}
+
+.dify-run-btn {
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: #fff;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dify-run-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+@media (max-width: 760px) {
+  .dify-main {
+    grid-template-columns: 1fr;
+  }
+
+  .dify-side {
+    border-right: none;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  }
+
+  .dify-title {
+    font-size: 24px;
+  }
+}

@@ -5,12 +5,10 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["@types/bun"],
     "declaration": true,
     "declarationMap": true,
-    "rootDir": ".",
     "sourceMap": true,
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts", "tsdown.config.ts"]
+  "include": ["src/**/*.ts"]
 }

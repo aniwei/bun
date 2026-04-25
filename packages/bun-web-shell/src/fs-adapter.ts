@@ -1,4 +1,21 @@
-import type { BuiltinFS, DirectoryNode, FSNode } from './types'
+export type FileNode = {
+  kind: 'file'
+  content: string
+}
+
+export type DirectoryNode = {
+  kind: 'dir'
+  children: Record<string, FSNode>
+}
+
+export type FSNode = FileNode | DirectoryNode
+
+export interface BuiltinFS {
+  readFile(path: string): string
+  listDir(path: string): string[]
+  isDirectory(path: string): boolean
+  walk(path: string): string[]
+}
 
 function normalize(path: string): string {
   const withLeading = path.startsWith('/') ? path : `/${path}`

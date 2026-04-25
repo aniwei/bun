@@ -151,6 +151,7 @@ self.addEventListener('fetch', (e: FetchEvent) => {
 
 - 虚拟主机格式：`http://<pid>.bun.local/` 或 `/__bun__/:port/*`。
 - Request body 以 `ReadableStream` transfer，零拷贝。
+- Service Worker 仅负责路由与 Worker 脚本分发，不承载 `bun add/install/i` 的包管理语义。
 
 ### 5.2 WebSocket 桥
 
@@ -226,6 +227,58 @@ export interface PluginContext {
 ### 6.4 与 Bun.plugin 的关系
 
 暴露与 Bun 一致的 `Bun.plugin({ name, setup })`，内部映射到 `loader:*` hook，保证 `bun-plugin-svelte`、`bun-plugin-yaml` 等现有插件直接复用。
+
+### 6.5 HookRegistry 参考实现（M7-1/M7-2）
+
+为避免 M7 落地时 Hook Engine 与 Plugin API 语义漂移，统一采用如下运行时契约：
+
+```ts
+export interface HookRegistryOptions {
+  preset?: HookPreset
+}
+
+export class HookRegistry {
+  private readonly hooks = createHookBuckets()
+  private readonly disabled = new Set<string>()
+
+  constructor(options?: HookRegistryOptions) {
+    if (options?.preset && options.preset !== 'none') {
+      this.applyPreset(options.preset)
+    }
+  }
+
+  register(spec: HookSpec): void
+  registerAll(specs: HookSpec[]): void
+  on<T extends HookTiming>(timing: T, name: string, handle: HookHandle<T>, priority = 50): this
+
+  has(name: string): boolean
+  unregister(name: string): boolean
+  disable(name: string): void
+  enable(name: string): void
+  clear(): void
+
+  getRegistered(timing?: HookTiming): RegisteredHookInfo[]
+
+  execute<T extends InterceptorTiming>(
+    timing: T,
+    input: HookInput<T>,
+    output: HookOutput<T>,
+  ): Promise<void>
+
+  emit<T extends ObserverTiming>(
+    timing: T,
+    input: HookInput<T>,
+  ): Promise<void>
+}
+```
+
+强制规则：
+
+- `execute()` 仅用于 interceptor timing，`emit()` 仅用于 observer timing，禁止混用。
+- hook 运行顺序固定为 `priority` 升序；同优先级按注册顺序执行。
+- `disable/enable` 只影响运行时过滤，不删除 bucket 内定义，支持快速回滚。
+- hook 抛错只记录日志，不中断同 timing 后续 hook。
+- `Bun.plugin({ setup })` 的 loader 注入必须通过 `HookRegistry.on('loader:*', ...)` 落盘，禁止直接改写 bundler 内部状态。
 
 ---
 
@@ -385,7 +438,7 @@ packages/
   bun-web-installer/        # bun install（移植自 src/install/）
   bun-web-bundler/          # Bun.build（esbuild-wasm + 自研 chunk 合并）
   bun-web-shell/            # Bun.$ 解释器（移植自 src/shell/）
-  bun-web-shell-builtins/   # 所有 builtin shell 命令
+  bun-web-shell/            # shell 解释器与 builtin shell 命令
   bun-web-sw/               # Service Worker（HTTP + WS 虚拟化）
   bun-web-test/             # Vitest 测试与门禁包
   bun-web-sqlite/           # wa-sqlite OPFS VFS 绑定
@@ -397,10 +450,13 @@ packages/
   bun-web-agent/            # AI Agent 受限 shell + 审计 overlay
   bun-web-compat-registry/  # 符号 → 级别注册表 + 类型校验
   bun-web-client/           # 宿主页面 SDK（类 @webcontainer/api）
+  bun-web-example/          # BunContainer -> 代码执行整体流程验证包
   bun-web-proxy-server/     # 可选 WS/TCP 隧道服务端
 ```
 
 当前实现约定：`packages/bun-web-node/src/process.ts` 通过导入 `@mars/web-shared` 中导出的 `TypedEventEmitter` 复用事件系统；`packages/bun-web-node/src/events-stream.ts` 已提供 `node:events`、`node:stream` 以及 `node:stream/web`、`node:stream/promises` 的最小主路径。后续其他模块统一通过 `@mars/web-*` scoped package 引用跨包能力，不再使用跨包相对路径。
+
+当前整体流程基线（2026-04-25）：除 RFC 中的宿主 SDK 片段外，仓库新增 `packages/bun-web-example/src/index.ts` 作为显式端到端示例，已升级为 `Vite + React + TypeScript`（Dify 风格 UI）模板文件集，并固定验证 `BunContainer.boot() -> mount() -> spawn('bun', ['run', '/src/example-run.ts']) -> output/exited` 链路，由 `packages/bun-web-test/tests/m8-example-flow.test.ts` 持续回归。职责分层冻结：`bun add/install/i` 接入 kernel 控制面并复用 installer；runtime process-executor 与 sw 仅负责 worker 脚本执行与分发。
 
 工程基线约定（2026-04-25）：所有 `packages/bun-web-*` 模块统一包含 `tsdown.config.ts`、`tsconfig.json`、`README.md`，并在各模块 `package.json` 提供 `build/typecheck/clean` 脚本，统一构建入口为 `tsdown`；根工作区通过 Nx 统一编排模块级 `build/typecheck/clean` 目标，按包依赖顺序执行。当前已实测 `web:build` 与 `web:typecheck` 均可由 Nx 统一驱动 8 个 bun-web 模块通过。
 
@@ -409,7 +465,30 @@ packages/
 ```ts
 import { BunContainer } from '@mars/web-client';
 
-const bun = await BunContainer.boot();
+const bun = await BunContainer.boot({
+  serviceWorkerScripts: {
+    '/__bun__/worker/pkg.js': {
+      source: 'module.exports = 7',
+      packageName: 'pkg',
+      packageType: 'commonjs',
+    },
+  },
+  serviceWorkerScriptProcessor: {
+    async process(input) {
+      if (input.detectedModuleType === 'cjs') {
+        return {
+          source: `export default (${JSON.stringify(input.descriptor.source)})`,
+          contentType: 'text/javascript',
+        };
+      }
+
+      return {
+        source: input.descriptor.source,
+        contentType: 'text/javascript',
+      };
+    },
+  },
+});
 await bun.mount({
   'index.ts': 'console.log("hi")',
   'package.json': JSON.stringify({ name: 'demo' }),
@@ -421,6 +500,15 @@ proc.output.pipeTo(terminal.writable);
 bun.on('server-ready', (port, url) => {
   iframe.src = url;
 });
+```
+
+若需要仓库内可直接复用的整体流程示例，可使用：
+
+```ts
+import { runBunWebExample } from '@mars/web-example'
+
+const result = await runBunWebExample()
+console.log(result.output)
 ```
 
 ---

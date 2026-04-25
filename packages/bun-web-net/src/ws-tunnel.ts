@@ -47,7 +47,7 @@ function buildTunnelChannel(options: TunnelOptions): string {
 }
 
 function toBinary(payload: Uint8Array): ArrayBuffer {
-  return payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength)
+  return Uint8Array.from(payload).buffer
 }
 
 export class WSTunnel {

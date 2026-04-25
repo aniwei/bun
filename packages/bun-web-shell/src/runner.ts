@@ -1,25 +1,26 @@
-import {
-  applyShellCommandRegisterHooks,
-  builtinCommands,
-  createBuiltinCommandRegistry,
-  type BuiltinContext,
-  type BuiltinFS,
-  type BuiltinResult,
-  type ShellCommandRegisterHook,
-  type ShellCommandRegistry,
-} from '@mars/web-shell-builtins'
 import { parseShellPipeline } from './parser'
+import { createCommandRegistry } from './registry'
+import type {
+  ShellCommandContext,
+  ShellCommandRegisterHook,
+  ShellCommandRegistry,
+  ShellCommandResult,
+} from './types'
+
+export interface RunnerFS {
+  listDir(path: string): string[]
+}
 
 export interface ShellRunOptions {
   cwd?: string
   env?: Record<string, string>
   stdin?: string
-  fs?: BuiltinFS
+  fs?: RunnerFS
   registry?: ShellCommandRegistry
   hooks?: ShellCommandRegisterHook[]
 }
 
-export interface ShellRunResult extends BuiltinResult {
+export interface ShellRunResult extends ShellCommandResult {
   cwd: string
 }
 
@@ -28,7 +29,7 @@ function wildcardToRegex(pattern: string): RegExp {
   return new RegExp(`^${escaped.replace(/\*/g, '.*')}$`)
 }
 
-function expandArgument(arg: string, cwd: string, fs?: BuiltinFS): string[] {
+function expandArgument(arg: string, cwd: string, fs?: RunnerFS): string[] {
   if (!fs || !arg.includes('*')) {
     return [arg]
   }
@@ -48,14 +49,16 @@ export function runShellCommandSync(
   options: ShellRunOptions = {},
 ): ShellRunResult {
   const parsed = parseShellPipeline(commandLine)
-  const registry = options.registry ?? createBuiltinCommandRegistry(builtinCommands)
-  applyShellCommandRegisterHooks(registry, options.hooks)
+  const registry = options.registry ?? createCommandRegistry()
+  for (const hook of options.hooks ?? []) {
+    hook(registry)
+  }
 
   let cwd = options.cwd ?? '/'
   let stdin = options.stdin ?? ''
-  let lastResult: BuiltinResult = { stdout: '', stderr: '', exitCode: 0 }
+  let lastResult: ShellCommandResult = { stdout: '', stderr: '', exitCode: 0 }
 
-  const context: BuiltinContext = {
+  const context: ShellCommandContext = {
     cwd,
     stdin,
     env: options.env ?? {},

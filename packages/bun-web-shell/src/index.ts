@@ -1,2 +1,7 @@
 export * from './parser'
+export * from './types'
+export * from './registry'
 export * from './runner'
+export * from './register-builtin-commands'
+export * from './hook'
+export * from './fs-adapter'

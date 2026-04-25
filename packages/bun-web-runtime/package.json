@@ -17,9 +17,12 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@mars/web-bundler": "workspace:*",
     "@mars/web-kernel": "workspace:*",
     "@mars/web-node": "workspace:*",
-    "@mars/web-shell": "workspace:*"
+    "@mars/web-shell": "workspace:*",
+    "@mars/web-transpiler": "workspace:*",
+    "@mars/web-vfs": "workspace:*"
   },
   "devDependencies": {
     "typescript": "6.0.2"

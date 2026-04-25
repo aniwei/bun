@@ -13,6 +13,14 @@
     "test:official:update-baseline": "bunx --bun vitest run --config ./vitest.config.ts -t \"official replay\""
   },
   "devDependencies": {
+    "@mars/web-agent": "workspace:*",
+    "@mars/web-client": "workspace:*",
+    "@mars/web-compat-registry": "workspace:*",
+    "@mars/web-example": "workspace:*",
+    "@mars/web-hooks": "workspace:*",
+    "@mars/web-plugin-api": "workspace:*",
+    "@mars/web-net": "workspace:*",
+    "@mars/web-shared": "workspace:*",
     "tsdown": "^0.14.2",
     "typescript": "6.0.2",
     "vitest": "^2.1.8"

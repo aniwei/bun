@@ -1,5 +1,9 @@
+import { createProcess, installProcessGlobal } from '@mars/web-node'
+import { installBunGlobals } from './bun-globals'
+import { initRuntimeBundler } from './bundler-runtime'
+import { initRuntimeTranspiler } from './transpiler-runtime'
 import type { Kernel } from '@mars/web-kernel'
-import { createProcess, installProcessGlobal } from '../../bun-web-node/src/process'
+import type { RuntimeBundlerInitOptions } from './bundler-runtime'
 
 export interface ProcessBootstrapOptions {
   kernel: Kernel
@@ -8,6 +12,21 @@ export interface ProcessBootstrapOptions {
   env: Record<string, string>
   cwd: string
   sabBuffer: SharedArrayBuffer | null
+  bootstrapInitializers?: 'all' | string[]
+  initializeTranspiler?: boolean
+  initializeBundler?: boolean
+  bundlerInit?: RuntimeBundlerInitOptions
+}
+
+export interface ProcessBootstrapInitializerContext {
+  opts: ProcessBootstrapOptions
+  scope: Record<string, unknown>
+}
+
+export interface ProcessBootstrapInitializer {
+  id: string
+  shouldRun?: (context: ProcessBootstrapInitializerContext) => boolean
+  run: (context: ProcessBootstrapInitializerContext) => void | Promise<void>
 }
 
 // ---------------------------------------------------------------------------
@@ -99,74 +118,157 @@ export interface BootstrappedContext {
   stderr: StdioWriter
 }
 
+export class ProcessBootstrap {
+  private readonly initializers: ProcessBootstrapInitializer[] = []
+
+  registerInitializer(initializer: ProcessBootstrapInitializer): () => void {
+    const existingIndex = this.initializers.findIndex(item => item.id === initializer.id)
+    if (existingIndex >= 0) {
+      this.initializers.splice(existingIndex, 1)
+    }
+    this.initializers.push(initializer)
+
+    return () => {
+      const index = this.initializers.findIndex(item => item.id === initializer.id)
+      if (index >= 0) {
+        this.initializers.splice(index, 1)
+      }
+    }
+  }
+
+  async bootstrap(
+    opts: ProcessBootstrapOptions,
+    /** Optional MessagePort to send stdio back through. When null, uses globalThis.postMessage. */
+    stdioPort?: MessagePort | null,
+  ): Promise<BootstrappedContext> {
+    const scope = globalThis as Record<string, unknown>
+    const initializerContext: ProcessBootstrapInitializerContext = { opts, scope }
+    const runAllInitializers = opts.bootstrapInitializers === 'all'
+    const selectedInitializers = Array.isArray(opts.bootstrapInitializers)
+      ? new Set(opts.bootstrapInitializers)
+      : null
+
+    for (const initializer of this.initializers) {
+      const explicitlySelected = runAllInitializers || selectedInitializers?.has(initializer.id) === true
+
+      if (selectedInitializers && !explicitlySelected) {
+        continue
+      }
+
+      if (!explicitlySelected && initializer.shouldRun && !initializer.shouldRun(initializerContext)) {
+        continue
+      }
+
+      await initializer.run(initializerContext)
+    }
+
+    const port = stdioPort ?? null
+    const fallbackPostMessage: PostMessageFn | null =
+      port || typeof scope.postMessage !== 'function'
+        ? null
+        : ((message: StdioMessage) => {
+            ;(scope.postMessage as (m: StdioMessage) => void)(message)
+          })
+
+    const stdout = new StdioWriter(port, opts.pid, 'stdout', fallbackPostMessage)
+    const stderr = new StdioWriter(port, opts.pid, 'stderr', fallbackPostMessage)
+
+    // 1. Create process object
+    const proc = createProcess({
+      pid: opts.pid,
+      argv: opts.argv,
+      env: opts.env,
+      cwd: opts.cwd,
+      version: typeof Bun !== 'undefined' ? Bun.version : '0.0.0-web',
+      stdin: {
+        read: () => null,
+      },
+      stdout: {
+        write: chunk => stdout.write(chunk),
+        end: () => stdout.end(),
+      },
+      stderr: {
+        write: chunk => stderr.write(chunk),
+        end: () => stderr.end(),
+      },
+    })
+
+    // 2. Install as globalThis.process
+    installProcessGlobal(proc)
+
+    // 3. Expose context on globalThis for interop
+    scope.__BUN_WEB_PROCESS_CONTEXT__ = opts
+
+    // 4. Install Bun globals for the current process worker.
+    installBunGlobals(proc, {
+      argv: opts.argv,
+      cwd: opts.cwd,
+      env: opts.env,
+      vfs: opts.kernel.vfs ?? null,
+    })
+
+    // 5. Redirect console -> stdio writers
+    installConsoleCapture(stdout, stderr)
+
+    // 6. Hook process.exit to send exit message
+    const origExit = proc.exit.bind(proc)
+    proc.exit = (code = 0): never => {
+      const msg: StdioMessage = { kind: 'exit', pid: opts.pid, code }
+      try {
+        if (port) {
+          port.postMessage(msg)
+        } else {
+          fallbackPostMessage?.(msg)
+        }
+      } catch {
+        // worker may already be closing
+      }
+      origExit(code)
+      throw new Error('unreachable process.exit return')
+    }
+
+    // 7. Expose VFS reference if kernel has one
+    if (opts.kernel.vfs) {
+      scope.__BUN_WEB_VFS__ = opts.kernel.vfs
+    }
+
+    return { process: proc, stdout, stderr }
+  }
+}
+
+const defaultProcessBootstrap = new ProcessBootstrap()
+
+defaultProcessBootstrap.registerInitializer({
+  id: 'runtime-transpiler-init',
+  shouldRun: ({ opts }) => opts.initializeTranspiler === true,
+  run: async ({ scope }) => {
+    await initRuntimeTranspiler()
+    scope.__BUN_WEB_TRANSPILER_READY__ = true
+  },
+})
+
+defaultProcessBootstrap.registerInitializer({
+  id: 'runtime-bundler-init',
+  shouldRun: ({ opts }) => opts.initializeBundler === true,
+  run: async ({ opts, scope }) => {
+    await initRuntimeBundler(opts.bundlerInit ?? {})
+    scope.__BUN_WEB_BUNDLER_READY__ = true
+  },
+})
+
+export function getDefaultProcessBootstrap(): ProcessBootstrap {
+  return defaultProcessBootstrap
+}
+
+export function registerProcessBootstrapInitializer(initializer: ProcessBootstrapInitializer): () => void {
+  return defaultProcessBootstrap.registerInitializer(initializer)
+}
+
 export async function bootstrapProcessWorker(
   opts: ProcessBootstrapOptions,
   /** Optional MessagePort to send stdio back through. When null, uses globalThis.postMessage. */
   stdioPort?: MessagePort | null,
 ): Promise<BootstrappedContext> {
-  const scope = globalThis as Record<string, unknown>
-  const port = stdioPort ?? null
-  const fallbackPostMessage: PostMessageFn | null =
-    port || typeof scope.postMessage !== 'function'
-      ? null
-      : ((message: StdioMessage) => {
-          ;(scope.postMessage as (m: StdioMessage) => void)(message)
-        })
-
-  const stdout = new StdioWriter(port, opts.pid, 'stdout', fallbackPostMessage)
-  const stderr = new StdioWriter(port, opts.pid, 'stderr', fallbackPostMessage)
-
-  // 1. Create process object
-  const proc = createProcess({
-    pid: opts.pid,
-    argv: opts.argv,
-    env: opts.env,
-    cwd: opts.cwd,
-    version: typeof Bun !== 'undefined' ? Bun.version : '0.0.0-web',
-    stdin: {
-      read: () => null,
-    },
-    stdout: {
-      write: chunk => stdout.write(chunk),
-      end: () => stdout.end(),
-    },
-    stderr: {
-      write: chunk => stderr.write(chunk),
-      end: () => stderr.end(),
-    },
-  })
-
-  // 2. Install as globalThis.process
-  installProcessGlobal(proc)
-
-  // 3. Expose context on globalThis for interop
-  scope.__BUN_WEB_PROCESS_CONTEXT__ = opts
-
-  // 4. Redirect console → stdio writers
-  installConsoleCapture(stdout, stderr)
-
-  // 5. Hook process.exit to send exit message
-  const origExit = proc.exit.bind(proc)
-  proc.exit = (code = 0): never => {
-    const msg: StdioMessage = { kind: 'exit', pid: opts.pid, code }
-    try {
-      if (port) {
-        port.postMessage(msg)
-      } else {
-        fallbackPostMessage?.(msg)
-      }
-    } catch {
-      // worker may already be closing
-    }
-    origExit(code)
-    throw new Error('unreachable process.exit return')
-  }
-
-  // 6. Expose VFS reference if kernel has one
-  if (opts.kernel.vfs) {
-    scope.__BUN_WEB_VFS__ = opts.kernel.vfs
-  }
-
-  return { process: proc, stdout, stderr }
+  return defaultProcessBootstrap.bootstrap(opts, stdioPort)
 }
 

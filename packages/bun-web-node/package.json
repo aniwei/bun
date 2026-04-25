@@ -18,9 +18,10 @@
   },
   "dependencies": {
     "@mars/web-net": "workspace:*",
+    "@mars/web-resolver": "workspace:*",
     "@mars/web-shared": "workspace:*",
     "@mars/web-vfs": "workspace:*",
-    "@mars/web-resolver": "workspace:*"
+    "wasm-flate": "^1.0.2-browser"
   },
   "devDependencies": {
     "typescript": "6.0.2"

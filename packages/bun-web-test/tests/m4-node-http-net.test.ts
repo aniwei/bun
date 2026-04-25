@@ -6,6 +6,7 @@ import {
   createSecureContext,
   createServer,
   get,
+  http2,
   https,
   request,
   tlsConnect,
@@ -262,5 +263,62 @@ describe('M4 node:http-net polyfill baseline', () => {
 
     globalThis.fetch = originalFetch
     expect(message).toContain('network-fail')
+  })
+
+  test('http2.connect supports request-like stream with response/data/end', async () => {
+    const live = Bun.serve({
+      port: 0,
+      fetch: async req => {
+        const body = await req.text()
+        return new Response(`h2:${req.method}:${new URL(req.url).pathname}:${body}`, { status: 201 })
+      },
+    })
+
+    const session = http2.connect(`http://127.0.0.1:${live.port}`)
+    const stream = session.request({
+      ':method': 'POST',
+      ':path': '/h2',
+      'x-m4': 'yes',
+    })
+
+    const resultPromise = new Promise<{ status: string; body: string }>((resolve, reject) => {
+      let status = ''
+      let body = ''
+
+      stream.on('response', headers => {
+        status = (headers as Record<string, string>)[':status']
+      })
+      stream.on('data', chunk => {
+        body += decoder.decode(chunk as Uint8Array)
+      })
+      stream.on('end', () => {
+        resolve({ status, body })
+      })
+      stream.on('error', error => {
+        reject(error)
+      })
+    })
+
+    stream.write('abc')
+    stream.end('123')
+
+    const result = await resultPromise
+
+    expect(result.status).toBe('201')
+    expect(result.body).toBe('h2:POST:/h2:abc123')
+    session.close()
+    live.stop(true)
+  })
+
+  test('http2 session close emits close and blocks new requests', () => {
+    const session = http2.connect('http://127.0.0.1:7777')
+    let closed = false
+    session.on('close', () => {
+      closed = true
+    })
+
+    session.close()
+    expect(closed).toBe(true)
+    expect(() => session.request({ ':path': '/' })).toThrow(/destroyed/i)
   })
 })

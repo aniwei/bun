@@ -1,18 +1,40 @@
 import { describe, expect, test } from 'vitest'
-import { parseShellPipeline, runShellCommandSync } from '../../../packages/bun-web-shell/src'
 import {
   createBuiltinCommandRegistry,
   createInMemoryFS,
-} from '../../../packages/bun-web-shell-builtins/src'
+  parseShellPipeline,
+  runShellCommandSync,
+} from '../../../packages/bun-web-shell/src'
 import { spawnSync } from '../../../packages/bun-web-runtime/src/spawn'
+import { stableSnapshot } from './snapshot-utils'
 
 describe('M5 shell parser and builtins', () => {
   test('parser handles pipeline and redirect metadata', () => {
     const parsed = parseShellPipeline("cat a.txt | grep hello > out.txt")
 
     expect(parsed.commands).toHaveLength(2)
-    expect(parsed.commands[0]).toMatchObject({ command: 'cat', args: ['a.txt'] })
-    expect(parsed.commands[1]).toMatchObject({ command: 'grep', args: ['hello'], redirectOut: 'out.txt' })
+    expect(stableSnapshot(parsed.commands)).toMatchInlineSnapshot(`
+      "[
+        {
+          \"appendOut\": \"undefined\",
+          \"args\": [
+            \"a.txt\"
+          ],
+          \"command\": \"cat\",
+          \"redirectIn\": \"undefined\",
+          \"redirectOut\": \"undefined\"
+        },
+        {
+          \"appendOut\": \"undefined\",
+          \"args\": [
+            \"hello\"
+          ],
+          \"command\": \"grep\",
+          \"redirectIn\": \"undefined\",
+          \"redirectOut\": \"out.txt\"
+        }
+      ]"
+    `)
   })
 
   test('shell builtins support cat|grep|jq pipeline', () => {
@@ -33,6 +55,7 @@ describe('M5 shell parser and builtins', () => {
     const grepResult = runShellCommandSync('cd logs | cat *.log | grep warn', {
       cwd: '/',
       fs,
+      registry: createBuiltinCommandRegistry(),
     })
 
     expect(grepResult.exitCode).toBe(0)
@@ -42,6 +65,7 @@ describe('M5 shell parser and builtins', () => {
     const jqResult = runShellCommandSync('cat data.json | jq .meta.phase', {
       cwd: '/',
       fs,
+      registry: createBuiltinCommandRegistry(),
     })
 
     expect(jqResult.exitCode).toBe(0)
@@ -74,7 +98,13 @@ describe('M5 shell parser and builtins', () => {
       env: {},
       setCwd() {},
     })
-    expect(executed).toMatchObject({ stdout: 'world', stderr: '', exitCode: 0 })
+    expect(stableSnapshot(executed)).toMatchInlineSnapshot(`
+      "{
+        \"exitCode\": 0,
+        \"stderr\": \"\",
+        \"stdout\": \"world\"
+      }"
+    `)
 
     expect(registry.unregister('hello')).toBe(true)
     expect(registry.has('hello')).toBe(false)
@@ -90,6 +120,7 @@ describe('M5 shell parser and builtins', () => {
 
   test('runner can execute hook-registered commands', () => {
     const result = runShellCommandSync('hello bun', {
+      registry: createBuiltinCommandRegistry(),
       hooks: [
         registry => {
           registry.register('hello', args => ({

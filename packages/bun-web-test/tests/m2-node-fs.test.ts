@@ -171,6 +171,25 @@ describe('bun-web M2 node fs bridge smoke', () => {
     expect(fs.realpathSync('/r/a/./b/../b/file.js')).toBe('/r/a/b/file.js')
   })
 
+  test('watch() observes file changes and can unsubscribe', async () => {
+    const vfs = new VFS()
+    const fs = createNodeFs(vfs)
+
+    fs.writeFileSync('/watch.txt', 'init')
+
+    const events: Array<{ eventType: 'change' | 'rename'; filename: string }> = []
+    const watcher = fs.watch('/watch.txt', (eventType, filename) => {
+      events.push({ eventType, filename })
+    })
+
+    fs.writeFileSync('/watch.txt', 'changed')
+    expect(events).toEqual([{ eventType: 'change', filename: 'watch.txt' }])
+
+    watcher.close()
+    fs.writeFileSync('/watch.txt', 'changed-again')
+    expect(events).toHaveLength(1)
+  })
+
   test('official replay: promises lstat matches stat type', async () => {
     const vfs = new VFS()
     const fs = createNodeFs(vfs)

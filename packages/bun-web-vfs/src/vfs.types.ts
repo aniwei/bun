@@ -14,3 +14,10 @@ export interface Dirent {
   isDirectory(): boolean
   isSymbolicLink(): boolean
 }
+
+export type WatchEvent = 'change' | 'rename'
+export type WatchListener = (event: WatchEvent, filename: string) => void
+
+export interface WatchHandle {
+  close(): void
+}

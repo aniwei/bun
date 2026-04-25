@@ -151,7 +151,7 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      const kernel = await Kernel.boot({ asyncFallback: true });
+      const kernel = await Kernel.boot({});
       const supervisor = new RuntimeProcessSupervisor(kernel);
       const seenStdout: string[] = [];
       const seenExitCodes: number[] = [];
@@ -216,7 +216,7 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      const kernel = await Kernel.boot({ asyncFallback: true });
+      const kernel = await Kernel.boot({});
       const seenExitCodes: number[] = [];
       const seenSignals: Array<number | null> = [];
 
@@ -528,7 +528,7 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      const kernel = await Kernel.boot({ asyncFallback: true });
+      const kernel = await Kernel.boot({});
 
       try {
         const child = spawn({
@@ -572,7 +572,7 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      const kernel = await Kernel.boot({ asyncFallback: true });
+      const kernel = await Kernel.boot({});
       const received: Uint8Array[] = [];
 
       try {
@@ -614,10 +614,10 @@ describe("M1-8 核心验收", () => {
   });
 
   // -------------------------------------------------------------------------
-  // M1-5/M1-8：spawnSync 占位报错边界
+  // M1/M5 兼容：spawnSync 基线行为
   // -------------------------------------------------------------------------
 
-  test("M1-5/M1-8: spawnSync() 明确抛出 M1 占位错误", async () => {
+  test("M1/M5: spawnSync() 返回同步执行结果", async () => {
     const { stdout, exitCode } = await runInRuntime(`
       import { spawnSync } from ${JSON.stringify(RUNTIME_SPAWN_SRC)};
 
@@ -627,18 +627,16 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      try {
-        spawnSync({ cmd: ['bun', 'test.ts'] });
-        fail('no-error-thrown');
-      } catch (error) {
-        if (!(error instanceof Error)) {
-          fail('not-error-instance');
-        }
-        if (!error.message.includes('spawnSync')) {
-          fail('wrong-message:' + error.message);
-        }
-        console.log('OK');
+      const out = spawnSync({ cmd: ['sh', '-c', 'cat'], stdin: 'hello-sync' });
+      const text = new TextDecoder().decode(out.stdout).trim();
+
+      if (out.exitCode !== 0) {
+        fail('bad-exit:' + out.exitCode);
       }
+      if (text !== 'hello-sync') {
+        fail('bad-stdout:' + text);
+      }
+      console.log('OK');
     `);
     expect(stdout.trim()).toBe("OK");
     expect(exitCode).toBe(0);

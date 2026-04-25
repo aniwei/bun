@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import type { CacheKeyValueStore } from '../../../packages/bun-web-vfs/src/cache-store'
 import { PackageCacheStore } from '../../../packages/bun-web-vfs/src/cache-store'
+import { stableSnapshot } from './snapshot-utils'
 
 class MemoryKVStore implements CacheKeyValueStore {
   private readonly map = new Map<string, Uint8Array>()
@@ -55,12 +56,14 @@ describe('bun-web M3 installer cache store', () => {
 
     const loaded = await store.getTarball('react@18.2.0')
     expect(Array.from(loaded ?? [])).toEqual([1, 2, 3])
-    expect(store.getStats()).toEqual({
-      indexedDBHits: 1,
-      opfsHits: 0,
-      misses: 0,
-      writes: 1,
-    })
+    expect(stableSnapshot(store.getStats())).toMatchInlineSnapshot(`
+      "{
+        \"indexedDBHits\": 1,
+        \"misses\": 0,
+        \"opfsHits\": 0,
+        \"writes\": 1
+      }"
+    `)
   })
 
   test('OPFS miss fallback can warm IndexedDB cache', async () => {
@@ -76,12 +79,14 @@ describe('bun-web M3 installer cache store', () => {
 
     const loaded = await store.getTarball('lodash@4.17.21')
     expect(Array.from(loaded ?? [])).toEqual([9, 9, 9])
-    expect(store.getStats()).toEqual({
-      indexedDBHits: 0,
-      opfsHits: 1,
-      misses: 0,
-      writes: 0,
-    })
+    expect(stableSnapshot(store.getStats())).toMatchInlineSnapshot(`
+      "{
+        \"indexedDBHits\": 0,
+        \"misses\": 0,
+        \"opfsHits\": 1,
+        \"writes\": 0
+      }"
+    `)
 
     const second = await store.getTarball('lodash@4.17.21')
     expect(Array.from(second ?? [])).toEqual([9, 9, 9])

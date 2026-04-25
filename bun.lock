@@ -38,9 +38,20 @@
         "@types/node": "*",
       },
     },
+    "packages/bun-web-agent": {
+      "name": "@mars/web-agent",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
     "packages/bun-web-bundler": {
       "name": "@mars/web-bundler",
       "version": "0.0.0",
+      "dependencies": {
+        "@mars/web-shared": "workspace:*",
+        "esbuild-wasm": "^0.28.0",
+      },
       "devDependencies": {
         "typescript": "6.0.2",
       },
@@ -52,15 +63,32 @@
         "typescript": "6.0.2",
       },
     },
+    "packages/bun-web-compat-registry": {
+      "name": "@mars/web-compat-registry",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
     "packages/bun-web-crypto": {
       "name": "@mars/web-crypto",
       "version": "0.0.0",
+      "dependencies": {
+        "@noble/hashes": "^2.2.0",
+      },
       "devDependencies": {
         "typescript": "6.0.2",
       },
     },
     "packages/bun-web-dns": {
       "name": "@mars/web-dns",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-hooks": {
+      "name": "@mars/web-hooks",
       "version": "0.0.0",
       "devDependencies": {
         "typescript": "6.0.2",
@@ -95,9 +123,21 @@
       "name": "@mars/web-node",
       "version": "0.0.0",
       "dependencies": {
+        "@mars/web-net": "workspace:*",
         "@mars/web-resolver": "workspace:*",
         "@mars/web-shared": "workspace:*",
         "@mars/web-vfs": "workspace:*",
+        "wasm-flate": "^1.0.2-browser",
+      },
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+    "packages/bun-web-plugin-api": {
+      "name": "@mars/web-plugin-api",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mars/web-hooks": "workspace:*",
       },
       "devDependencies": {
         "typescript": "6.0.2",
@@ -121,9 +161,11 @@
       "name": "@mars/web-runtime",
       "version": "0.0.0",
       "dependencies": {
+        "@mars/web-bundler": "workspace:*",
         "@mars/web-kernel": "workspace:*",
         "@mars/web-node": "workspace:*",
         "@mars/web-shell": "workspace:*",
+        "@mars/web-transpiler": "workspace:*",
       },
       "devDependencies": {
         "typescript": "6.0.2",
@@ -139,16 +181,6 @@
     "packages/bun-web-shell": {
       "name": "@mars/web-shell",
       "version": "0.0.0",
-      "dependencies": {
-        "@mars/web-shell-builtins": "workspace:*",
-      },
-      "devDependencies": {
-        "typescript": "6.0.2",
-      },
-    },
-    "packages/bun-web-shell-builtins": {
-      "name": "@mars/web-shell-builtins",
-      "version": "0.0.0",
       "devDependencies": {
         "typescript": "6.0.2",
       },
@@ -156,6 +188,9 @@
     "packages/bun-web-sqlite": {
       "name": "@mars/web-sqlite",
       "version": "0.0.0",
+      "dependencies": {
+        "wa-sqlite": "^1.0.0",
+      },
       "devDependencies": {
         "typescript": "6.0.2",
       },
@@ -174,6 +209,12 @@
       "name": "@mars/web-test",
       "version": "0.1.0",
       "devDependencies": {
+        "@mars/web-agent": "workspace:*",
+        "@mars/web-compat-registry": "workspace:*",
+        "@mars/web-hooks": "workspace:*",
+        "@mars/web-net": "workspace:*",
+        "@mars/web-plugin-api": "workspace:*",
+        "@mars/web-shared": "workspace:*",
         "tsdown": "^0.14.2",
         "typescript": "6.0.2",
         "vitest": "^2.1.8",
@@ -182,6 +223,10 @@
     "packages/bun-web-transpiler": {
       "name": "@mars/web-transpiler",
       "version": "0.0.0",
+      "dependencies": {
+        "@mars/web-shared": "workspace:*",
+        "@swc/wasm-web": "^1.11.30",
+      },
       "devDependencies": {
         "typescript": "6.0.2",
       },
@@ -291,13 +336,19 @@
 
     "@lezer/lr": ["@lezer/lr@1.4.3", "https://registry.npmmirror.com/@lezer/lr/-/lr-1.4.3.tgz", { "dependencies": { "@lezer/common": "^1.0.0" } }, "sha512-yenN5SqAxAPv/qMnpWW0AT7l+SxVrgG+u0tNsRQWqbrz66HIl8DnEbBObvy21J5K7+I1v7gsAnlE2VQ5yYVSeA=="],
 
+    "@mars/web-agent": ["@mars/web-agent@workspace:packages/bun-web-agent"],
+
     "@mars/web-bundler": ["@mars/web-bundler@workspace:packages/bun-web-bundler"],
 
     "@mars/web-client": ["@mars/web-client@workspace:packages/bun-web-client"],
 
+    "@mars/web-compat-registry": ["@mars/web-compat-registry@workspace:packages/bun-web-compat-registry"],
+
     "@mars/web-crypto": ["@mars/web-crypto@workspace:packages/bun-web-crypto"],
 
     "@mars/web-dns": ["@mars/web-dns@workspace:packages/bun-web-dns"],
+
+    "@mars/web-hooks": ["@mars/web-hooks@workspace:packages/bun-web-hooks"],
 
     "@mars/web-installer": ["@mars/web-installer@workspace:packages/bun-web-installer"],
 
@@ -306,6 +357,8 @@
     "@mars/web-net": ["@mars/web-net@workspace:packages/bun-web-net"],
 
     "@mars/web-node": ["@mars/web-node@workspace:packages/bun-web-node"],
+
+    "@mars/web-plugin-api": ["@mars/web-plugin-api@workspace:packages/bun-web-plugin-api"],
 
     "@mars/web-proxy-server": ["@mars/web-proxy-server@workspace:packages/bun-web-proxy-server"],
 
@@ -316,8 +369,6 @@
     "@mars/web-shared": ["@mars/web-shared@workspace:packages/bun-web-shared"],
 
     "@mars/web-shell": ["@mars/web-shell@workspace:packages/bun-web-shell"],
-
-    "@mars/web-shell-builtins": ["@mars/web-shell-builtins@workspace:packages/bun-web-shell-builtins"],
 
     "@mars/web-sqlite": ["@mars/web-sqlite@workspace:packages/bun-web-sqlite"],
 
@@ -332,6 +383,8 @@
     "@mars/web-webapis": ["@mars/web-webapis@workspace:packages/bun-web-webapis"],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@0.2.4", "https://registry.npmmirror.com/@napi-rs/wasm-runtime/-/wasm-runtime-0.2.4.tgz", { "dependencies": { "@emnapi/core": "^1.1.0", "@emnapi/runtime": "^1.1.0", "@tybys/wasm-util": "^0.9.0" } }, "sha512-9zESzOO5aDByvhIAsOy9TbpZ0Ur2AJbUI7UT73kcUTS2mxAMHOBaa1st/jAymNoCtvrit99kkzT1FZuXVcgfIQ=="],
+
+    "@noble/hashes": ["@noble/hashes@2.2.0", "https://registry.npmmirror.com/@noble/hashes/-/hashes-2.2.0.tgz", {}, "sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg=="],
 
     "@nx/nx-darwin-arm64": ["@nx/nx-darwin-arm64@21.6.11", "https://registry.npmmirror.com/@nx/nx-darwin-arm64/-/nx-darwin-arm64-21.6.11.tgz", { "os": "darwin", "cpu": "arm64" }, "sha512-4hXhV7ShXIlfPEjjm7dJY383xM2vTcnkKr5FUncAU08GKkkL67ib5CMlQADtdi32ewfCZntqiT8gUfFFSNvKtA=="],
 
@@ -492,6 +545,8 @@
     "@sentry/types": ["@sentry/types@7.120.4", "https://registry.npmmirror.com/@sentry/types/-/types-7.120.4.tgz", {}, "sha512-cUq2hSSe6/qrU6oZsEP4InMI5VVdD86aypE+ENrQ6eZEVLTCYm1w6XhW1NvIu3UuWh7gZec4a9J7AFpYxki88Q=="],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.49", "https://registry.npmmirror.com/@sinclair/typebox/-/typebox-0.34.49.tgz", {}, "sha512-brySQQs7Jtn0joV8Xh9ZV/hZb9Ozb0pmazDIASBkYKCjXrXU3mpcFahmK/z4YDhGkQvP9mWJbVyahdtU5wQA+A=="],
+
+    "@swc/wasm-web": ["@swc/wasm-web@1.15.30", "https://registry.npmmirror.com/@swc/wasm-web/-/wasm-web-1.15.30.tgz", {}, "sha512-CvzIx1jT60564s5Py9jCmTeMcGvMy6tw7tXSJIlc12gIM/0+hOv9AqCP6Iu5rAuQ2FOD5vNmJ7zPeOsh1d1aNw=="],
 
     "@tybys/wasm-util": ["@tybys/wasm-util@0.9.0", "https://registry.npmmirror.com/@tybys/wasm-util/-/wasm-util-0.9.0.tgz", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-6+7nlbMVX/PVDCwaIQ8nTOPveOcFLSt8GcXdx8hD0bt39uWxYT88uXzqTd4fTvqta7oeUJqudepapKNt2DYJFw=="],
 
@@ -662,6 +717,8 @@
     "es-set-tostringtag": ["es-set-tostringtag@2.1.0", "https://registry.npmmirror.com/es-set-tostringtag/-/es-set-tostringtag-2.1.0.tgz", { "dependencies": { "es-errors": "^1.3.0", "get-intrinsic": "^1.2.6", "has-tostringtag": "^1.0.2", "hasown": "^2.0.2" } }, "sha512-j6vWzfrGVfyXxge+O0x5sh6cvxAog0a/4Rdd2K36zCMV5eJ+/+tOAngRO8cODMNWbVRdVlmGZQL2YS3yR8bIUA=="],
 
     "esbuild": ["esbuild@0.21.5", "https://registry.npmmirror.com/esbuild/-/esbuild-0.21.5.tgz", { "optionalDependencies": { "@esbuild/aix-ppc64": "0.21.5", "@esbuild/android-arm": "0.21.5", "@esbuild/android-arm64": "0.21.5", "@esbuild/android-x64": "0.21.5", "@esbuild/darwin-arm64": "0.21.5", "@esbuild/darwin-x64": "0.21.5", "@esbuild/freebsd-arm64": "0.21.5", "@esbuild/freebsd-x64": "0.21.5", "@esbuild/linux-arm": "0.21.5", "@esbuild/linux-arm64": "0.21.5", "@esbuild/linux-ia32": "0.21.5", "@esbuild/linux-loong64": "0.21.5", "@esbuild/linux-mips64el": "0.21.5", "@esbuild/linux-ppc64": "0.21.5", "@esbuild/linux-riscv64": "0.21.5", "@esbuild/linux-s390x": "0.21.5", "@esbuild/linux-x64": "0.21.5", "@esbuild/netbsd-x64": "0.21.5", "@esbuild/openbsd-x64": "0.21.5", "@esbuild/sunos-x64": "0.21.5", "@esbuild/win32-arm64": "0.21.5", "@esbuild/win32-ia32": "0.21.5", "@esbuild/win32-x64": "0.21.5" }, "bin": { "esbuild": "bin/esbuild" } }, "sha512-mg3OPMV4hXywwpoDxu3Qda5xCKQi+vCTZq8S9J/EpkhB2HzKXq4SNFZE3+NK93JYxc8VMSep+lOUSC/RVKaBqw=="],
+
+    "esbuild-wasm": ["esbuild-wasm@0.28.0", "https://registry.npmmirror.com/esbuild-wasm/-/esbuild-wasm-0.28.0.tgz", { "bin": { "esbuild": "bin/esbuild" } }, "sha512-5TRVKExcEmeMkccIZMzUq+Az6X2RoMAJyfl6SMMO1dMVhmvt0I2mx7gAb6zYi42n4d1ETcatFXazGKzA+aW7fg=="],
 
     "escalade": ["escalade@3.2.0", "https://registry.npmmirror.com/escalade/-/escalade-3.2.0.tgz", {}, "sha512-WUj2qlxaQtO4g6Pq5c29GTcWGDyd8itL8zTlipgECz3JesAiiOKotd8JU6otB3PACgG6xkJUyVhboMS+bje/jA=="],
 
@@ -990,6 +1047,10 @@
     "vite-node": ["vite-node@2.1.9", "https://registry.npmmirror.com/vite-node/-/vite-node-2.1.9.tgz", { "dependencies": { "cac": "^6.7.14", "debug": "^4.3.7", "es-module-lexer": "^1.5.4", "pathe": "^1.1.2", "vite": "^5.0.0" }, "bin": { "vite-node": "vite-node.mjs" } }, "sha512-AM9aQ/IPrW/6ENLQg3AGY4K1N2TGZdR5e4gu/MmmR2xR3Ll1+dib+nook92g4TV3PXVyeyxdWwtaCAiUL0hMxA=="],
 
     "vitest": ["vitest@2.1.9", "https://registry.npmmirror.com/vitest/-/vitest-2.1.9.tgz", { "dependencies": { "@vitest/expect": "2.1.9", "@vitest/mocker": "2.1.9", "@vitest/pretty-format": "^2.1.9", "@vitest/runner": "2.1.9", "@vitest/snapshot": "2.1.9", "@vitest/spy": "2.1.9", "@vitest/utils": "2.1.9", "chai": "^5.1.2", "debug": "^4.3.7", "expect-type": "^1.1.0", "magic-string": "^0.30.12", "pathe": "^1.1.2", "std-env": "^3.8.0", "tinybench": "^2.9.0", "tinyexec": "^0.3.1", "tinypool": "^1.0.1", "tinyrainbow": "^1.2.0", "vite": "^5.0.0", "vite-node": "2.1.9", "why-is-node-running": "^2.3.0" }, "peerDependencies": { "@edge-runtime/vm": "*", "@types/node": "^18.0.0 || >=20.0.0", "@vitest/browser": "2.1.9", "@vitest/ui": "2.1.9", "happy-dom": "*", "jsdom": "*" }, "optionalPeers": ["@edge-runtime/vm", "@types/node", "@vitest/browser", "@vitest/ui", "happy-dom", "jsdom"], "bin": { "vitest": "vitest.mjs" } }, "sha512-MSmPM9REYqDGBI8439mA4mWhV5sKmDlBKWIYbA3lRb2PTHACE0mgKwA8yQ2xq9vxDTuk4iPrECBAEW2aoFXY0Q=="],
+
+    "wa-sqlite": ["wa-sqlite@1.0.0", "https://registry.npmmirror.com/wa-sqlite/-/wa-sqlite-1.0.0.tgz", {}, "sha512-Kyybo5/BaJp76z7gDWGk2J6Hthl4NIPsE+swgraEjy3IY6r5zIR02wAs1OJH4XtJp1y3puj3Onp5eMGS0z7nUA=="],
+
+    "wasm-flate": ["wasm-flate@1.0.2-browser", "https://registry.npmmirror.com/wasm-flate/-/wasm-flate-1.0.2-browser.tgz", {}, "sha512-qpqOzvbKtgG/2Mb0DYXVPQ2nOrkKYoAQtpr4QZzgO8SMfKieeODUy2vomMnimQjH/K2RGWnw+kZmO8yf+Yh9qA=="],
 
     "wcwidth": ["wcwidth@1.0.1", "https://registry.npmmirror.com/wcwidth/-/wcwidth-1.0.1.tgz", { "dependencies": { "defaults": "^1.0.3" } }, "sha512-XHPEwS0q6TaxcvG85+8EYkbiCux2XtWG2mkc47Ng2A77BQu9+DqIOJldST4HgPkuea7dvKSj5VgX3P1d4rW8Tg=="],
 

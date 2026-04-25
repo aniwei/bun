@@ -7,6 +7,7 @@ type ListenerEntry = {
 }
 
 import type { BufferEncoding } from './buffer'
+type WriteEncoding = BufferEncoding | 'buffer'
 
 export const captureRejectionSymbol = Symbol.for('nodejs.rejection')
 
@@ -24,12 +25,12 @@ type ReadableOptions = {
 
 type WritableOptions = {
   objectMode?: boolean
-  write?: (this: Writable, chunk: unknown, encoding: BufferEncoding | undefined, callback: (error?: Error | null) => void) => void
-  writev?: (this: Writable, chunks: Array<{ chunk: unknown; encoding: BufferEncoding | undefined }>, callback: (error?: Error | null) => void) => void
+  write?: (this: Writable, chunk: unknown, encoding: WriteEncoding | undefined, callback: (error?: Error | null) => void) => void
+  writev?: (this: Writable, chunks: Array<{ chunk: unknown; encoding: WriteEncoding | undefined }>, callback: (error?: Error | null) => void) => void
 }
 
 type TransformOptions = ReadableOptions & WritableOptions & {
-  transform?: (this: Transform, chunk: unknown, encoding: BufferEncoding | undefined, callback: (error?: Error | null, data?: unknown) => void) => void
+  transform?: (this: Transform, chunk: unknown, encoding: WriteEncoding | undefined, callback: (error?: Error | null, data?: unknown) => void) => void
 }
 
 function normalizeChunk(chunk: unknown, objectMode = false): unknown {
@@ -52,11 +53,14 @@ function normalizeChunk(chunk: unknown, objectMode = false): unknown {
   return RuntimeBuffer.from(String(chunk ?? ''))
 }
 
-function chunkEncoding(chunk: unknown, objectMode = false): BufferEncoding | undefined {
+function chunkEncoding(chunk: unknown, objectMode = false): WriteEncoding | undefined {
   if (objectMode) {
     return undefined
   }
-  return undefined
+  if (typeof chunk === 'string') {
+    return 'utf8'
+  }
+  return 'buffer'
 }
 
 function mergeChunks(chunks: unknown[], encoding?: BufferEncoding, objectMode = false): unknown {
@@ -435,7 +439,7 @@ export class Writable extends Stream {
   private prefinished = false
   private finished = false
   private finishScheduled = false
-  private buffered: Array<{ chunk: unknown; encoding: BufferEncoding | undefined }> = []
+  private buffered: Array<{ chunk: unknown; encoding: WriteEncoding | undefined }> = []
 
   constructor(options: WritableOptions = {}) {
     super()
@@ -444,7 +448,7 @@ export class Writable extends Stream {
     this.writevImpl = options.writev?.bind(this)
   }
 
-  write(chunk: unknown, encoding?: BufferEncoding, callback?: (error?: Error | null) => void): boolean {
+  write(chunk: unknown, encoding?: WriteEncoding, callback?: (error?: Error | null) => void): boolean {
     const entry = { chunk: normalizeChunk(chunk, this.objectMode), encoding: encoding ?? chunkEncoding(chunk, this.objectMode) }
     if (this.writing) {
       this.buffered.push(entry)

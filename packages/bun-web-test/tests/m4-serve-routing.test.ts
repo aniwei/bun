@@ -3,12 +3,25 @@ import { Kernel } from '../../../packages/bun-web-kernel/src'
 import { clearServeRegistry, getServeHandler, serve } from '../../../packages/bun-web-runtime/src/serve'
 import {
   createFetchRouter,
+  createKernelDispatcher,
+  createKernelPortResolver,
+  detectWorkerScriptModuleType,
   dispatchVirtualRequest,
+  EsbuildWorkerScriptProcessor,
+  extractVirtualPort,
   installFetchInterceptor,
+  installServiceWorkerFromKernel,
   installServiceWorkerRuntime,
+  installWorkerScriptInterceptor,
   isVirtualBunRequest,
+  registerWorkerScript,
   resolveVirtualPid,
+  type WorkerScriptStore,
 } from '../../../packages/bun-web-sw/src'
+import {
+  PROCESS_EXECUTOR_WORKER_PATH,
+  createRuntimeProcessExecutor,
+} from '../../../packages/bun-web-runtime/src/process-executor'
 
 describe('M4 serve + service worker routing', () => {
   test('recognizes virtual hostname and path forms', () => {
@@ -251,5 +264,442 @@ describe('M4 serve + service worker routing', () => {
     expect(listeners.get('fetch') ?? []).toHaveLength(0)
     expect(listeners.get('install') ?? []).toHaveLength(0)
     expect(listeners.get('activate') ?? []).toHaveLength(0)
+  })
+})
+
+describe('A0-5 SW ↔ kernel integration', () => {
+  test('createKernelPortResolver delegates to kernel.resolvePort', () => {
+    let queriedPort: number | null = null
+    const resolver = createKernelPortResolver({
+      resolvePort(port) {
+        queriedPort = port
+        return 42
+      },
+    })
+
+    expect(resolver.resolvePort(3000)).toBe(42)
+    expect(queriedPort).toBe(3000)
+  })
+
+  test('extractVirtualPort parses port from path-style URL', () => {
+    expect(extractVirtualPort(new URL('http://app.local/__bun__/4500/health'))).toBe(4500)
+    expect(extractVirtualPort(new URL('http://app.local/normal/path'))).toBeNull()
+    expect(extractVirtualPort(new URL('http://123.bun.local/home'))).toBeNull()
+  })
+
+  test('createKernelDispatcher routes path-style request via registry', async () => {
+    const registry = {
+      getHandler: (port: number) =>
+        port === 5000 ? ((_req: Request) => new Response(`handler:${port}`)) : null,
+    }
+    const pidPortMap = new Map<number, number>()
+    const dispatcher = createKernelDispatcher(registry, pidPortMap)
+
+    const response = await dispatcher(99, new Request('http://app.local/__bun__/5000/ping'))
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('handler:5000')
+  })
+
+  test('createKernelDispatcher routes host-style request via pidPortMap', async () => {
+    const registry = {
+      getHandler: (port: number) =>
+        port === 6000 ? ((_req: Request) => new Response(`host-style:${port}`)) : null,
+    }
+    const pidPortMap = new Map([[77, 6000]])
+    const dispatcher = createKernelDispatcher(registry, pidPortMap)
+
+    const response = await dispatcher(77, new Request('http://77.bun.local/ping'))
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('host-style:6000')
+  })
+
+  test('createKernelDispatcher returns 502 when no port mapping', async () => {
+    const registry = { getHandler: () => null }
+    const dispatcher = createKernelDispatcher(registry, new Map())
+
+    const response = await dispatcher(999, new Request('http://999.bun.local/x'))
+    expect(response.status).toBe(502)
+  })
+
+  test('createKernelDispatcher returns 502 when no handler for port', async () => {
+    const registry = { getHandler: () => null }
+    const pidPortMap = new Map([[10, 4444]])
+    const dispatcher = createKernelDispatcher(registry, pidPortMap)
+
+    const response = await dispatcher(10, new Request('http://10.bun.local/x'))
+    expect(response.status).toBe(502)
+  })
+
+  test('installServiceWorkerFromKernel wires kernel port table to SW routing', async () => {
+    await Kernel.shutdown()
+    clearServeRegistry()
+
+    const kernel = await Kernel.boot({})
+    serve({ port: 4801, pid: 801, fetch: (req: Request) => new Response(`ok:${new URL(req.url).pathname}`) }, kernel)
+
+    const listeners = new Map<string, Function[]>()
+    const add = (type: string, fn: Function) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), fn])
+    }
+    const remove = (type: string, fn: Function) => {
+      listeners.set(type, (listeners.get(type) ?? []).filter(f => f !== fn))
+    }
+    const scope = {
+      addEventListener(type: 'fetch' | 'install' | 'activate', fn: Function) { add(type, fn) },
+      removeEventListener(type: 'fetch' | 'install' | 'activate', fn: Function) { remove(type, fn) },
+      skipWaiting() {},
+      clients: { claim() {} },
+    }
+
+    const registry = { getHandler: (port: number) => getServeHandler(port) }
+    const uninstall = installServiceWorkerFromKernel(kernel, scope, registry)
+
+    let responsePromise: Promise<Response> | null = null
+    listeners.get('fetch')![0]({
+      request: new Request('http://app.local/__bun__/4801/health'),
+      respondWith(r: Promise<Response> | Response) { responsePromise = Promise.resolve(r) },
+    })
+
+    const res = await responsePromise!
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('ok:/__bun__/4801/health')
+
+    uninstall()
+    await Kernel.shutdown()
+    clearServeRegistry()
+  })
+
+  test('installServiceWorkerFromKernel tracks portRegistered events for host-style routing', async () => {
+    await Kernel.shutdown()
+    clearServeRegistry()
+
+    const kernel = await Kernel.boot({})
+
+    const listeners = new Map<string, Function[]>()
+    const add = (type: string, fn: Function) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), fn])
+    }
+    const scope = {
+      addEventListener(type: 'fetch' | 'install' | 'activate', fn: Function) { add(type, fn) },
+      removeEventListener() {},
+      skipWaiting() {},
+      clients: { claim() {} },
+    }
+
+    // Register serve handler and then emit portRegistered AFTER installServiceWorkerFromKernel
+    // (simulates runtime registering port after boot)
+    const registry = {
+      getHandler: (port: number) =>
+        port === 4802 ? ((_req: Request) => new Response('from-pid-820')) : null,
+    }
+    const uninstall = installServiceWorkerFromKernel(kernel, scope, registry)
+
+    // Simulate runtime calling registerPort which emits portRegistered
+    kernel.registerPort(820, 4802)
+
+    let responsePromise: Promise<Response> | null = null
+    listeners.get('fetch')![0]({
+      request: new Request('http://820.bun.local/check'),
+      respondWith(r: Promise<Response> | Response) { responsePromise = Promise.resolve(r) },
+    })
+
+    const res = await responsePromise!
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('from-pid-820')
+
+    uninstall()
+    await Kernel.shutdown()
+    clearServeRegistry()
+  })
+
+  test('installServiceWorkerFromKernel cleanup removes portRegistered subscription', async () => {
+    await Kernel.shutdown()
+
+    let listenCount = 0
+    const fakeKernel = {
+      resolvePort: (_port: number) => null as number | null,
+      subscribe(_event: 'portRegistered', _listener: Function) {
+        listenCount++
+        return () => { listenCount-- }
+      },
+    }
+
+    const scope = {
+      addEventListener() {},
+      removeEventListener() {},
+    }
+    const registry = { getHandler: () => null }
+
+    const uninstall = installServiceWorkerFromKernel(fakeKernel, scope, registry)
+    expect(listenCount).toBe(1)
+
+    uninstall()
+    expect(listenCount).toBe(0)
+  })
+
+  test('installServiceWorkerFromKernel can serve worker script before kernel routing', async () => {
+    const listeners = new Map<string, Function[]>()
+    const add = (type: string, fn: Function) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), fn])
+    }
+
+    const scope = {
+      addEventListener(type: 'fetch' | 'install' | 'activate', fn: Function) { add(type, fn) },
+      removeEventListener() {},
+      skipWaiting() {},
+      clients: { claim() {} },
+    }
+
+    const kernel = {
+      resolvePort: () => null,
+      subscribe() {
+        return () => {}
+      },
+    }
+
+    const store: WorkerScriptStore = new Map()
+    registerWorkerScript(store, '/__bun__/worker/bun-process.js', 'export default 1')
+
+    const uninstall = installServiceWorkerFromKernel(
+      kernel,
+      scope,
+      { getHandler: () => null },
+      { workerScripts: store },
+    )
+
+    let responsePromise: Promise<Response> | null = null
+    listeners.get('fetch')![0]({
+      request: new Request('http://localhost/__bun__/worker/bun-process.js'),
+      respondWith(r: Promise<Response> | Response) { responsePromise = Promise.resolve(r) },
+    })
+
+    const res = await responsePromise!
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('export default 1')
+    uninstall()
+  })
+})
+
+// ─── Worker script interception (SW-served worker files) ─────────────────────
+
+describe('Worker script interception via SW', () => {
+  function makeFetchTarget() {
+    const listeners: Array<(event: { request: Request; respondWith(r: Response | Promise<Response>): void }) => void> = []
+    return {
+      target: {
+        addEventListener(_type: 'fetch', listener: (event: { request: Request; respondWith(r: Response | Promise<Response>): void }) => void) {
+          listeners.push(listener)
+        },
+        removeEventListener(_type: 'fetch', listener: (event: { request: Request; respondWith(r: Response | Promise<Response>): void }) => void) {
+          const idx = listeners.indexOf(listener)
+          if (idx >= 0) listeners.splice(idx, 1)
+        },
+      },
+      async dispatch(url: string): Promise<Response | null> {
+        return new Promise(resolve => {
+          let responded = false
+          const event = {
+            request: new Request(url),
+            respondWith(r: Response | Promise<Response>) {
+              responded = true
+              Promise.resolve(r).then(res => resolve(res))
+            },
+          }
+          if (listeners.length === 0) {
+            resolve(null)
+            return
+          }
+          for (const l of listeners) l(event)
+          // If no listener called respondWith synchronously, resolve null
+          if (!responded) resolve(null)
+        })
+      },
+      listenerCount: () => listeners.length,
+    }
+  }
+
+  test('registerWorkerScript inserts source into store', () => {
+    const store: WorkerScriptStore = new Map()
+    registerWorkerScript(store, '/__bun__/worker/bun-process.js', 'self.onmessage = () => {}')
+    expect(store.get('/__bun__/worker/bun-process.js')).toBe('self.onmessage = () => {}')
+  })
+
+  test('installWorkerScriptInterceptor serves registered script as text/javascript', async () => {
+    const store: WorkerScriptStore = new Map()
+    registerWorkerScript(store, '/__bun__/worker/bun-process.js', 'const x = 1')
+
+    const { target, dispatch } = makeFetchTarget()
+    const uninstall = installWorkerScriptInterceptor(store, target)
+
+    const res = await dispatch('http://localhost/__bun__/worker/bun-process.js')
+    expect(res).not.toBeNull()
+    expect(res!.status).toBe(200)
+    expect(res!.headers.get('Content-Type')).toBe('text/javascript')
+    expect(await res!.text()).toBe('const x = 1')
+
+    uninstall()
+  })
+
+  test('installWorkerScriptInterceptor ignores unregistered paths', async () => {
+    const store: WorkerScriptStore = new Map()
+    registerWorkerScript(store, '/__bun__/worker/bun-process.js', 'x')
+
+    const { target, dispatch } = makeFetchTarget()
+    installWorkerScriptInterceptor(store, target)
+
+    const res = await dispatch('http://localhost/__bun__/worker/other.js')
+    // no listener responded → null
+    expect(res).toBeNull()
+  })
+
+  test('installWorkerScriptInterceptor cleanup removes fetch listener', () => {
+    const store: WorkerScriptStore = new Map()
+    const { target, listenerCount } = makeFetchTarget()
+    const uninstall = installWorkerScriptInterceptor(store, target)
+    expect(listenerCount()).toBe(1)
+    uninstall()
+    expect(listenerCount()).toBe(0)
+  })
+
+  test('detectWorkerScriptModuleType resolves package and extension rules', () => {
+    expect(
+      detectWorkerScriptModuleType('/__bun__/worker/pkg.js', {
+        source: 'module.exports = 1',
+        packageName: 'pkg',
+        packageType: 'commonjs',
+      }),
+    ).toBe('cjs')
+
+    expect(
+      detectWorkerScriptModuleType('/__bun__/worker/pkg.mjs', {
+        source: 'export default 1',
+      }),
+    ).toBe('esm')
+
+    expect(
+      detectWorkerScriptModuleType('/__bun__/worker/pkg.js', {
+        source: 'export default 1',
+        packageType: 'module',
+      }),
+    ).toBe('esm')
+
+    expect(
+      detectWorkerScriptModuleType('/__bun__/worker/pkg.cjs', {
+        source: 'export default 1',
+        packageType: 'module',
+      }),
+    ).toBe('cjs')
+
+    expect(
+      detectWorkerScriptModuleType('/__bun__/worker/pkg.js', {
+        source: 'module.exports = 1',
+        packageType: 'module',
+        moduleFormat: 'cjs',
+      }),
+    ).toBe('cjs')
+
+    expect(
+      detectWorkerScriptModuleType('/__bun__/worker/pkg.js', {
+        source: 'module.exports = 1',
+        packageType: 'commonjs',
+        moduleFormat: 'esm',
+      }),
+    ).toBe('esm')
+  })
+
+  test('EsbuildWorkerScriptProcessor converts cjs source via provided transformer', async () => {
+    const processor = new EsbuildWorkerScriptProcessor({
+      cjsToEsmTransform: async source => `export default (${JSON.stringify(source)})`,
+    })
+
+    const result = await processor.process({
+      pathname: '/__bun__/worker/pkg.js',
+      descriptor: {
+        source: 'module.exports = 1',
+        packageName: 'pkg',
+        packageType: 'commonjs',
+      },
+      detectedModuleType: 'cjs',
+    })
+
+    expect(result.source).toContain('module.exports = 1')
+    expect(result.contentType).toBe('text/javascript')
+  })
+
+  test('installWorkerScriptInterceptor uses processor output for cjs package script', async () => {
+    const store: WorkerScriptStore = new Map()
+    registerWorkerScript(
+      store,
+      '/__bun__/worker/pkg.js',
+      'module.exports = 1',
+      { packageName: 'pkg', packageType: 'commonjs' },
+    )
+
+    const processor = new EsbuildWorkerScriptProcessor({
+      cjsToEsmTransform: async source => `export default (${JSON.stringify(source)})`,
+    })
+
+    const { target, dispatch } = makeFetchTarget()
+    const uninstall = installWorkerScriptInterceptor(store, target, { processor })
+
+    const res = await dispatch('http://localhost/__bun__/worker/pkg.js')
+    expect(res).not.toBeNull()
+    expect(res!.status).toBe(200)
+    expect(await res!.text()).toContain('module.exports = 1')
+
+    uninstall()
+  })
+
+  test('installWorkerScriptInterceptor returns original cjs source without processor', async () => {
+    const store: WorkerScriptStore = new Map()
+    registerWorkerScript(
+      store,
+      '/__bun__/worker/raw-cjs.js',
+      'module.exports = 9',
+      { packageName: 'raw', packageType: 'commonjs' },
+    )
+
+    const { target, dispatch } = makeFetchTarget()
+    const uninstall = installWorkerScriptInterceptor(store, target)
+
+    const res = await dispatch('http://localhost/__bun__/worker/raw-cjs.js')
+    expect(res).not.toBeNull()
+    expect(res!.status).toBe(200)
+    expect(await res!.text()).toBe('module.exports = 9')
+
+    uninstall()
+  })
+
+  test('PROCESS_EXECUTOR_WORKER_PATH is the canonical virtual path', () => {
+    expect(PROCESS_EXECUTOR_WORKER_PATH).toBe('/__bun__/worker/bun-process.js')
+  })
+
+  test('createRuntimeProcessExecutor returns unknown-command 127 for non-bun argv', async () => {
+    const executor = createRuntimeProcessExecutor()
+    const result = await executor({
+      argv: ['node', 'index.js'],
+      cwd: '/',
+      env: {},
+      stdin: '',
+      readMountedFile: () => null,
+    })
+    expect(result.exitCode).toBe(127)
+    expect(result.stderr).toContain('node')
+  })
+
+  test('createRuntimeProcessExecutor(workerUrl) uses supplied URL', async () => {
+    // Passing a non-existent URL; should fail gracefully with exit 1
+    const executor = createRuntimeProcessExecutor({
+      workerUrl: 'file:///nonexistent-worker-path.js',
+    })
+    const result = await executor({
+      argv: ['bun', 'run', '/script.ts'],
+      cwd: '/',
+      env: {},
+      stdin: '',
+      readMountedFile: (path: string) => (path === '/script.ts' ? 'console.log("hi")' : null),
+    })
+    // Worker fails to load → exit 1 with error message
+    expect(result.exitCode).toBe(1)
   })
 })

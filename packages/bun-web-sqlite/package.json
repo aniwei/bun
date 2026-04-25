@@ -18,5 +18,8 @@
   },
   "devDependencies": {
     "typescript": "6.0.2"
+  },
+  "dependencies": {
+    "wa-sqlite": "^1.0.0"
   }
 }

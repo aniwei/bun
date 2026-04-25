@@ -171,9 +171,9 @@ describe('M4 runtime/network integration', () => {
   test('M4-9: heartbeat enters recovery after consecutive failures', async () => {
     const hb = new ServiceWorkerHeartbeat(() => false, 3000, 1)
     await hb.tick()
-    expect(hb.needsRecovery()).toBe(false)
+    expect(hb.recovery()).toBe(false)
     await hb.tick()
-    expect(hb.needsRecovery()).toBe(true)
+    expect(hb.recovery()).toBe(true)
   })
 
   test('M4-10: proxy server requires tunnel URL', () => {

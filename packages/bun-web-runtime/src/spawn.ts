@@ -1,7 +1,8 @@
 import { Kernel, type KernelConfig } from '@mars/web-kernel'
-import type { SpawnedSupervisedProcess } from './process-supervisor'
+import { createCommandRegistry, runShellCommandSync } from '@mars/web-shell'
 import { RuntimeProcessSupervisor } from './process-supervisor'
-import { runShellCommandSync } from '@mars/web-shell'
+import type { RuntimeBundlerInitOptions } from './bundler-runtime'
+import type { SpawnedSupervisedProcess } from './process-supervisor'
 
 const HOST_PROCESS = (globalThis as Record<string, unknown>).process as
   | {
@@ -36,6 +37,10 @@ export interface RuntimeSpawnOptions extends SpawnOptions {
   kernelConfig?: KernelConfig
   supervisor?: RuntimeProcessSupervisor
   sabBuffer?: SharedArrayBuffer | null
+  bootstrapInitializers?: 'all' | string[]
+  initializeTranspiler?: boolean
+  initializeBundler?: boolean
+  bundlerInit?: RuntimeBundlerInitOptions
 }
 
 export interface SyncSubprocess {
@@ -252,6 +257,10 @@ export function spawn(options: RuntimeSpawnOptions): ChildProcess {
     cwd: options.cwd,
     env: options.env,
     sabBuffer: options.sabBuffer,
+    bootstrapInitializers: options.bootstrapInitializers,
+    initializeTranspiler: options.initializeTranspiler,
+    initializeBundler: options.initializeBundler,
+    bundlerInit: options.bundlerInit,
   })
 
   return createLazyChildProcess(kernel, options, supervised, ownSupervisor)
@@ -276,6 +285,7 @@ export function spawnSync(_options: SpawnOptions): SyncSubprocess {
     cwd: _options.cwd,
     env: _options.env,
     stdin,
+    registry: createCommandRegistry(),
   })
 
   return {

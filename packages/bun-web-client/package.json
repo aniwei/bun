@@ -16,6 +16,11 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "dependencies": {
+    "@mars/web-kernel": "workspace:*",
+    "@mars/web-runtime": "workspace:*",
+    "@mars/web-shared": "workspace:*"
+  },
   "devDependencies": {
     "typescript": "6.0.2"
   }

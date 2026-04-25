@@ -1,14 +1,16 @@
 #!/usr/bin/env bun
 /**
- * 官方测试集直通驱动脚本
+ * 官方测试集直通驱动脚本（M8-1）
  *
  * 功能：以 USE_BUN_WEB_RUNTIME=1 为环境变量，批量执行 Bun 官方测试集中
  * JS/TS 层测试用例，统计通过率，与上次基线对比，低于阈值则非零退出。
  *
  * 用法：
- *   bun scripts/run-official-tests-in-browser.ts
- *   bun scripts/run-official-tests-in-browser.ts --update-baseline
- *   bun scripts/run-official-tests-in-browser.ts --dir test/js/web
+ *   bun test/integration/bun-in-browser/run-official-tests.ts
+ *   bun test/integration/bun-in-browser/run-official-tests.ts --update-baseline
+ *   bun test/integration/bun-in-browser/run-official-tests.ts --dir test/js/web
+ *   bun test/integration/bun-in-browser/run-official-tests.ts --json report.json
+ *   bun test/integration/bun-in-browser/run-official-tests.ts --concurrency 8
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -190,8 +192,11 @@ for (const dir of dirsToRun) {
 
   let passed = 0, failed = 0;
 
-  // 并发数：CPU 核数
-  const concurrency = navigator.hardwareConcurrency ?? 4;
+  // 并发数：CLI 参数 > CPU 核数
+  const concurrencyArg = args.find((a) => a.startsWith("--concurrency="))
+  const concurrency = concurrencyArg
+    ? Number(concurrencyArg.split("=")[1])
+    : (navigator.hardwareConcurrency ?? 4);
   const batches: string[][] = [];
   for (let i = 0; i < files.length; i += concurrency) {
     batches.push(files.slice(i, i + concurrency));
@@ -263,6 +268,31 @@ if (exitCode !== 0) {
   console.error("\n门禁未通过。请修复失败用例或更新 skip-in-browser.txt（需说明原因）。");
 } else {
   console.log("\n所有门禁通过。");
+}
+
+// ---------------------------------------------------------------------------
+// JSON 报告输出（--json <path>）
+// ---------------------------------------------------------------------------
+
+const jsonFlag = args.find((a) => a.startsWith("--json"));
+if (jsonFlag) {
+  const jsonPath = jsonFlag.includes("=")
+    ? jsonFlag.split("=")[1]
+    : args[args.indexOf(jsonFlag) + 1];
+
+  if (jsonPath && !jsonPath.startsWith("--")) {
+    const report = {
+      timestamp: new Date().toISOString(),
+      exitCode,
+      directories: dirResults,
+      baseline,
+      failedFiles: allResults
+        .filter((r) => r.failed > 0)
+        .map((r) => ({ file: r.file, failed: r.failed, error: r.error ?? null })),
+    };
+    writeFileSync(jsonPath, JSON.stringify(report, null, 2));
+    console.log(`\n报告已写入: ${jsonPath}`);
+  }
 }
 
 process.exit(exitCode);

@@ -1,12 +1,59 @@
+import type {
+  ShellCommand,
+  ShellCommandContext,
+  ShellCommandRegisterHook,
+  ShellCommandRegistry,
+  ShellCommandResult,
+} from '@mars/web-shell'
+
 export type Pid = number
 export type Fd = number
+
+export type KernelShellContext = ShellCommandContext
+
+export type KernelShellResult = ShellCommandResult
+
+export type KernelShellCommand = ShellCommand
+
+export type KernelShellCommandRegistry = ShellCommandRegistry
+
+export type KernelShellCommandHook = ShellCommandRegisterHook
+export type KernelShellPlugin = KernelShellCommandHook
+
+export interface KernelPortRegistration {
+  host?: string
+  protocol?: 'http' | 'https'
+}
 
 export interface KernelConfig {
   maxProcesses?: number
   sabSize?: number
-  asyncFallback?: boolean
   tunnelUrl?: string
+  // Process-worker execution path. Kernel-owned command registry delegates
+  // `bun` (and unknown command fallback) through this executor.
+  processExecutor?: KernelProcessExecutor
+  shellHooks?: KernelShellCommandHook[]
 }
+
+export interface KernelProcessExecutionRequest {
+  pid: Pid
+  argv: string[]
+  cwd?: string
+  env?: Record<string, string>
+  stdin?: string
+  registerPort?(port: number, registration?: KernelPortRegistration): void
+  readMountedFile(path: string): string | Uint8Array | undefined
+}
+
+export interface KernelProcessExecutionResult {
+  exitCode: number
+  stdout: string
+  stderr: string
+}
+
+export type KernelProcessExecutor = (
+  request: KernelProcessExecutionRequest,
+) => Promise<KernelProcessExecutionResult> | KernelProcessExecutionResult
 
 export interface ProcessDescriptor {
   pid: Pid
@@ -28,3 +75,89 @@ export interface SpawnOptions {
   cwd?: string
   env?: Record<string, string>
 }
+
+export type KernelMountFile = {
+  path: string
+  content: string | Uint8Array
+}
+
+export type KernelControlCommand =
+  | {
+      type: 'spawn'
+      options: SpawnOptions
+    }
+  | {
+      type: 'mount'
+      files: KernelMountFile[]
+    }
+  | {
+      type: 'kill'
+      pid: Pid
+      signal?: number
+    }
+  | {
+      type: 'registerPort'
+      pid: Pid
+      port: number
+      host?: string
+      protocol?: 'http' | 'https'
+    }
+  | {
+      type: 'unregisterPort'
+      port: number
+    }
+  | {
+      type: 'stdio'
+      pid: Pid
+      kind: 'stdout' | 'stderr'
+      data: string
+    }
+  | {
+      type: 'exit'
+      pid: Pid
+      code: number
+    }
+  | {
+      type: 'executeProcess'
+      pid: Pid
+      argv: string[]
+      cwd?: string
+      env?: Record<string, string>
+      stdin?: string
+    }
+
+export type KernelControlResult =
+  | {
+      ok: true
+      type: 'spawn'
+      process: ProcessDescriptor
+    }
+  | {
+      ok: true
+      type: 'mount'
+      changedPaths: string[]
+    }
+  | {
+      ok: true
+      type: 'kill'
+    }
+  | {
+      ok: true
+      type: 'registerPort'
+    }
+  | {
+      ok: true
+      type: 'unregisterPort'
+    }
+  | {
+      ok: true
+      type: 'stdio'
+    }
+  | {
+      ok: true
+      type: 'exit'
+    }
+  | {
+      ok: true
+      type: 'executeProcess'
+    }

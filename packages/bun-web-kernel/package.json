@@ -17,6 +17,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@mars/web-installer": "workspace:*",
+    "@mars/web-shell": "workspace:*",
     "@mars/web-shared": "workspace:*",
     "@mars/web-vfs": "workspace:*"
   },

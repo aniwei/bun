@@ -23,6 +23,12 @@
 - 2026-04-25 本轮新增：`m2-node-path-official-replay.test.ts`（官方 `path.parse/format/toNamespacedPath/basename` 迁移子集）在 Vitest 下 4/4 通过。
 - 2026-04-25 本轮新增：`m2-node-module-official-replay.test.ts`（官方 `node-module-module` 的 builtin resolve、require cache、createRequire base 语义迁移子集）在 Vitest 下 7/7 通过。
 - 2026-04-25 本轮在 `@mars/web-node` 的 `fs.ts` 新增 `Stats/BigIntStats`、`createStatsForIno` shim 与 aborted signal (`ABORT_ERR`) 处理；`m2-node-fs.test.ts` 扩展后 11/11 通过。
+- 2026-04-25 本轮继续补齐 `@mars/web-vfs` 的 `watch-bus.ts` 与 `VFS.watch()`，并将 `@mars/web-node` 的 `fs.watch()` 薄适配到同一总线；`m2-node-fs.test.ts` 扩展后 12/12 通过。
+- 2026-04-25 本轮新增 `@mars/web-shared` 的 `wasm-module-loader.ts`（`WasmModuleLoader`），并在 `@mars/web-transpiler`（swc）与 `@mars/web-bundler`（esbuild）复用统一 WASM 加载/获取状态机，保留各自显式 init 门禁。
+- 2026-04-25 本轮在 `@mars/web-bundler` 的 `esbuild-wasm.ts` 新增 `resolveEsbuildWasmInitOptions()`，支持从 `globalThis.__BUN_WEB_ESBUILD_WASM__` 读取浏览器 wasm 初始化参数，并在浏览器 runtime 默认启用 `worker`。
+- 2026-04-25 本轮在 `@mars/web-runtime` 新增 `bundler-runtime.ts`，将 esbuild 初始化接入 `ProcessBootstrap` 队列（`runtime-bundler-init`），并向 `spawn/supervisor/bootstrap` 提供 `initializeBundler` 与 `bundlerInit` 透传参数。
+- 2026-04-25 本轮在 `@mars/web-bundler` 新增 `chunkMerge: 'entry-only'` 策略，`ChunkMergeSummary` 增加 `omittedChunkCount`，用于输出“仅 entry 聚合 + 省略 chunk 计数”摘要。
+- 2026-04-25 本轮在 `@mars/web-bundler` 新增 `chunkMerge: 'size-buckets'` 策略，`ChunkMergeSummary` 增加 `sizeBuckets`（tiny/small/medium/large）分桶统计，用于快速观测产物体积分布。
 - 本轮已清理构建声明噪音：`TypedEventEmitter` 的 MISSING_EXPORT 告警已消除；当前构建输出仅剩 tsdown `define` 非阻塞输入告警。
 - 本轮已推进官方回放门禁脚本：`run-official-tests.ts` 修复 skip 前缀匹配、root 定位与 `--dir` 阈值继承；最新 `--dir test/js/node/fs` 在 skip 已知阻塞后为 11/11。
 - 本轮补充：`run-official-tests.ts` 现默认设置 `BUN_FEATURE_FLAG_INTERNAL_FOR_TESTING=1`（以及 `BUN_GARBAGE_COLLECTOR_LEVEL=1`）并在失败行输出错误摘要，便于快速定位 `internal-for-testing` 与 `Stats` 语义类问题。
@@ -35,6 +41,7 @@
 - 当前 `bun bd test` 仅保留为源码级根因调试路径：构建在 [build.zig](build.zig#L881) 处报 `unreachable else prong`，需先修复编译阻塞再推进 runtime 层对齐。
 - `src/js/thirdparty/ws.js` 的 MarsWeb 前缀重命名已回退，待后续重新提交并复测。
 - 2026-04-25 本轮补充：`@mars/web-installer` 的 `installFromManifest()` 新增 `optionalDependencies` 最小语义（失败跳过、不阻塞安装），并已补齐根依赖与 transitive optional 失败边界回放用例。
+- 2026-04-25 本轮补充：调用层职责冻结，`bun add/install/i` 归属 `@mars/web-kernel` 控制面并复用 `@mars/web-installer`；`@mars/web-runtime` 的 process-executor 与 `@mars/web-sw` 仅负责脚本执行与分发，不承载包管理语义。
 
 ---
 
@@ -43,6 +50,7 @@
 ### 代码风格与质量门禁（Oxc）
 
 - 风格参考：https://github.com/cgoinglove/better-chatbot/（仅参考风格原则，不复制实现代码）
+- 风格对齐范围覆盖 `packages/bun-web-*` 下所有源码、测试、配置与文档中的代码片段；触达文件必须同步收敛格式，不允许新旧风格长期混杂
 - TypeScript 代码默认使用单引号，尽量不使用双引号
 - 默认不写分号，由工具链在必要处自动补齐
 - 复杂逻辑按语义分段，尽量保持空行分隔，避免多条语句挤在一行
@@ -76,6 +84,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 - 模块间依赖通过 `pnpm workspace` 统一管理，禁止绕过 workspace 直接引用未声明依赖。
 - 包间引用使用 workspace 版本约束（如 `workspace:*`），保持本地联调与 CI 解析一致。
 - 源码跨包依赖统一通过 package name 导入，例如 `@mars/web-vfs`、`@mars/web-shared`，禁止 `../../bun-web-*/src/*` 形式的跨包相对路径。
+- WASM 运行时加载抽象统一收敛到 `@mars/web-shared`，例如 `WasmModuleLoader`；`@mars/web-transpiler` 与 `@mars/web-bundler` 仅实现各自业务能力校验与初始化参数策略。
 - 新增模块时需同时补齐 `package.json` 的 `name`、`exports`、`types`（如有）与最小脚本入口。
 
 ### Package 交付清单
@@ -124,7 +133,6 @@ throw new MarsWebUnsupportedError('Bun.udpSocket', {
     ├─ @mars/web-net
     │    └─ @mars/web-dns
     ├─ @mars/web-shell
-    │    └─ @mars/web-shell-builtins
     ├─ @mars/web-bundler
     │    └─ @mars/web-transpiler
     ├─ @mars/web-test
@@ -137,6 +145,45 @@ throw new MarsWebUnsupportedError('Bun.udpSocket', {
 @mars/web-proxy-server  (可选独立服务端，Node/Deno/Bun 运行)
 @mars/web-installer  ←  @mars/web-vfs + @mars/web-resolver
 ```
+
+## 模块职责与调用矩阵（对齐 webcontainers.io）
+
+参考：
+
+- https://webcontainers.io/api
+- https://webcontainers.io/guides/quickstart
+
+| 模块 | 主要作用 | 输入调用 | 输出调用 | 实施计划映射 |
+| --- | --- | --- | --- | --- |
+| `@mars/web-client` | 宿主 SDK，提供 boot/mount/spawn/on/shutdown | Host App 调用 | 控制面命令到 kernel（目标态） | M4-5, M7-8, A0-1, A0-2 |
+| `@mars/web-kernel` | 进程/端口/stdio 生命周期控制 + bun 子命令路由 | client/runtime/sw | 调用 vfs/runtime/installer；向 client/sw 发事件 | M1-1, M1-2, A0-3 |
+| `@mars/web-vfs` | 三层文件系统 + watch + cache | kernel/node/installer | OPFS + Mem + Base 读写路径 | M1-3, M1-4, M3-5 |
+| `@mars/web-runtime` | Process Worker 启动编排、spawn、serve、脚本执行 worker | kernel/client | node/shell/bundler/transpiler | M1-5, M4, M5, M6, A0-4 |
+| `@mars/web-node` | Node 兼容模块集合 | runtime/用户脚本 | vfs/resolver/webapis/net | M2, M4, M5, M6 |
+| `@mars/web-sw` | 网络入口与路由转发 + worker 脚本拦截分发 | 浏览器 SW 事件 | kernel 端口路由 + fetch bridge | M4, A0-5 |
+| `@mars/web-net` | net/http/ws/tls 连接抽象 | runtime/node | dns/tunnel | M4, M5 |
+| `@mars/web-dns` | DNS 解析适配 | net/node | 平台解析或 stub 返回 | M4 |
+| `@mars/web-shell` | shell 执行与命令注册 | runtime/agent | builtin 命令模块（包内）/hook-registry | M5 |
+| `@mars/web-bundler` | build 能力（esbuild-wasm） | runtime/工具入口 | shared wasm loader | M6 |
+| `@mars/web-transpiler` | TS/JSX 转译（swc wasm） | runtime/bundler | shared wasm loader | M6 |
+| `@mars/web-installer` | 安装器（metadata/tarball/lockfile/layout） | host/cli/kernel | vfs/resolver | M3 |
+| `@mars/web-proxy-server` | 可选代理服务层 | preview/外部请求 | sw/runtime 旁路协作 | M4（可选） |
+
+## 模块设计计划更新（2026-04-25）
+
+### 目标
+
+- 从“模块 API 列表”升级到“模块职责 + 调用链 + 验收责任”三位一体。
+- 消除 `@mars/web-client` 文档契约与真实调用链之间的 stub 漂移。
+
+### 新增计划项
+
+| 计划项 | 说明 | 交付物 |
+| --- | --- | --- |
+| P1 调用链冻结 | 冻结 boot/mount/spawn/server-ready 的跨模块调用顺序与事件载荷 | API 调用层设计文档的调用序列 + 事件 schema |
+| P2 模块边界冻结 | 冻结每个模块“只能做什么/不能做什么” | 本文档模块职责矩阵 + 反向约束注释 |
+| P3 实施与测试联动 | 每个调用层改动必须绑定至少一条链路测试 | bun-web-test 的 m7/m8 链路测试记录 |
+| P4 文档一致性门禁 | 变更调用层前先改文档，再改代码 | 实施文档 A0 TODO 与测试状态同步 |
 
 ---
 
@@ -172,8 +219,12 @@ export type Fd = number;
 export interface KernelConfig {
   maxProcesses?: number;       // 默认 32
   sabSize?: number;            // SAB 缓冲区大小，默认 4MB
-  asyncFallback?: boolean;     // 无 SAB 时强制 async 模式
+  // SAB/async 模式由运行时能力自动探测，无显式 asyncFallback 开关
   tunnelUrl?: string;          // TCP/TLS 隧道服务端地址（RFC §5.4）
+  // Process worker execution path used by kernel-owned `bun` command
+  // and unknown-command fallback.
+  processExecutor?: import('@mars/web-kernel').KernelProcessExecutor;
+  shellHooks?: import('@mars/web-kernel').KernelShellCommandHook[];
 }
 
 export interface ProcessDescriptor {
@@ -212,7 +263,18 @@ export class Kernel extends TypedEventEmitter<KernelEvents> {
   onStdio(pid: Pid, listener: (kind: 'stdout' | 'stderr', data: string) => void): () => void;
   // idempotent replace for same pid; auto-detached on process exit/kill
   attachProcessPort(pid: Pid, port: MessagePort): () => void;
-  notifyExit(pid: Pid, code: number): void;
+  exit(pid: Pid, code: number): void;
+
+  // shell command registry（Kernel instance-owned）
+  use(plugin: import('@mars/web-kernel').KernelShellPlugin): void;
+  registerShellCommand(name: string, command: import('@mars/web-kernel').KernelShellCommand): void;
+  unregisterShellCommand(name: string): boolean;
+  hasShellCommand(name: string): boolean;
+
+  // internal routing rule:
+  // - `bun run` is delegated to processExecutor (worker script execution)
+  // - `bun add/install/i` is routed by kernel and delegated to installer path
+  // - echo/sleep are provided by @mars/web-shell builtin module
 
   // 端口表（供 Bun.serve 注册）
   registerPort(pid: Pid, port: number): void;
@@ -402,8 +464,9 @@ export class PackageCacheStore {
 packages/bun-web-runtime/
   src/
     index.ts
-    process-bootstrap.ts   # Process Worker 入口，Bun 全局注入
+    process-bootstrap.ts   # Process Worker 入口，ProcessBootstrap 初始化队列 + Bun 全局注入
     process-supervisor.ts  # Runtime 侧进程控制面编排（attach/onExit/cleanup）
+    transpiler-runtime.ts  # Runtime 启动阶段的 swc-wasm 初始化与单例管理
     bun-globals.ts         # Bun.version/env/argv/cwd 等常量注入
     serve.ts               # Bun.serve() 实现
     spawn.ts               # Bun.spawn / Bun.spawnSync
@@ -423,6 +486,13 @@ packages/bun-web-runtime/
     runtime.types.ts
 ```
 
+  运行时执行约束（A0 当前冻结）：
+
+  - `runtime.spawn` 负责进程句柄与生命周期编排（attach/onExit/cleanup），不直接承担 argv 执行。
+  - bun 脚本执行统一走 `kernel.executeProcess -> processExecutor`。
+  - `processExecutor` 的 bun 路径必须 worker-only 执行；禁止 inline fallback 到主线程 `AsyncFunction`。
+  - Worker 不可用时返回明确错误码与 stderr，由上层决定是否降级或报错，不在 runtime 内隐式回退执行。
+
 ### 核心类设计
 
 ```ts
@@ -434,10 +504,28 @@ export interface ProcessBootstrapOptions {
   env: Record<string, string>;
   cwd: string;
   sabBuffer: SharedArrayBuffer | null;  // null = async fallback
+  initializeTranspiler?: boolean;       // 启动时触发 swc 初始化队列任务
+  bootstrapInitializers?: 'all' | string[]; // 按 initializer id 选择执行任务
+}
+
+export interface ProcessBootstrapInitializer {
+  id: string;
+  shouldRun?(context: { opts: ProcessBootstrapOptions; scope: Record<string, unknown> }): boolean;
+  run(context: { opts: ProcessBootstrapOptions; scope: Record<string, unknown> }): void | Promise<void>;
+}
+
+export class ProcessBootstrap {
+  registerInitializer(initializer: ProcessBootstrapInitializer): () => void;
+  bootstrap(opts: ProcessBootstrapOptions, stdioPort?: MessagePort | null): Promise<BootstrappedContext>;
 }
 
 export async function bootstrapProcessWorker(opts: ProcessBootstrapOptions): Promise<void>;
 // 在 Process Worker 顶层调用，注入全局 Bun / process / require 等
+
+// transpiler-runtime.ts
+export function initRuntimeTranspiler(options?: { defaults?: import('@mars/web-transpiler').TranspileOptions }): Promise<import('@mars/web-transpiler').BunTranspiler>;
+export function getRuntimeTranspiler(): import('@mars/web-transpiler').BunTranspiler;
+export function isRuntimeTranspilerReady(): boolean;
 
 // process-supervisor.ts
 export interface AttachProcessControlOptions {
@@ -1142,48 +1230,57 @@ export function installWebSocketPolyfill(): void;
 ```
 packages/bun-web-sw/
   src/
-    sw.ts              # SW 主入口（fetch 拦截、activate、install）
-    router.ts          # 虚拟端口路由（resolveVirtualPort）
-    kernel-bridge.ts   # SW ↔ Kernel 通信（MessageChannel）
-    static-handler.ts  # 静态资源读 VFS
+    sw.ts              # 类化 SW 主入口（fetch/install/activate + kernel bridge + worker script）
     heartbeat.ts       # SW 保活与自动复活逻辑
-    sw.types.ts
 ```
 
 ### 核心类设计
 
 ```ts
-// router.ts
-export interface VirtualRoute {
-  pid: number;
-  port: number;
-  pattern: RegExp;   // 匹配 URL.pathname
+export class WebServiceWorkerManager {
+  constructor(
+    target: ServiceWorkerGlobalLike,
+    resolver: PortResolver,
+    dispatchToKernel: DispatchToKernel,
+    options?: {
+      workerScripts?: WorkerScriptStore;
+      scriptProcessor?: WorkerScriptProcessor;
+    },
+  )
+  install(): () => void
+  uninstall(): void
 }
 
-export class VirtualRouter {
-  register(route: VirtualRoute): void;
-  unregister(port: number): void;
-  resolve(url: URL): VirtualRoute | null;
-  // 格式：http://<pid>.bun.local/ 或 /__bun__/:port/
-  resolveVirtualPort(url: URL): number | null;
+export class KernelServiceWorkerBridgeManager {
+  constructor(
+    kernel: KernelSwBridge,
+    target: ServiceWorkerGlobalLike,
+    handlerRegistry: ServeHandlerRegistry,
+    options?: {
+      workerScripts?: WorkerScriptStore;
+      scriptProcessor?: WorkerScriptProcessor;
+    },
+  )
+  install(): () => void
+  uninstall(): void
 }
 
-// kernel-bridge.ts
-export class SWKernelBridge {
-  static connect(): Promise<SWKernelBridge>;
-  dispatch(port: number, req: Request): Promise<Response>;
-  onPortRegistered(cb: (port: number, pid: number) => void): void;
-  onPortUnregistered(cb: (port: number) => void): void;
+export class WorkerScriptInterceptorManager {
+  constructor(store: WorkerScriptStore, target: FetchEventTargetLike, processor?: WorkerScriptProcessor)
+  install(): () => void
+  uninstall(): void
 }
 
-// heartbeat.ts
-export class SWHeartbeat {
-  constructor(intervalMs?: number);   // 默认 20s
-  start(): void;
-  stop(): void;
-  onRecovery(cb: () => void): void;   // SW 复活后回调（重建端口表）
+export class EsbuildWorkerScriptProcessor {
+  process(input: {
+    pathname: string
+    descriptor: WorkerScriptDescriptor
+    detectedModuleType: 'esm' | 'cjs'
+  }): Promise<{ source: string; contentType?: string }>
 }
 ```
+
+补充约束：SW 在 worker script 路由命中时直接返回脚本内容，不再进入 kernel 路由。package 脚本以扩展名 + package.type 判定 CJS/ESM，CJS 默认通过 esbuild-wasm 转为 ESM 后返回。
 
 ---
 
@@ -1389,9 +1486,10 @@ export function planNodeModulesLayoutFromLockfile(lockfile: BunWebLockfile, root
 packages/bun-web-bundler/
   src/
     index.ts
-    build.ts          # Bun.build() 主入口
+    build.ts          # build 主入口（esbuild-wasm backend）
+    esbuild-wasm.ts   # esbuild-wasm 初始化与 loader 管理
     chunk-merger.ts   # 自研 chunk 合并策略
-    plugin-adapter.ts # 适配 @mars/web-hooks 的 loader plugin 桥
+    plugin-adapter.ts # 适配插件生命周期与 esbuild plugin 桥
     output.ts         # BuildOutput / BuildArtifact 类型
     bundler.types.ts
 ```
@@ -1472,8 +1570,8 @@ export interface ShellRunOptions {
   cwd?: string;
   env?: Record<string, string>;
   stdin?: string;
-  registry?: import('@mars/web-shell-builtins').ShellCommandRegistry;
-  hooks?: import('@mars/web-shell-builtins').ShellCommandRegisterHook[];
+  registry?: import('@mars/web-shell').ShellCommandRegistry;
+  hooks?: import('@mars/web-shell').ShellCommandRegisterHook[];
 }
 
 export interface ShellRunResult {
@@ -1488,21 +1586,21 @@ export function runShellCommandSync(commandLine: string, options?: ShellRunOptio
 
 ---
 
-## 15. `@mars/web-shell-builtins`
+## 15. `@mars/web-shell`（builtin 模块）
 
 > 实施计划：M5-7 | RFC §7（Phase 1 命令集完整表）
 
 ### 文件结构
 
 ```
-packages/bun-web-shell-builtins/
+packages/bun-web-shell/
   src/
-    index.ts             # 对外导出
-    types.ts             # BuiltinContext/BuiltinResult/Registry/Hook
-    commands.ts          # Phase 1 内建命令（cd/ls/cat/grep/find/jq）
-    registry.ts          # ShellCommandRegistry（register/unregister/tryExecute/execute/has）
-    hook.ts              # 命令注册 hook（applyShellCommandRegisterHooks）
-    fs-adapter.ts        # in-memory fs 适配器
+    index.ts                         # 对外导出
+    types.ts                         # ShellCommandContext/ShellCommandRegistry
+    register-builtin-commands.ts     # Phase 1 内建命令（cd/ls/cat/grep/jq/echo/sleep）
+    registry.ts                      # builtin 命令集合注册（CommandRegistry）
+    hook.ts                          # 命令注册 hook（applyShellCommandRegisterHooks）
+    fs-adapter.ts                    # in-memory fs 适配器
 ```
 
 ### 核心类设计（统一 builtin 接口）
@@ -1515,18 +1613,11 @@ export interface ShellCommandRegistry {
   has(name: string): boolean;
   tryExecute(name: string, args: string[], context: BuiltinContext): BuiltinResult | null;
   execute(name: string, args: string[], context: BuiltinContext): BuiltinResult;
+  tryExecuteAsync(name: string, args: string[], context: BuiltinContext): Promise<BuiltinResult | null>;
+  executeAsync(name: string, args: string[], context: BuiltinContext): Promise<BuiltinResult>;
 }
 
 export type ShellCommandRegisterHook = (registry: ShellCommandRegistry) => void;
-
-// registry.ts
-export class BuiltinCommandRegistry implements ShellCommandRegistry {
-  register(name: string, command: BuiltinCommand): void;
-  unregister(name: string): boolean;
-  has(name: string): boolean;
-  tryExecute(name: string, args: string[], context: BuiltinContext): BuiltinResult | null;
-  execute(name: string, args: string[], context: BuiltinContext): BuiltinResult;
-}
 
 export function createBuiltinCommandRegistry(initialCommands?: Record<string, BuiltinCommand>): ShellCommandRegistry;
 
@@ -1534,6 +1625,11 @@ export function createBuiltinCommandRegistry(initialCommands?: Record<string, Bu
 export function applyShellCommandRegisterHooks(
   registry: ShellCommandRegistry,
   hooks?: ShellCommandRegisterHook[],
+): ShellCommandRegistry;
+
+// kernel-executor-commands.ts
+export function registerKernelBuiltinCommands(
+  registry: ShellCommandRegistry,
 ): ShellCommandRegistry;
 ```
 
@@ -1755,9 +1851,10 @@ export const hash: {
 packages/bun-web-hooks/
   src/
     index.ts
-    hook.ts            # Hook 引擎主类
-    typed-hooks.ts     # 所有 hook 命名空间的强类型定义
-    middleware.ts      # 中间件链（洋葱模型）
+    hook.ts            # HookRegistry 主类（register/enable/disable/execute/emit）
+    define-hook.ts     # defineHook + HookSpec 构造工具
+    presets.ts         # HookPreset 预设集合（none/minimal/default）
+    typed-hooks.ts     # 所有 hook timing 的强类型定义
     hooks.types.ts
 ```
 
@@ -1765,7 +1862,7 @@ packages/bun-web-hooks/
 
 ```ts
 // hooks.types.ts
-export type HookName =
+export type HookTiming =
   | 'kernel:boot' | 'kernel:shutdown'
   | 'vfs:read' | 'vfs:write' | 'vfs:stat' | 'vfs:watch'
   | 'resolve:beforeResolve' | 'resolve:afterResolve'
@@ -1775,30 +1872,54 @@ export type HookName =
   | 'shell:beforeCommand' | 'shell:registerBuiltin' | 'shell:afterCommand'
   | 'test:beforeEach' | 'test:afterEach';
 
-export type HookMode = 'sync' | 'async' | 'first';
-// sync: 所有注册函数串行执行，最后一个返回值生效
-// async: 串行 await 执行，最后一个返回值生效
-// first: 第一个非 undefined 返回值生效（短路）
+export type InterceptorTiming =
+  | 'resolve:beforeResolve'
+  | 'loader:load'
+  | 'loader:transform'
+  | 'net:fetch'
+  | 'shell:beforeCommand';
 
-export interface HookRegistration<T = unknown, R = unknown> {
-  hook: HookName;
-  mode?: HookMode;
-  priority?: number;    // 高数字优先（默认 0）
-  handler: (ctx: T) => R | Promise<R>;
+export type ObserverTiming = Exclude<HookTiming, InterceptorTiming>;
+
+export interface HookSpec {
+  name: string;
+  timing: HookTiming;
+  priority: number;
+  enabled: boolean;
+  kind: 'interceptor' | 'observer';
+}
+
+export interface HookRegistryOptions {
+  preset?: HookPreset;
 }
 
 // hook.ts
-export class HookEngine {
-  register<T, R>(reg: HookRegistration<T, R>): () => void;   // 返回取消注册函数
-  unregister(hook: HookName, handler: Function): void;
+export class HookRegistry {
+  constructor(options?: HookRegistryOptions);
 
-  call<T, R>(hook: HookName, ctx: T, mode?: HookMode): R | undefined;
-  callAsync<T, R>(hook: HookName, ctx: T, mode?: HookMode): Promise<R | undefined>;
+  register(spec: HookSpec): void;
+  registerAll(specs: HookSpec[]): void;
+  on<T extends HookTiming>(timing: T, name: string, handle: HookHandle<T>, priority?: number): this;
 
-  hasHooks(hook: HookName): boolean;
-  clear(hook?: HookName): void;
+  has(name: string): boolean;
+  unregister(name: string): boolean;
+  disable(name: string): void;
+  enable(name: string): void;
+  clear(): void;
+
+  getRegistered(timing?: HookTiming): RegisteredHookInfo[];
+
+  execute<T extends InterceptorTiming>(timing: T, input: HookInput<T>, output: HookOutput<T>): Promise<void>;
+  emit<T extends ObserverTiming>(timing: T, input: HookInput<T>): Promise<void>;
 }
 ```
+
+设计约束：
+
+- `execute` 与 `emit` 必须分离，靠类型系统阻止错误 timing 调用。
+- Hook 排序采用 `priority` 升序；同优先级保持注册稳定顺序。
+- `disable/enable` 为运行时屏蔽，不从 bucket 删除定义。
+- Hook 失败记录日志后继续执行后续 hook，不允许单插件阻断整条链路。
 
 ---
 
@@ -1850,7 +1971,7 @@ export interface LoaderResult {
 // plugin-context.ts
 export class PluginContextImpl implements PluginContext {
   constructor(
-    engine: HookEngine,
+    hooks: HookRegistry,
     vfs: VFS,
     shellExecutor: ShellExecutor,
     allowedScopes: MarsWebPlugin['scopes'],
@@ -2005,21 +2126,23 @@ packages/bun-web-client/
   src/
     index.ts
     sdk.ts         # BunContainer 主类（对齐 WebContainer API 风格）
-    preview.ts     # iframe 预览挂载
-    terminal.ts    # xterm.js ↔ Process Worker stdio 桥接
-    rpc.ts         # 宿主 ↔ Kernel 的 postMessage RPC
-    events.ts      # 事件系统（server-ready / process-exit / file-change）
+    preview.ts     # 兼容层预览控制器
+    preview-manager.ts # iframe 预览挂载
     client.types.ts
 ```
 
 ### 核心类设计
 
 ```ts
-// sdk.ts（对齐 RFC §10 示例代码）
+// sdk.ts（当前实现对齐 RFC §10 示例代码，支持两种 spawn 形态）
 export interface BunContainerOptions {
   tunnelUrl?: string;        // 可选 TCP 隧道（RFC §5.4）
   coopCoepHeaders?: boolean; // 自动注入 COOP/COEP（默认 false）
   workerType?: 'shared' | 'dedicated';  // Kernel Worker 类型
+  files?: FileTree;          // 启动时初始挂载
+  id?: string;
+  workerUrl?: string;
+  scope?: string;
 }
 
 export class BunContainer {
@@ -2030,24 +2153,25 @@ export class BunContainer {
    * 挂载文件树到 VFS /
    * @param files 文件路径 → 文件内容（对齐 WebContainer.mount）
    */
-  mount(files: FileTree, opts?: { mountPoint?: string }): Promise<void>;
+  mount(files: FileTree): Promise<void>;
 
   /** 在容器内运行命令，返回 ChildProcessHandle */
   spawn(cmd: string, args?: string[], opts?: SpawnOpts): Promise<ContainerProcess>;
+  spawn(opts: SpawnOpts): Promise<ContainerProcess>;
 
-  /** 直接执行 TypeScript/JavaScript 源码 */
-  eval(source: string, opts?: { filename?: string }): Promise<unknown>;
+  /** 直接执行 TypeScript/JavaScript 源码，返回捕获的 stdout/stderr 文本 */
+  eval(source: string, opts?: { filename?: string; cwd?: string; env?: Record<string, string>; argv?: string[] }): Promise<string>;
 
   /** 监听容器事件 */
-  on(event: 'server-ready', handler: (port: number, url: URL) => void): this;
-  on(event: 'process-exit', handler: (pid: number, code: number) => void): this;
-  on(event: 'file-change', handler: (path: string) => void): this;
-  off(event: string, handler: Function): this;
+  on(event: 'server-ready', handler: (event: ServerReadyEvent) => void): () => void;
+  on(event: 'process-exit', handler: (event: ProcessExitEvent) => void): () => void;
+  on(event: 'file-change', handler: (event: FileChangeEvent) => void): () => void;
+  off(event: string, handler: Function): void;
 
   /** 绑定 xterm.js Terminal 实例 */
-  attachTerminal(terminal: ITerminal, pid?: number): TerminalHandle;
+  attachTerminal(terminal?: unknown, pid?: number): TerminalHandle;
 
-  readonly fs: VFSPublicAPI;
+  readonly fs: ReadonlyMap<string, string | Uint8Array>;
 }
 
 export type FileTree = Record<string, string | Uint8Array | FileTree>;
@@ -2055,23 +2179,95 @@ export type FileTree = Record<string, string | Uint8Array | FileTree>;
 export interface ContainerProcess {
   readonly pid: number;
   readonly output: ReadableStream<Uint8Array>;
+  readonly stdout: ReadableStream<Uint8Array>;
   readonly stderr: ReadableStream<Uint8Array>;
   readonly exited: Promise<number>;
+  waitForExit(): Promise<number>;
   kill(signal?: number): void;
   input: WritableStream<Uint8Array>;
+  write(data: string | Uint8Array): void;
 }
 
-// preview.ts
+// preview-manager.ts
 export class PreviewManager {
   attach(iframe: HTMLIFrameElement): void;
   detach(): void;
-  onServerReady(port: number, url: URL): void;
+  onServerReady(listener: (event: ServerReadyEvent) => void): () => void;
+  handleReady(event: ServerReadyEvent): void;
+  getCurrentURL(): string | null;
 }
 ```
 
 ---
 
-## 24. `@mars/web-proxy-server`
+## 24. `@mars/web-example`
+
+> 实施计划：M8-7 | RFC §10（整体流程验证）
+
+### 文件结构
+
+```
+packages/bun-web-example/
+  index.html      # Vite 应用入口
+  vite.config.ts  # Vite + React 插件配置
+  src/
+    index.ts        # BunContainer 端到端示例入口（生成 Vite+React+TS 模板）
+    App.tsx         # Dify 风格示例界面
+    main.tsx        # React 挂载入口
+    styles.css      # 示例样式
+```
+
+### 核心类设计
+
+```ts
+export interface BunWebExampleOptions {
+  boot?: BunContainerOptions;
+  container?: BunContainer;
+  useCase?: BunWebExampleUseCase;
+  entrypoint?: string;
+  files?: FileTree;
+  message?: string;
+}
+
+export type BunWebExampleUseCase =
+  | 'vite-react-ts'
+  | 'express'
+  | 'koa'
+  | 'fastify'
+  | 'hono'
+  | 'bun-serve-routes';
+
+export interface BunWebExampleScenario {
+  id: BunWebExampleUseCase;
+  title: string;
+  description: string;
+  defaultEntrypoint: string;
+  createFiles(message: string): FileTree;
+}
+
+export interface BunWebExampleResult {
+  container: BunContainer;
+  useCase: BunWebExampleUseCase;
+  entrypoint: string;
+  exitCode: number;
+  output: string;
+  previewURL: string | null;
+}
+
+export function createBunWebExampleFiles(message?: string): FileTree;
+export function createBunWebExpressExampleFiles(message?: string): FileTree;
+export function createBunWebKoaExampleFiles(message?: string): FileTree;
+export function createBunWebFastifyExampleFiles(message?: string): FileTree;
+export function createBunWebHonoExampleFiles(message?: string): FileTree;
+export function createBunWebServeRoutesExampleFiles(message?: string): FileTree;
+export function listBunWebExampleScenarios(): BunWebExampleScenario[];
+export function getBunWebExampleScenario(useCase: BunWebExampleUseCase): BunWebExampleScenario;
+export function runBunWebExample(options?: BunWebExampleOptions): Promise<BunWebExampleResult>;
+```
+
+---
+
+## 25. `@mars/web-proxy-server`
 
 > 实施计划：M4-10 | RFC §5.4（可选 WS/TCP 隧道服务端）
 
@@ -2150,7 +2346,7 @@ export class TunnelNotConfiguredError extends MarsWebError { }  // 未配置 tun
 |---|---|---|
 | `VFS` | `@mars/web-vfs` | runtime / node / kernel / installer / sqlite / test |
 | `FileStat` / `Dirent` | `@mars/web-vfs` | node:fs / resolver |
-| `ShellContext` / `ShellBuiltin` | `@mars/web-shell` | shell-builtins / plugin-api / agent |
+| `ShellContext` / `ShellBuiltin` | `@mars/web-shell` | plugin-api / agent |
 | `SyscallBridge` | `@mars/web-kernel` | runtime / node |
 | `MarsWebPlugin` / `PluginContext` | `@mars/web-plugin-api` | runtime / bundler / hooks |
 | `CompatEntry` | `@mars/web-compat-registry` | 所有包（注册时） |

@@ -15,7 +15,8 @@
   ],
   "exports": {
     ".": "./src/index.ts",
-    "./event-emitter": "./src/event-emitter.ts"
+    "./event-emitter": "./src/event-emitter.ts",
+    "./wasm-module-loader": "./src/wasm-module-loader.ts"
   },
   "devDependencies": {
     "typescript": "6.0.2"

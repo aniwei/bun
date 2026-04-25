@@ -5,6 +5,7 @@ import {
   planNodeModulesLayoutFromLockfile,
   upsertLockfilePackage,
 } from '../../../packages/bun-web-installer/src'
+import { stableSnapshot } from './snapshot-utils'
 
 describe('bun-web M3 installer node_modules layout', () => {
   test('hoists shared dependency with same resolved version to root node_modules', () => {
@@ -36,11 +37,22 @@ describe('bun-web M3 installer node_modules layout', () => {
       'left-pad': '1.3.0',
     })
 
-    expect(plan.entries).toEqual([
-      { installPath: '/node_modules/is-number', packageKey: 'is-number@7.0.0' },
-      { installPath: '/node_modules/left-pad', packageKey: 'left-pad@1.3.0' },
-      { installPath: '/node_modules/react', packageKey: 'react@18.2.0' },
-    ])
+    expect(stableSnapshot(plan.entries)).toMatchInlineSnapshot(`
+      "[
+        {
+          \"installPath\": \"/node_modules/is-number\",
+          \"packageKey\": \"is-number@7.0.0\"
+        },
+        {
+          \"installPath\": \"/node_modules/left-pad\",
+          \"packageKey\": \"left-pad@1.3.0\"
+        },
+        {
+          \"installPath\": \"/node_modules/react\",
+          \"packageKey\": \"react@18.2.0\"
+        }
+      ]"
+    `)
 
     const reactLinks = plan.links.filter(link => link.dependencyName === 'react')
     expect(reactLinks).toHaveLength(2)
@@ -129,11 +141,22 @@ describe('bun-web M3 installer node_modules layout', () => {
       'dep-a': '1.0.0',
     })
 
-    expect(plan.entries).toEqual([
-      { installPath: '/node_modules/dep-a', packageKey: 'dep-a@1.0.0' },
-      { installPath: '/node_modules/dep-b', packageKey: 'dep-b@1.0.0' },
-      { installPath: '/node_modules/dep-c', packageKey: 'dep-c@1.0.0' },
-    ])
+    expect(stableSnapshot(plan.entries)).toMatchInlineSnapshot(`
+      "[
+        {
+          \"installPath\": \"/node_modules/dep-a\",
+          \"packageKey\": \"dep-a@1.0.0\"
+        },
+        {
+          \"installPath\": \"/node_modules/dep-b\",
+          \"packageKey\": \"dep-b@1.0.0\"
+        },
+        {
+          \"installPath\": \"/node_modules/dep-c\",
+          \"packageKey\": \"dep-c@1.0.0\"
+        }
+      ]"
+    `)
 
     const directLink = plan.links.find(
       link => link.fromPackageKey === 'dep-a@1.0.0' && link.dependencyName === 'dep-c',

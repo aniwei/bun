@@ -16,9 +16,6 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "dependencies": {
-    "@mars/web-shell-builtins": "workspace:*"
-  },
   "devDependencies": {
     "typescript": "6.0.2"
   }

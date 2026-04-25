@@ -1,4 +1,5 @@
-import type { Dirent, FileStat } from './vfs.types'
+import type { Dirent, FileStat, WatchHandle, WatchListener } from './vfs.types'
+import { WatchBus } from './watch-bus'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -44,6 +45,20 @@ function toStat(entry: Entry): FileStat {
     atime: entry.atime,
     ctime: entry.ctime,
   }
+}
+
+function pathBasename(path: string): string {
+  const normalized = normalizePath(path)
+  if (normalized === '/') return '/'
+  return normalized.split('/').filter(Boolean).at(-1) ?? normalized
+}
+
+function pathDirname(path: string): string {
+  const normalized = normalizePath(path)
+  if (normalized === '/') return '/'
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.length <= 1) return '/'
+  return '/' + parts.slice(0, -1).join('/')
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +273,7 @@ export interface OverlayFSOptions {
 
 export class VFS {
   readonly layers: { base: BaseLayer; persist: PersistLayer; mem: MemLayer }
+  private readonly watchBus = new WatchBus()
 
   constructor(opts: OverlayFSOptions = {}) {
     this.layers = {
@@ -279,12 +295,14 @@ export class VFS {
 
   mkdirSync(path: string, opts?: { recursive?: boolean }): void {
     this.layers.mem.mkdir(path, opts?.recursive)
+    this.emitWatchEvent(normalizePath(path), 'rename')
   }
 
   writeFileSync(path: string, data: Buffer | string): void {
     const bytes =
       typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data as Buffer)
     this.layers.mem.set(path, makeEntry('file', bytes))
+    this.emitWatchEvent(normalizePath(path), 'change')
   }
 
   readFileSync(path: string): Buffer {
@@ -326,7 +344,9 @@ export class VFS {
   }
 
   unlinkSync(path: string): void {
-    this.layers.mem.delete(normalizePath(path))
+    const normalized = normalizePath(path)
+    this.layers.mem.delete(normalized)
+    this.emitWatchEvent(normalized, 'rename')
   }
 
   renameSync(oldPath: string, newPath: string): void {
@@ -336,8 +356,16 @@ export class VFS {
       ;(err as NodeJS.ErrnoException).code = 'ENOENT'
       throw err
     }
-    this.layers.mem.set(newPath, entry)
-    this.layers.mem.delete(normalizePath(oldPath))
+    const normalizedOldPath = normalizePath(oldPath)
+    const normalizedNewPath = normalizePath(newPath)
+    this.layers.mem.set(normalizedNewPath, entry)
+    this.layers.mem.delete(normalizedOldPath)
+    this.emitWatchEvent(normalizedOldPath, 'rename')
+    this.emitWatchEvent(normalizedNewPath, 'rename')
+  }
+
+  watch(path: string, listener: WatchListener): WatchHandle {
+    return this.watchBus.subscribe(normalizePath(path), listener)
   }
 
   // Async wrappers
@@ -367,5 +395,17 @@ export class VFS {
 
   async rename(oldPath: string, newPath: string): Promise<void> {
     this.renameSync(oldPath, newPath)
+  }
+
+  private emitWatchEvent(path: string, event: 'change' | 'rename'): void {
+    const normalized = normalizePath(path)
+    const filename = pathBasename(normalized)
+
+    this.watchBus.emit(normalized, event, filename)
+
+    const parent = pathDirname(normalized)
+    if (parent !== normalized) {
+      this.watchBus.emit(parent, event, filename)
+    }
   }
 }

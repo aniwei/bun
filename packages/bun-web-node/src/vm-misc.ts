@@ -6,6 +6,51 @@ import * as vmModule from 'node:vm'
 
 export { assertModule, utilModule, osModule, vmModule }
 
+// ----- error classes ----------------------------------------------------------
+
+type CompatLevel = 'A' | 'B' | 'C' | 'D'
+
+/** Thrown when a D-level (or browser-unsupported) API is called in a web environment. */
+export class MarsWebUnsupportedError extends Error {
+  readonly code: 'ERR_BUN_WEB_UNSUPPORTED' = 'ERR_BUN_WEB_UNSUPPORTED'
+  readonly symbol: string
+  readonly compatLevel: CompatLevel
+
+  constructor(symbol: string, meta?: { code?: string; level?: CompatLevel }) {
+    super(`${symbol} is not supported in the browser web environment`)
+    this.name = 'MarsWebUnsupportedError'
+    this.symbol = symbol
+    this.compatLevel = meta?.level ?? 'D'
+  }
+}
+
+// ----- cluster (C-level stub) ------------------------------------------------
+
+/**
+ * node:cluster shim – not available in browser context.
+ * Any call throws MarsWebUnsupportedError with ERR_BUN_WEB_UNSUPPORTED.
+ */
+export const clusterModule = {
+  get isMaster(): never {
+    throw new MarsWebUnsupportedError('cluster.isMaster', { level: 'C' })
+  },
+  get isPrimary(): never {
+    throw new MarsWebUnsupportedError('cluster.isPrimary', { level: 'C' })
+  },
+  get isWorker(): never {
+    throw new MarsWebUnsupportedError('cluster.isWorker', { level: 'C' })
+  },
+  fork(): never {
+    throw new MarsWebUnsupportedError('cluster.fork', { level: 'C' })
+  },
+  setupPrimary(): never {
+    throw new MarsWebUnsupportedError('cluster.setupPrimary', { level: 'C' })
+  },
+  disconnect(): never {
+    throw new MarsWebUnsupportedError('cluster.disconnect', { level: 'C' })
+  },
+} as const
+
 export function evaluateScript(code: string, context: Record<string, unknown> = {}): unknown {
   const vmContext = vmModule.createContext({ ...context })
   return new vmModule.Script(code).runInContext(vmContext)

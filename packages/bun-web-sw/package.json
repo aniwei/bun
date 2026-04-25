@@ -17,7 +17,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@mars/web-kernel": "workspace:*"
+    "@mars/web-kernel": "workspace:*",
+    "esbuild-wasm": "^0.28.0"
   },
   "devDependencies": {
     "typescript": "6.0.2"

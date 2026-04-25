@@ -62,7 +62,7 @@ export interface MarsWebProcessShape {
   exit(code?: number): never
 }
 
-export class MarsWebProcess implements MarsWebProcessShape {
+export class MarsWebProcess extends TypedEventEmitter<ProcessEvents> implements MarsWebProcessShape {
   readonly pid: number
   readonly ppid: number
   readonly platform: 'browser'
@@ -78,10 +78,8 @@ export class MarsWebProcess implements MarsWebProcessShape {
   env: ProcessEnv
 
   private currentDir: string
-  private readonly emitter: any
-
   constructor(options: CreateProcessOptions) {
-    this.emitter = new TypedEventEmitter<ProcessEvents>()
+    super()
     this.pid = options.pid
     this.ppid = options.ppid ?? 1
     this.platform = 'browser'
@@ -109,46 +107,6 @@ export class MarsWebProcess implements MarsWebProcessShape {
     }
 
     this.currentDir = nextDir
-  }
-
-  on(event: string, listener: (...args: unknown[]) => void): MarsWebProcessShape {
-    this.emitter.on(event, listener)
-    return this
-  }
-
-  addListener(event: string, listener: (...args: unknown[]) => void): MarsWebProcessShape {
-    return this.on(event, listener)
-  }
-
-  off(event: string, listener: (...args: unknown[]) => void): MarsWebProcessShape {
-    this.emitter.off(event, listener)
-    return this
-  }
-
-  removeListener(event: string, listener: (...args: unknown[]) => void): MarsWebProcessShape {
-    return this.off(event, listener)
-  }
-
-  removeAllListeners(event?: string): MarsWebProcessShape {
-    this.emitter.removeAllListeners(event)
-    return this
-  }
-
-  listeners(event: string): Array<(...args: unknown[]) => void> {
-    return this.emitter.listeners(event)
-  }
-
-  listenerCount(event: string): number {
-    return this.emitter.listenerCount(event)
-  }
-
-  once(event: string, listener: (...args: unknown[]) => void): MarsWebProcessShape {
-    this.emitter.once(event, listener)
-    return this
-  }
-
-  emit(event: string, ...args: unknown[]): boolean {
-    return this.emitter.emit(event, ...args)
   }
 
   nextTick(fn: (...args: unknown[]) => void, ...args: unknown[]): void {

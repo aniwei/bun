@@ -37,7 +37,7 @@ export class ServiceWorkerHeartbeat {
     this.timer = null
   }
 
-  needsRecovery(): boolean {
+  recovery(): boolean {
     return this.failures > this.maxFailures
   }
 }

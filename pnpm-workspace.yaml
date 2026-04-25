@@ -1,2 +1,4 @@
 packages:
-  - packages/*
+  - packages/bun-web-*
+  - packages/bun-types
+  - packages/@types/bun

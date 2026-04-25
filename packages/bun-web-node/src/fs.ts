@@ -241,6 +241,7 @@ export interface NodeFsBridge {
   realpathSync(path: string): string
   unlinkSync(path: string): void
   renameSync(oldPath: string, newPath: string): void
+  watch(path: string, listener: (eventType: 'change' | 'rename', filename: string) => void): { close(): void }
   copyFileSync(src: string, dest: string): void
   rmSync(path: string, opts?: { recursive?: boolean; force?: boolean }): void
   promises: NodeFsPromises
@@ -357,6 +358,10 @@ class MarsWebNodeFs implements NodeFsBridge {
 
   renameSync(oldPath: string, newPath: string): void {
     this.vfs.renameSync(oldPath, newPath)
+  }
+
+  watch(path: string, listener: (eventType: 'change' | 'rename', filename: string) => void): { close(): void } {
+    return this.vfs.watch(path, listener)
   }
 
   copyFileSync(src: string, dest: string): void {

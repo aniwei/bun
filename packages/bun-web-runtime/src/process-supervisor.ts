@@ -1,5 +1,6 @@
 import type { Kernel, Pid } from '@mars/web-kernel'
 import type { ProcessDescriptor, SpawnOptions } from '@mars/web-kernel'
+import type { RuntimeBundlerInitOptions } from './bundler-runtime'
 import {
   bootstrapProcessWorker,
   type BootstrappedContext,
@@ -29,6 +30,10 @@ export interface SpawnedSupervisedProcess extends SupervisedBootstrappedProcess 
 
 export interface SpawnSupervisedProcessOptions extends SpawnOptions {
   sabBuffer?: SharedArrayBuffer | null
+  bootstrapInitializers?: 'all' | string[]
+  initializeTranspiler?: boolean
+  initializeBundler?: boolean
+  bundlerInit?: RuntimeBundlerInitOptions
   onExit?: (code: number) => void
 }
 
@@ -113,6 +118,10 @@ export class RuntimeProcessSupervisor {
         env: descriptor.env,
         cwd: descriptor.cwd,
         sabBuffer: options.sabBuffer ?? null,
+        bootstrapInitializers: options.bootstrapInitializers,
+        initializeTranspiler: options.initializeTranspiler,
+        initializeBundler: options.initializeBundler,
+        bundlerInit: options.bundlerInit,
       },
       onExit: options.onExit,
     })

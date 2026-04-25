@@ -149,7 +149,7 @@ class ClientRequest extends EventEmitter {
       const method = this.options.method ?? 'GET'
       const body = method === 'GET' || method === 'HEAD'
         ? undefined
-        : concatChunks(this.bodyChunks)
+        : Buffer.from(concatChunks(this.bodyChunks))
 
       const response = await fetch(normalizeURL(this.input), {
         method,
@@ -569,6 +569,118 @@ export const https = {
     return get(withDefaultProtocol(input, 'https:'), optionsOrCallback, maybeCallback)
   },
   createServer,
+}
+
+export type HTTP2Headers = Record<string, string>
+
+class ClientHttp2Stream extends EventEmitter {
+  private readonly chunks: Uint8Array[] = []
+  private closed = false
+
+  constructor(
+    private readonly authority: string,
+    private readonly headers: HTTP2Headers,
+  ) {
+    super()
+  }
+
+  write(chunk: SocketChunk): void {
+    if (this.closed) {
+      throw new Error('Cannot write after stream closed')
+    }
+    this.chunks.push(toUint8Array(chunk))
+  }
+
+  end(chunk?: SocketChunk): void {
+    if (chunk !== undefined) {
+      this.write(chunk)
+    }
+    if (this.closed) {
+      return
+    }
+    this.closed = true
+    void this.execute()
+  }
+
+  close(): void {
+    if (this.closed) {
+      return
+    }
+    this.closed = true
+    this.emit('close')
+  }
+
+  private async execute(): Promise<void> {
+    try {
+      const method = this.headers[':method'] ?? 'GET'
+      const path = this.headers[':path'] ?? '/'
+      const url = `${this.authority}${path}`
+
+      const requestHeaders = new Headers()
+      for (const [name, value] of Object.entries(this.headers)) {
+        if (!name.startsWith(':')) {
+          requestHeaders.set(name, value)
+        }
+      }
+
+      const body = method === 'GET' || method === 'HEAD' ? undefined : Buffer.from(concatChunks(this.chunks))
+      const response = await fetch(url, {
+        method,
+        headers: requestHeaders,
+        body,
+      })
+
+      this.emit('response', {
+        ':status': String(response.status),
+      } as HTTP2Headers)
+
+      const payload = new Uint8Array(await response.arrayBuffer())
+      if (payload.byteLength > 0) {
+        this.emit('data', payload)
+      }
+      this.emit('end')
+      this.emit('close')
+    } catch (error) {
+      this.emit('error', error instanceof Error ? error : new Error('http2 request failed'))
+      this.emit('close')
+    }
+  }
+}
+
+class ClientHttp2Session extends EventEmitter {
+  private destroyed = false
+
+  constructor(private readonly authority: string) {
+    super()
+  }
+
+  request(headers: HTTP2Headers = {}): ClientHttp2Stream {
+    if (this.destroyed) {
+      throw new Error('http2 session destroyed')
+    }
+    return new ClientHttp2Stream(this.authority, headers)
+  }
+
+  close(): void {
+    if (this.destroyed) {
+      return
+    }
+    this.destroyed = true
+    this.emit('close')
+  }
+
+  destroy(error?: Error): void {
+    if (error) {
+      this.emit('error', error)
+    }
+    this.close()
+  }
+}
+
+export const http2 = {
+  connect(authority: string): ClientHttp2Session {
+    return new ClientHttp2Session(authority)
+  },
 }
 
 export const net = {

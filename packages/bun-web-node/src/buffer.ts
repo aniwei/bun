@@ -15,9 +15,9 @@ export type BufferEncoding =
 export const INSPECT_MAX_BYTES = 50
 export const kMaxLength = 0x7fffffff
 
-const _utf8Encoder = new TextEncoder()
-const _utf8Decoder = new TextDecoder('utf-8')
-const _latin1Decoder = new TextDecoder('latin1')
+const utf8Encoder = new TextEncoder()
+const utf8Decoder = new TextDecoder('utf-8')
+const latin1Decoder = new TextDecoder('latin1')
 
 function normalizeEncoding(enc?: string | null): BufferEncoding {
   if (!enc) return 'utf8'
@@ -67,7 +67,7 @@ function encodeString(str: string, encoding: BufferEncoding): Uint8Array {
   switch (encoding) {
     case 'utf8':
     case 'utf-8':
-      return _utf8Encoder.encode(str)
+      return utf8Encoder.encode(str)
 
     case 'base64':
     case 'base64url':
@@ -105,7 +105,7 @@ function encodeString(str: string, encoding: BufferEncoding): Uint8Array {
     }
 
     default:
-      return _utf8Encoder.encode(str)
+      return utf8Encoder.encode(str)
   }
 }
 
@@ -113,7 +113,7 @@ function decodeBytes(bytes: Uint8Array, encoding: BufferEncoding): string {
   switch (encoding) {
     case 'utf8':
     case 'utf-8':
-      return _utf8Decoder.decode(bytes)
+      return utf8Decoder.decode(bytes)
 
     case 'base64':
       return bytesToBase64(bytes)
@@ -132,7 +132,7 @@ function decodeBytes(bytes: Uint8Array, encoding: BufferEncoding): string {
     case 'ascii':
     case 'latin1':
     case 'binary':
-      return _latin1Decoder.decode(bytes)
+      return latin1Decoder.decode(bytes)
 
     case 'ucs2':
     case 'ucs-2':
@@ -146,7 +146,7 @@ function decodeBytes(bytes: Uint8Array, encoding: BufferEncoding): string {
     }
 
     default:
-      return _utf8Decoder.decode(bytes)
+      return utf8Decoder.decode(bytes)
   }
 }
 
@@ -184,10 +184,7 @@ export class Buffer extends Uint8Array {
     if (value instanceof ArrayBuffer || value instanceof SharedArrayBuffer) {
       const offset = typeof encodingOrOffset === 'number' ? encodingOrOffset : 0
       const len = typeof length === 'number' ? length : value.byteLength - offset
-      const view = new Uint8Array(value, offset, len)
-      const buf = new Buffer(view.length)
-      buf.set(view)
-      return buf
+      return new Buffer(value, offset, len)
     }
 
     if (value instanceof Uint8Array) {

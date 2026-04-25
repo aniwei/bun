@@ -13,7 +13,6 @@
     "./packages/bun-web-client",
     "./packages/bun-web-proxy-server",
     "./packages/bun-web-shell",
-    "./packages/bun-web-shell-builtins",
     "./packages/bun-web-transpiler",
     "./packages/bun-web-bundler",
     "./packages/bun-web-sqlite",
@@ -21,6 +20,11 @@
     "./packages/bun-web-vfs",
     "./packages/bun-web-runtime",
     "./packages/bun-web-node",
+    "./packages/bun-web-hooks",
+    "./packages/bun-web-plugin-api",
+    "./packages/bun-web-compat-registry",
+    "./packages/bun-web-agent",
+    "./packages/bun-web-example",
     "./packages/bun-web-shared",
     "./packages/bun-web-webapis",
     "./packages/bun-web-resolver",
@@ -47,8 +51,8 @@
     "typescript": "6.0.2"
   },
   "resolutions": {
-    "bun-types": "workspace:packages/bun-types",
-    "@types/bun": "workspace:packages/@types/bun",
+    "bun-types": "workspace:*",
+    "@types/bun": "workspace:*",
     "@types/node": "25.0.0"
   },
   "scripts": {
@@ -58,9 +62,9 @@
     "ci:errors": "bun scripts/find-build.ts --errors",
     "ci:logs": "bun scripts/find-build.ts --logs",
     "ci:watch": "bun scripts/find-build.ts --watch",
-    "web:build": "nx run-many -t build --projects=@mars/web-kernel,@mars/web-sw,@mars/web-net,@mars/web-dns,@mars/web-client,@mars/web-proxy-server,@mars/web-shell,@mars/web-shell-builtins,@mars/web-transpiler,@mars/web-bundler,@mars/web-sqlite,@mars/web-crypto,@mars/web-vfs,@mars/web-runtime,@mars/web-node,@mars/web-shared,@mars/web-webapis,@mars/web-resolver,@mars/web-installer,@mars/web-test",
-    "web:typecheck": "nx run-many -t typecheck --projects=@mars/web-kernel,@mars/web-sw,@mars/web-net,@mars/web-dns,@mars/web-client,@mars/web-proxy-server,@mars/web-shell,@mars/web-shell-builtins,@mars/web-transpiler,@mars/web-bundler,@mars/web-sqlite,@mars/web-crypto,@mars/web-vfs,@mars/web-runtime,@mars/web-node,@mars/web-shared,@mars/web-webapis,@mars/web-resolver,@mars/web-installer,@mars/web-test",
-    "web:clean": "nx run-many -t clean --projects=@mars/web-kernel,@mars/web-sw,@mars/web-net,@mars/web-dns,@mars/web-client,@mars/web-proxy-server,@mars/web-shell,@mars/web-shell-builtins,@mars/web-transpiler,@mars/web-bundler,@mars/web-sqlite,@mars/web-crypto,@mars/web-vfs,@mars/web-runtime,@mars/web-node,@mars/web-shared,@mars/web-webapis,@mars/web-resolver,@mars/web-installer,@mars/web-test",
+    "web:build": "nx run-many -t build --projects=@mars/web-kernel,@mars/web-sw,@mars/web-net,@mars/web-dns,@mars/web-client,@mars/web-proxy-server,@mars/web-shell,@mars/web-transpiler,@mars/web-bundler,@mars/web-sqlite,@mars/web-crypto,@mars/web-vfs,@mars/web-runtime,@mars/web-node,@mars/web-agent,@mars/web-example,@mars/web-shared,@mars/web-webapis,@mars/web-resolver,@mars/web-installer,@mars/web-test",
+    "web:typecheck": "nx run-many -t typecheck --projects=@mars/web-kernel,@mars/web-sw,@mars/web-net,@mars/web-dns,@mars/web-client,@mars/web-proxy-server,@mars/web-shell,@mars/web-transpiler,@mars/web-bundler,@mars/web-sqlite,@mars/web-crypto,@mars/web-vfs,@mars/web-runtime,@mars/web-node,@mars/web-agent,@mars/web-example,@mars/web-shared,@mars/web-webapis,@mars/web-resolver,@mars/web-installer,@mars/web-test",
+    "web:clean": "nx run-many -t clean --projects=@mars/web-kernel,@mars/web-sw,@mars/web-net,@mars/web-dns,@mars/web-client,@mars/web-proxy-server,@mars/web-shell,@mars/web-transpiler,@mars/web-bundler,@mars/web-sqlite,@mars/web-crypto,@mars/web-vfs,@mars/web-runtime,@mars/web-node,@mars/web-agent,@mars/web-example,@mars/web-shared,@mars/web-webapis,@mars/web-resolver,@mars/web-installer,@mars/web-test",
     "web:test": "bun run --cwd packages/bun-web-test test",
     "web:test:official": "bun run --cwd packages/bun-web-test test:official",
     "web:test:official:update-baseline": "bun run --cwd packages/bun-web-test test:official:update-baseline",
