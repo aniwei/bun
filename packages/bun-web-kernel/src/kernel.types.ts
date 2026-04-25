@@ -5,6 +5,9 @@ import type {
   ShellCommandRegistry,
   ShellCommandResult,
 } from '@mars/web-shell'
+import type { InitializerTask } from '@mars/web-shared'
+import type { Kernel } from './kernel'
+import type { KernelServiceWorkerController } from './service-worker-controller'
 
 export type Pid = number
 export type Fd = number
@@ -20,6 +23,51 @@ export type KernelShellCommandRegistry = ShellCommandRegistry
 export type KernelShellCommandHook = ShellCommandRegisterHook
 export type KernelShellPlugin = KernelShellCommandHook
 
+export interface KernelInitializerContext {
+  kernel: Kernel
+  serviceWorkerUrl: string
+}
+
+export type KernelServiceWorker = KernelServiceWorkerController
+
+export type KernelModuleRequest = {
+  requestId: string
+  pathname: string
+  method: string
+  headers: Array<[string, string]>
+}
+
+export type KernelModuleResponse = {
+  requestId: string
+  status: number
+  headers: Array<[string, string]>
+  contentType?: string
+  buffer?: ArrayBuffer
+  error?: string
+}
+
+export type KernelModuleRequestHandler = (
+  request: KernelModuleRequest,
+) => Promise<KernelModuleResponse> | KernelModuleResponse
+
+export type KernelInitializerTask = InitializerTask<KernelInitializerContext>
+
+export type KernelBootHook = (payload: {
+  kernel: Kernel
+  serviceWorkerUrl: string
+}) => void | Promise<void>
+
+export type KernelServiceWorkerBeforeRegisterHook = (payload: {
+  kernel: Kernel
+  serviceWorkerUrl: string
+}) => void | Promise<void>
+
+export type KernelServiceWorkerRegisterHook = (payload: {
+  kernel: Kernel
+  serviceWorkerUrl: string
+  registered: boolean
+}) => void | Promise<void>
+
 export interface KernelPortRegistration {
   host?: string
   protocol?: 'http' | 'https'
@@ -33,6 +81,11 @@ export interface KernelConfig {
   // `bun` (and unknown command fallback) through this executor.
   processExecutor?: KernelProcessExecutor
   shellHooks?: KernelShellCommandHook[]
+  initializers?: KernelInitializerTask[]
+  bootHooks?: KernelBootHook[]
+  moduleRequestHandler?: KernelModuleRequestHandler
+  serviceWorkerBeforeRegisterHooks?: KernelServiceWorkerBeforeRegisterHook[]
+  serviceWorkerRegisterHooks?: KernelServiceWorkerRegisterHook[]
 }
 
 export interface KernelProcessExecutionRequest {

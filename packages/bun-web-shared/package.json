@@ -16,6 +16,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./event-emitter": "./src/event-emitter.ts",
+    "./initializer-pipeline": "./src/initializer-pipeline.ts",
     "./wasm-module-loader": "./src/wasm-module-loader.ts"
   },
   "devDependencies": {

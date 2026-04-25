@@ -18,9 +18,18 @@ export type ExtendableEventLike = {
   waitUntil(promise: Promise<unknown>): void
 }
 
+export type MessageEventLike<TMessage = unknown> = {
+  data: TMessage
+  source?: {
+    postMessage(message: unknown, transfer?: Transferable[]): void
+  } | null
+}
+
 export type ServiceWorkerGlobalLike = FetchEventTargetLike & {
   addEventListener(type: 'install' | 'activate', listener: (event: ExtendableEventLike) => void): void
+  addEventListener(type: 'message', listener: (event: MessageEventLike) => void): void
   removeEventListener?(type: 'install' | 'activate', listener: (event: ExtendableEventLike) => void): void
+  removeEventListener?(type: 'message', listener: (event: MessageEventLike) => void): void
   skipWaiting?(): Promise<void> | void
   clients?: {
     claim?(): Promise<void> | void
@@ -48,6 +57,7 @@ abstract class AbstractSwLifecycleManager {
 }
 
 const BUN_LOCAL_SUFFIX = '.bun.local'
+const MODULE_REQUEST_PREFIX = '/__bun__/modules/'
 
 function parsePortSegment(pathname: string): number | null {
   const parts = pathname.split('/').filter(Boolean)
@@ -175,6 +185,106 @@ export function installServiceWorkerRuntime(
 ): () => void {
   const router = createFetchRouter(resolver, dispatchToKernel)
   return installServiceWorkerRuntimeWithRouter(target, router)
+}
+
+export type ModuleRequestMessage = {
+  type: 'MODULE_REQUEST'
+  requestId: string
+  pathname: string
+  method: string
+  headers: Array<[string, string]>
+}
+
+export type ModuleResponseMessage = {
+  type: 'MODULE_RESPONSE'
+  requestId: string
+  status: number
+  headers: Array<[string, string]>
+  contentType?: string
+  buffer?: ArrayBuffer
+  error?: string
+}
+
+export type ModuleRequestBridge = {
+  requestModule(message: ModuleRequestMessage): Promise<ModuleResponseMessage>
+}
+
+function createModuleRequestId(): string {
+  return `module-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+export function isModuleRequestPath(pathname: string): boolean {
+  return pathname === MODULE_REQUEST_PREFIX.slice(0, -1) || pathname.startsWith(MODULE_REQUEST_PREFIX)
+}
+
+export function createModuleRequestRouter(
+  bridge: ModuleRequestBridge,
+): (request: Request) => Promise<Response | null> {
+  return async request => {
+    let url: URL
+    try {
+      url = new URL(request.url)
+    } catch {
+      return null
+    }
+
+    if (!isModuleRequestPath(url.pathname)) {
+      return null
+    }
+
+    const response = await bridge.requestModule({
+      type: 'MODULE_REQUEST',
+      requestId: createModuleRequestId(),
+      pathname: url.pathname,
+      method: request.method,
+      headers: Array.from(request.headers.entries()),
+    })
+
+    if (response.error) {
+      return new Response(response.error, {
+        status: response.status,
+        headers: response.headers,
+      })
+    }
+
+    const headers = new Headers(response.headers)
+    if (response.contentType && !headers.has('Content-Type')) {
+      headers.set('Content-Type', response.contentType)
+    }
+
+    return new Response(response.buffer ?? null, {
+      status: response.status,
+      headers,
+    })
+  }
+}
+
+export function createModuleMessageHandler(
+  bridge: ModuleRequestBridge,
+): (event: MessageEventLike) => void {
+  return event => {
+    const message = event.data
+    if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'MODULE_REQUEST') {
+      return
+    }
+
+    void bridge.requestModule(message as ModuleRequestMessage).then(response => {
+      const transfer = response.buffer ? [response.buffer] : undefined
+      event.source?.postMessage(response, transfer)
+    })
+  }
+}
+
+export function installModuleMessageBridge(
+  target: ServiceWorkerGlobalLike,
+  bridge: ModuleRequestBridge,
+): () => void {
+  const handler = createModuleMessageHandler(bridge)
+  target.addEventListener('message', handler)
+
+  return () => {
+    target.removeEventListener?.('message', handler)
+  }
 }
 
 // ─── Worker script interception (for PROCESS_EXECUTOR_WORKER_PATH etc.) ─────
@@ -525,11 +635,13 @@ export function createKernelDispatcher(
 export type KernelServiceWorkerBridgeOptions = {
   workerScripts?: WorkerScriptStore
   scriptProcessor?: WorkerScriptProcessor
+  moduleRequestBridge?: ModuleRequestBridge
 }
 
 type CompositeServiceWorkerOptions = {
   workerScripts?: WorkerScriptStore
   scriptProcessor?: WorkerScriptProcessor
+  moduleRequestBridge?: ModuleRequestBridge
 }
 
 export class WebServiceWorkerManager extends AbstractSwLifecycleManager {
@@ -544,6 +656,9 @@ export class WebServiceWorkerManager extends AbstractSwLifecycleManager {
 
   protected installInternal(): () => void {
     const kernelRouter = createFetchRouter(this.resolver, this.dispatchToKernel)
+    const moduleRouter = this.options.moduleRequestBridge
+      ? createModuleRequestRouter(this.options.moduleRequestBridge)
+      : null
     const workerScriptRouter = this.options.workerScripts
       ? createWorkerScriptRouter(
           this.options.workerScripts,
@@ -552,6 +667,13 @@ export class WebServiceWorkerManager extends AbstractSwLifecycleManager {
       : null
 
     const compositeRouter = async (request: Request): Promise<Response | null> => {
+      if (moduleRouter) {
+        const moduleResponse = await moduleRouter(request)
+        if (moduleResponse) {
+          return moduleResponse
+        }
+      }
+
       if (workerScriptRouter) {
         const workerScriptResponse = await workerScriptRouter(request)
         if (workerScriptResponse) {
@@ -562,11 +684,19 @@ export class WebServiceWorkerManager extends AbstractSwLifecycleManager {
       return kernelRouter(request)
     }
 
-    return installServiceWorkerRuntimeWithRouter(this.target, compositeRouter)
+    const uninstallRuntime = installServiceWorkerRuntimeWithRouter(this.target, compositeRouter)
+    const uninstallMessageBridge = this.options.moduleRequestBridge
+      ? installModuleMessageBridge(this.target, this.options.moduleRequestBridge)
+      : null
+
+    return () => {
+      uninstallMessageBridge?.()
+      uninstallRuntime()
+    }
   }
 }
 
-export function installServiceWorkerFromKernel(
+export function installKernelServiceWorkerBridge(
   kernel: KernelSwBridge,
   target: ServiceWorkerGlobalLike,
   handlerRegistry: ServeHandlerRegistry,
@@ -598,6 +728,7 @@ export class KernelServiceWorkerBridgeManager extends AbstractSwLifecycleManager
     const manager = new WebServiceWorkerManager(this.target, resolver, dispatcher, {
       workerScripts: this.options.workerScripts,
       scriptProcessor: this.options.scriptProcessor,
+      moduleRequestBridge: this.options.moduleRequestBridge,
     })
     const uninstallRuntime = manager.install()
 

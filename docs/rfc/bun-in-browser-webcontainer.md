@@ -466,6 +466,8 @@ packages/
 import { BunContainer } from '@mars/web-client';
 
 const bun = await BunContainer.boot({
+  serviceWorkerUrl: '/sw.js',
+  serviceWorkerRegisterOptions: { scope: '/' },
   serviceWorkerScripts: {
     '/__bun__/worker/pkg.js': {
       source: 'module.exports = 7',

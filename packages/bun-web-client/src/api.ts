@@ -21,6 +21,7 @@ import type {
 type Listener<T> = (event: T) => void
 
 const textEncoder = new TextEncoder()
+const FALLBACK_SERVICE_WORKER_URL = '/sw.js'
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
   ...args: string[]
 ) => (...params: unknown[]) => Promise<unknown>
@@ -125,10 +126,44 @@ export class BunContainer {
     const processExecutor = options.processExecutor ?? await loadDefaultProcessExecutor(options)
     const kernel = await Kernel.boot({
       tunnelUrl: options.tunnelUrl,
+      moduleRequestHandler: options.moduleRequestHandler,
       processExecutor,
+      bootHooks: options.hooks?.boot,
+      serviceWorkerBeforeRegisterHooks: options.hooks?.serviceWorkerBeforeRegister,
+      serviceWorkerRegisterHooks: options.hooks?.serviceWorkerRegister,
     })
 
-    const swUninstall = await createServiceWorkerBridge(kernel, options)
+    const serviceWorkerUrl = options.serviceWorkerUrl?.trim() || await resolveDefaultServiceWorkerUrl()
+    kernel.configureServiceWorker({
+      url: serviceWorkerUrl,
+      registerOptions: options.serviceWorkerRegisterOptions,
+    })
+    kernel.serviceWorker.configureModuleRequestHandler(
+      options.moduleRequestHandler
+        ? async request => ({
+            type: 'MODULE_RESPONSE',
+            ...(await kernel.handleModuleRequest({
+              requestId: request.requestId,
+              pathname: request.pathname,
+              method: request.method,
+              headers: request.headers,
+            })),
+          })
+        : null,
+    )
+
+    await kernel.runInitializers({
+      serviceWorkerUrl,
+      selectedInitializers: options.initializers,
+    })
+
+    const swBridge = await createServiceWorkerBridge(kernel, {
+      ...options,
+      serviceWorkerUrl,
+    })
+    await kernel.publishServiceWorkerRegister(swBridge.registered, serviceWorkerUrl)
+
+    const swUninstall = swBridge.uninstall
     const container = new BunContainer(options, kernel, swUninstall)
     if (options.files) {
       await container.mount(options.files)
@@ -446,6 +481,11 @@ type ServiceWorkerScopeLike = {
   clients?: { claim?(): Promise<void> | void }
 }
 
+type ServiceWorkerContainerLike = {
+  addEventListener?(type: 'message', listener: (event: MessageEvent) => void): void
+  removeEventListener?(type: 'message', listener: (event: MessageEvent) => void): void
+}
+
 type ServeHandlerRegistryLike = {
   getHandler(port: number): ((request: Request) => Promise<Response> | Response) | null
 }
@@ -455,6 +495,23 @@ type WorkerScriptStoreLike = Map<string, BunContainerWorkerScriptRecord>
 type KernelServiceWorkerBridgeOptionsLike = {
   workerScripts?: WorkerScriptStoreLike
   scriptProcessor?: BunContainerWorkerScriptProcessor
+  moduleRequestBridge?: {
+    requestModule(message: {
+      type: 'MODULE_REQUEST'
+      requestId: string
+      pathname: string
+      method: string
+      headers: Array<[string, string]>
+    }): Promise<{
+      type: 'MODULE_RESPONSE'
+      requestId: string
+      status: number
+      headers: Array<[string, string]>
+      contentType?: string
+      buffer?: ArrayBuffer
+      error?: string
+    }>
+  }
 }
 
 function createKernelSwBridge(kernel: Kernel): KernelPortResolverLike {
@@ -516,11 +573,7 @@ function normalizeWorkerScriptStore(
   return new Map(entries)
 }
 
-function detectServiceWorkerScope(options: BunContainerBootOptions): ServiceWorkerScopeLike | null {
-  if (options.serviceWorkerScope) {
-    return options.serviceWorkerScope as ServiceWorkerScopeLike
-  }
-
+function detectServiceWorkerScope(): ServiceWorkerScopeLike | null {
   const maybeScope = globalThis as unknown as {
     addEventListener?: (type: string, listener: Function) => void
     clients?: unknown
@@ -537,17 +590,86 @@ function detectServiceWorkerScope(options: BunContainerBootOptions): ServiceWork
   return null
 }
 
-async function createServiceWorkerBridge(
+let cachedDefaultServiceWorkerUrl: string | null = null
+
+async function resolveDefaultServiceWorkerUrl(): Promise<string> {
+  if (cachedDefaultServiceWorkerUrl) {
+    return cachedDefaultServiceWorkerUrl
+  }
+
+  const swCandidates = [
+    '@mars/web-sw',
+  ]
+
+  for (const candidate of swCandidates) {
+    try {
+      const loaded = await import(candidate) as {
+        DEFAULT_WEB_SW_SERVICE_WORKER_URL?: string
+      }
+      const url = loaded.DEFAULT_WEB_SW_SERVICE_WORKER_URL?.trim()
+      if (url) {
+        cachedDefaultServiceWorkerUrl = url
+        return url
+      }
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  cachedDefaultServiceWorkerUrl = FALLBACK_SERVICE_WORKER_URL
+  return cachedDefaultServiceWorkerUrl
+}
+
+async function registerServiceWorkerFromMainThread(
   kernel: Kernel,
   options: BunContainerBootOptions,
-): Promise<(() => void) | null> {
-  if (options.installServiceWorkerFromKernel === false) {
+): Promise<boolean> {
+  const url = options.serviceWorkerUrl?.trim() || await resolveDefaultServiceWorkerUrl()
+  kernel.configureServiceWorker({
+    url,
+    registerOptions: options.serviceWorkerRegisterOptions,
+  })
+
+  try {
+    await kernel.publishServiceWorkerBeforeRegister(url)
+    await kernel.serviceWorker.register()
+    return true
+  } catch (error) {
+    console.warn(
+      `[BunContainer] Failed to register service worker at "${url}": ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    )
+    return false
+  }
+}
+
+function installMainThreadServiceWorkerMessageBridge(kernel: Kernel): (() => void) | null {
+  const nav = globalThis.navigator as Navigator | undefined
+  const serviceWorker = nav?.serviceWorker as ServiceWorkerContainerLike | undefined
+  if (!serviceWorker?.addEventListener) {
     return null
   }
 
-  const scope = detectServiceWorkerScope(options)
+  const listener = kernel.serviceWorker.createModuleMessageListener() as (event: MessageEvent) => void
+  serviceWorker.addEventListener('message', listener)
+
+  return () => {
+    serviceWorker.removeEventListener?.('message', listener)
+  }
+}
+
+async function createServiceWorkerBridge(
+  kernel: Kernel,
+  options: BunContainerBootOptions,
+): Promise<{ uninstall: (() => void) | null; registered: boolean }> {
+  const scope = detectServiceWorkerScope()
   if (!scope) {
-    return null
+    const registered = await registerServiceWorkerFromMainThread(kernel, options)
+    const uninstallMessageBridge = installMainThreadServiceWorkerMessageBridge(kernel)
+    return {
+      uninstall: uninstallMessageBridge,
+      registered,
+    }
   }
 
   const swCandidates = [
@@ -555,7 +677,7 @@ async function createServiceWorkerBridge(
     '../../bun-web-sw/src/index.ts',
   ]
 
-  let installServiceWorkerFromKernelFn:
+  let installKernelServiceWorkerBridgeFn:
     | ((
       kernelBridge: KernelPortResolverLike,
       target: ServiceWorkerScopeLike,
@@ -567,15 +689,15 @@ async function createServiceWorkerBridge(
   for (const candidate of swCandidates) {
     try {
       const loaded = await import(candidate) as {
-        installServiceWorkerFromKernel?: (
+        installKernelServiceWorkerBridge?: (
           kernelBridge: KernelPortResolverLike,
           target: ServiceWorkerScopeLike,
           handlerRegistry: ServeHandlerRegistryLike,
           options?: KernelServiceWorkerBridgeOptionsLike,
         ) => () => void
       }
-      if (typeof loaded.installServiceWorkerFromKernel === 'function') {
-        installServiceWorkerFromKernelFn = loaded.installServiceWorkerFromKernel
+      if (typeof loaded.installKernelServiceWorkerBridge === 'function') {
+        installKernelServiceWorkerBridgeFn = loaded.installKernelServiceWorkerBridge
         break
       }
     } catch {
@@ -583,8 +705,11 @@ async function createServiceWorkerBridge(
     }
   }
 
-  if (!installServiceWorkerFromKernelFn) {
-    return null
+  if (!installKernelServiceWorkerBridgeFn) {
+    return {
+      uninstall: null,
+      registered: false,
+    }
   }
 
   let handlerRegistry = options.serveHandlerRegistry as ServeHandlerRegistryLike | undefined
@@ -612,18 +737,27 @@ async function createServiceWorkerBridge(
   }
 
   if (!handlerRegistry) {
-    return null
+    return {
+      uninstall: null,
+      registered: false,
+    }
   }
 
-  return installServiceWorkerFromKernelFn(
-    createKernelSwBridge(kernel),
-    scope,
-    handlerRegistry,
-    {
-      workerScripts: normalizeWorkerScriptStore(options.serviceWorkerScripts),
-      scriptProcessor: options.serviceWorkerScriptProcessor,
-    },
-  )
+  return {
+    uninstall: installKernelServiceWorkerBridgeFn(
+      createKernelSwBridge(kernel),
+      scope,
+      handlerRegistry,
+      {
+        moduleRequestBridge: options.moduleRequestHandler
+          ? kernel.serviceWorker.createModuleRequestBridge()
+          : undefined,
+        workerScripts: normalizeWorkerScriptStore(options.serviceWorkerScripts),
+        scriptProcessor: options.serviceWorkerScriptProcessor,
+      },
+    ),
+    registered: false,
+  }
 }
 
 let cachedDefaultProcessExecutor: KernelProcessExecutor | null = null

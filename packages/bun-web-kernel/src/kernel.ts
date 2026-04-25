@@ -1,4 +1,5 @@
 import { Subscription, type Events } from '@mars/web-shared'
+import { InitializerPipeline } from '@mars/web-shared'
 import { ProcessTable } from './process-table'
 import { KernelStateError, ProcessNotFoundError } from './errors'
 import { SyscallBridge } from './syscall-bridge'
@@ -10,6 +11,10 @@ import type {
   KernelShellContext,
   KernelShellCommandHook,
   KernelShellCommandRegistry,
+  KernelInitializerContext,
+  KernelModuleRequest,
+  KernelModuleResponse,
+  KernelInitializerTask,
   KernelProcessExecutionRequest,
   KernelProcessExecutionResult,
   KernelPortRegistration,
@@ -18,6 +23,8 @@ import type {
 } from './kernel.types'
 import type { VFS } from '@mars/web-vfs'
 import { createBuiltinCommandRegistry } from '@mars/web-shell'
+import { BunCommand } from './bun-command'
+import { KernelServiceWorkerController } from './service-worker-controller'
 
 type KernelEvents = Events & {
   stdio: (payload: { pid: Pid; kind: 'stdout' | 'stderr'; data: string }) => void
@@ -41,97 +48,6 @@ function resolvePath(cwd: string, path: string): string {
   return normalizeAbsolutePath(`${cwd}/${path}`)
 }
 
-function parsePackageSpecifier(specifier: string): { name: string; spec: string } | null {
-  const trimmed = specifier.trim()
-  if (!trimmed) return null
-
-  if (trimmed.startsWith('@')) {
-    const secondAt = trimmed.lastIndexOf('@')
-    if (secondAt > 0) {
-      const maybeName = trimmed.slice(0, secondAt)
-      const maybeSpec = trimmed.slice(secondAt + 1)
-      if (maybeName.includes('/') && maybeSpec.length > 0) {
-        return { name: maybeName, spec: maybeSpec }
-      }
-    }
-
-    return { name: trimmed, spec: 'latest' }
-  }
-
-  const at = trimmed.indexOf('@')
-  if (at > 0) {
-    return {
-      name: trimmed.slice(0, at),
-      spec: trimmed.slice(at + 1) || 'latest',
-    }
-  }
-
-  return { name: trimmed, spec: 'latest' }
-}
-
-type BunAddDependencyField = 'dependencies' | 'devDependencies' | 'optionalDependencies' | 'peerDependencies'
-
-type BunAddOptions = {
-  installAfterAdd: boolean
-  targetField: BunAddDependencyField
-  packageSpecifiers: string[]
-}
-
-function parseBunAddOptions(args: string[]): BunAddOptions | { error: string } {
-  let installAfterAdd = true
-  let targetField: BunAddDependencyField = 'dependencies'
-  const packageSpecifiers: string[] = []
-
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index]!
-
-    if (token === '--no-install') {
-      installAfterAdd = false
-      continue
-    }
-
-    if (token === '--dev' || token === '-d') {
-      targetField = 'devDependencies'
-      continue
-    }
-
-    if (token === '--optional' || token === '-O') {
-      targetField = 'optionalDependencies'
-      continue
-    }
-
-    if (token === '--peer' || token === '-p') {
-      targetField = 'peerDependencies'
-      continue
-    }
-
-    if (token === '--cwd') {
-      if (index + 1 >= args.length) {
-        return { error: 'bun add --cwd requires a value\n' }
-      }
-      index += 1
-      continue
-    }
-
-    if (token.startsWith('--cwd=')) {
-      continue
-    }
-
-    if (token.startsWith('-')) {
-      // Keep unknown flags non-fatal for now to stay permissive.
-      continue
-    }
-
-    packageSpecifiers.push(token)
-  }
-
-  return {
-    installAfterAdd,
-    targetField,
-    packageSpecifiers,
-  }
-}
-
 type KernelExecutionContext = KernelShellContext & {
   __kernelRequest?: KernelProcessExecutionRequest
 }
@@ -150,6 +66,7 @@ export class Kernel extends Subscription<KernelEvents> {
   }
 
   static async shutdown(): Promise<void> {
+    Kernel.current?.serviceWorker.dispose()
     Kernel.current = null
   }
 
@@ -175,8 +92,11 @@ export class Kernel extends Subscription<KernelEvents> {
   // exited process codes awaiting waitpid reap
   private readonly exitedCodes = new Map<Pid, number>()
   private readonly commandRegistry: KernelShellCommandRegistry
+  private readonly bunCommand: BunCommand
+  private readonly initializerPipeline = new InitializerPipeline<KernelInitializerContext>()
   private readonly processWorkerExecutor?: KernelConfig['processExecutor']
   private readonly processExecutor: (request: KernelProcessExecutionRequest) => Promise<KernelProcessExecutionResult>
+  readonly serviceWorker: KernelServiceWorkerController
 
   private constructor(
     readonly config: KernelConfig,
@@ -187,15 +107,100 @@ export class Kernel extends Subscription<KernelEvents> {
 
     this.bridge = new SyscallBridge(sab)
     this.commandRegistry = createBuiltinCommandRegistry() as KernelShellCommandRegistry
-    
+    this.serviceWorker = new KernelServiceWorkerController()
+
     this.processWorkerExecutor = config.processExecutor
+    this.bunCommand = new BunCommand({
+      readMountedText: path => this.readMountedText(path),
+      writeMounted: (path, content) => this.writeMounted(path, content),
+      getManifestPath: cwd => this.getManifestPath(cwd),
+      processWorkerExecutor: this.processWorkerExecutor,
+    })
 
     this.registerKernelProcessWorkerCommands()
+
+    this.initializerPipeline.register({
+      id: 'kernel-boot-hooks',
+      order: 100,
+      run: async context => {
+        for (const hook of this.config.bootHooks ?? []) {
+          await hook({
+            kernel: context.kernel,
+            serviceWorkerUrl: context.serviceWorkerUrl,
+          })
+        }
+      },
+    })
+
+    for (const initializer of this.config.initializers ?? []) {
+      this.initializerPipeline.register(initializer)
+    }
+
     for (const hook of config.shellHooks ?? []) {
       hook(this.commandRegistry)
     }
 
     this.processExecutor = async request => this.executeWithShellRegistry(request)
+  }
+
+  registerInitializer(initializer: KernelInitializerTask): () => void {
+    return this.initializerPipeline.register(initializer)
+  }
+
+  async runInitializers(options: {
+    serviceWorkerUrl: string
+    selectedInitializers?: 'all' | string[]
+  }): Promise<void> {
+    await this.initializerPipeline.run(
+      {
+        kernel: this,
+        serviceWorkerUrl: options.serviceWorkerUrl,
+      },
+      options.selectedInitializers ?? 'all',
+    )
+  }
+
+  async publishServiceWorkerRegister(registered: boolean, serviceWorkerUrl: string): Promise<void> {
+    for (const hook of this.config.serviceWorkerRegisterHooks ?? []) {
+      await hook({
+        kernel: this,
+        serviceWorkerUrl,
+        registered,
+      })
+    }
+  }
+
+  async publishServiceWorkerBeforeRegister(serviceWorkerUrl: string): Promise<void> {
+    for (const hook of this.config.serviceWorkerBeforeRegisterHooks ?? []) {
+      await hook({
+        kernel: this,
+        serviceWorkerUrl,
+      })
+    }
+  }
+
+  async handleModuleRequest(request: KernelModuleRequest): Promise<KernelModuleResponse> {
+    const handler = this.config.moduleRequestHandler
+    if (!handler) {
+      return {
+        requestId: request.requestId,
+        status: 404,
+        headers: [],
+        error: `Kernel module request handler not found for ${request.pathname}`,
+      }
+    }
+
+    return await handler(request)
+  }
+
+  configureServiceWorker(options: {
+    url: string
+    registerOptions?: RegistrationOptions
+  }): void {
+    this.serviceWorker.configure({
+      url: options.url,
+      options: options.registerOptions,
+    })
   }
 
   private registerKernelProcessWorkerCommands(): void {
@@ -209,28 +214,7 @@ export class Kernel extends Subscription<KernelEvents> {
         }
       }
 
-      const subcommand = _args[0]
-
-      if (subcommand === 'install' || subcommand === 'i') {
-        if (_args.length > 1) {
-          return await this.executeBunAdd(request, _args.slice(1))
-        }
-        return await this.executeBunInstall(request)
-      }
-
-      if (subcommand === 'add') {
-        return await this.executeBunAdd(request, _args.slice(1))
-      }
-
-      if (!this.processWorkerExecutor) {
-        return {
-          exitCode: 1,
-          stdout: '',
-          stderr: 'bun command requires process worker executor\n',
-        }
-      }
-
-      return await this.processWorkerExecutor(request)
+      return await this.bunCommand.execute(_args, request)
     })
   }
 
@@ -262,249 +246,6 @@ export class Kernel extends Subscription<KernelEvents> {
     }
 
     return '/package.json'
-  }
-
-  private async executeBunInstall(
-    request: KernelProcessExecutionRequest,
-  ): Promise<KernelProcessExecutionResult> {
-    const cwd = request.cwd ?? '/'
-    const manifestPath = this.getManifestPath(cwd)
-    const rawManifest = this.readMountedText(manifestPath)
-
-    if (rawManifest === null) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: `bun install requires package.json at ${manifestPath}\n`,
-      }
-    }
-
-    let manifest: {
-      dependencies: Record<string, string>
-      devDependencies?: Record<string, string>
-      optionalDependencies?: Record<string, string>
-      overrides?: Record<string, string>
-    }
-    try {
-      const parsed = JSON.parse(rawManifest) as Record<string, unknown>
-      const dependencies =
-        parsed && typeof parsed.dependencies === 'object' && parsed.dependencies
-          ? (parsed.dependencies as Record<string, string>)
-          : {}
-      const devDependencies =
-        parsed && typeof parsed.devDependencies === 'object' && parsed.devDependencies
-          ? (parsed.devDependencies as Record<string, string>)
-          : undefined
-      const optionalDependencies =
-        parsed && typeof parsed.optionalDependencies === 'object' && parsed.optionalDependencies
-          ? (parsed.optionalDependencies as Record<string, string>)
-          : undefined
-      const overrides =
-        parsed && typeof parsed.overrides === 'object' && parsed.overrides
-          ? (parsed.overrides as Record<string, string>)
-          : undefined
-
-      manifest = { dependencies, devDependencies, optionalDependencies, overrides }
-    } catch (error) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: `Invalid package.json: ${error instanceof Error ? error.message : String(error)}\n`,
-      }
-    }
-
-    try {
-      const hasDependencies = Object.keys(manifest.dependencies ?? {}).length > 0
-      const hasDevDependencies = Object.keys(manifest.devDependencies ?? {}).length > 0
-      const hasOptionalDependencies = Object.keys(manifest.optionalDependencies ?? {}).length > 0
-      if (!hasDependencies && !hasDevDependencies && !hasOptionalDependencies) {
-        const lockfilePath = resolvePath(cwd, 'bun.lock')
-        this.writeMounted(lockfilePath, `${JSON.stringify({ lockfileVersion: 1, packages: {} }, null, 2)}\n`)
-        return {
-          exitCode: 0,
-          stdout: 'Installed 0 packages\n',
-          stderr: '',
-        }
-      }
-
-      const installerCandidates = [
-        '@mars/web-installer',
-      ]
-
-      let installer: {
-        readLockfile(content: string | Uint8Array): unknown
-        installFromManifest(manifest: {
-          dependencies: Record<string, string>
-          optionalDependencies?: Record<string, string>
-          overrides?: Record<string, string>
-        }, options: { lockfile?: unknown; fetchFn?: typeof fetch }): Promise<{
-          lockfile: { packages: Record<string, { name: string; version: string; dependencies?: Record<string, string> }> }
-          layoutPlan: { entries: Array<{ packageKey: string; installPath: string }> }
-        }>
-        writeLockfile(lockfile: unknown): string
-      } | null = null
-
-      for (const candidate of installerCandidates) {
-        try {
-          installer = await import(candidate)
-          break
-        } catch {
-          // Try next candidate.
-        }
-      }
-
-      if (!installer) {
-        throw new Error('Unable to load installer module')
-      }
-
-      const lockfilePath = resolvePath(cwd, 'bun.lock')
-      const existingLockfileContent = this.readMountedText(lockfilePath)
-      const existingLockfile =
-        existingLockfileContent && existingLockfileContent.trim().length > 0
-          ? installer.readLockfile(existingLockfileContent)
-          : undefined
-
-      const result = await installer.installFromManifest({
-        // Installer currently models a single dependency map. We merge dev deps
-        // into root resolution so bun install and bun i cover both buckets.
-        dependencies: {
-          ...(manifest.devDependencies ?? {}),
-          ...(manifest.dependencies ?? {}),
-        },
-        optionalDependencies: manifest.optionalDependencies,
-        overrides: manifest.overrides,
-      }, {
-        lockfile: existingLockfile,
-        fetchFn: globalThis.fetch,
-      })
-
-      this.writeMounted(lockfilePath, installer.writeLockfile(result.lockfile))
-
-      for (const entry of result.layoutPlan.entries) {
-        const lockEntry = result.lockfile.packages[entry.packageKey]
-        if (!lockEntry) continue
-
-        this.writeMounted(
-          `${entry.installPath}/package.json`,
-          `${JSON.stringify(
-            {
-              name: lockEntry.name,
-              version: lockEntry.version,
-              dependencies: lockEntry.dependencies ?? {},
-            },
-            null,
-            2,
-          )}\n`,
-        )
-      }
-
-      return {
-        exitCode: 0,
-        stdout: `Installed ${result.layoutPlan.entries.length} packages\n`,
-        stderr: '',
-      }
-    } catch (error) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: `bun install failed: ${error instanceof Error ? error.message : String(error)}\n`,
-      }
-    }
-  }
-
-  private async executeBunAdd(
-    request: KernelProcessExecutionRequest,
-    packages: string[],
-  ): Promise<KernelProcessExecutionResult> {
-    if (packages.length === 0) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: 'bun add requires at least one package specifier\n',
-      }
-    }
-
-    const parsedOptions = parseBunAddOptions(packages)
-    if ('error' in parsedOptions) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: parsedOptions.error,
-      }
-    }
-
-    if (parsedOptions.packageSpecifiers.length === 0) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: 'bun add requires at least one valid package specifier\n',
-      }
-    }
-
-    const cwd = request.cwd ?? '/'
-    const manifestPath = this.getManifestPath(cwd)
-    const rawManifest = this.readMountedText(manifestPath)
-    if (rawManifest === null) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: `bun add requires package.json at ${manifestPath}\n`,
-      }
-    }
-
-    let parsed: Record<string, unknown>
-    try {
-      parsed = JSON.parse(rawManifest) as Record<string, unknown>
-    } catch (error) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: `Invalid package.json: ${error instanceof Error ? error.message : String(error)}\n`,
-      }
-    }
-
-    const targetDependencies =
-      parsed[parsedOptions.targetField] && typeof parsed[parsedOptions.targetField] === 'object'
-        ? { ...(parsed[parsedOptions.targetField] as Record<string, string>) }
-        : {}
-
-    const added: string[] = []
-    for (const specifier of parsedOptions.packageSpecifiers) {
-      const parsedSpecifier = parsePackageSpecifier(specifier)
-      if (!parsedSpecifier) continue
-      targetDependencies[parsedSpecifier.name] = parsedSpecifier.spec
-      added.push(`${parsedSpecifier.name}@${parsedSpecifier.spec}`)
-    }
-
-    if (added.length === 0) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: 'bun add requires at least one valid package specifier\n',
-      }
-    }
-
-    parsed[parsedOptions.targetField] = targetDependencies
-    this.writeMounted(manifestPath, `${JSON.stringify(parsed, null, 2)}\n`)
-
-    if (!parsedOptions.installAfterAdd) {
-      return {
-        exitCode: 0,
-        stdout: `Added ${added.join(', ')} (no install)\n`,
-        stderr: '',
-      }
-    }
-
-    const installResult = await this.executeBunInstall(request)
-    if (installResult.exitCode !== 0) {
-      return installResult
-    }
-
-    return {
-      exitCode: 0,
-      stdout: `Added ${added.join(', ')}\n${installResult.stdout}`,
-      stderr: '',
-    }
   }
 
   use(plugin: KernelShellCommandHook): void {

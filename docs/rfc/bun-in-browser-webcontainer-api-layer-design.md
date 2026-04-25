@@ -29,6 +29,55 @@
 
 ## 2. 分层调用面
 
+### 2.0 Initializer 驱动启动总线（新增）
+
+目标：将当前“boot 内部条件执行”升级为“可扩展、可观测、可测试”的统一初始化总线。
+
+冻结启动时序（v2）：
+
+1. `BunContainer.boot(options)`
+2. `Kernel.boot(config, vfs)`
+3. `Kernel.initializer.run(context)`
+4. `kernel.serviceWorker.register()`
+5. 发布 `service-worker.register` hook
+6. 容器状态转 `ready`
+
+其中 `Kernel.initializer.run(context)` 至少包含以下阶段：
+
+- wasm 初始化（transpiler/bundler 等）
+- 发布 `boot` hook（插件可扩展）
+- 计算 `serviceWorkerUrl`（默认来自 `@mars/web-sw` 导出）
+- 其他初始化任务（按阶段注册）
+
+建议抽象：
+
+- `@mars/web-runtime` 已有 `ProcessBootstrap` initializer 队列，不建议重复实现。
+- 建议抽离为共享初始化管线抽象（如 `@mars/web-shared` 中 `InitializerPipeline`），`runtime` 与 `kernel` 分别注册各自任务。
+- 约束：仅复用“调度模型与生命周期语义”，不共享运行时私有状态对象。
+
+示例接口（设计草案）：
+
+```ts
+type InitializerContext = {
+  kernel: Kernel
+  options: BunContainerBootOptions
+  hooks: HookRegistry
+  serviceWorkerUrl: string
+}
+
+type InitializerTask = {
+  id: string
+  order?: number
+  shouldRun?: (ctx: InitializerContext) => boolean
+  run: (ctx: InitializerContext) => void | Promise<void>
+}
+
+interface InitializerPipeline {
+  register(task: InitializerTask): () => void
+  run(ctx: InitializerContext): Promise<void>
+}
+```
+
 ### 2.1 Host SDK 层（对齐 WebContainer 风格）
 
 对外入口：@mars/web-client
@@ -50,6 +99,8 @@ Boot 可选参数补充（SW worker 脚本分发）：
 ```ts
 type BunContainerBootOptions = {
   // ...existing fields
+  serviceWorkerUrl?: string
+  serviceWorkerRegisterOptions?: RegistrationOptions
   serviceWorkerScripts?:
     | Map<string, string | {
         source: string
@@ -78,13 +129,30 @@ type BunContainerBootOptions = {
       detectedModuleType: 'esm' | 'cjs'
     }): Promise<{ source: string; contentType?: string }> | { source: string; contentType?: string }
   }
+  // 新增：控制初始化器任务集合
+  initializers?: 'all' | string[]
 }
 ```
+
+Service Worker 注册路径说明：
+
+- 主线程环境下，SDK 会调用 `navigator.serviceWorker.register(serviceWorkerUrl, serviceWorkerRegisterOptions)` 并等待 `navigator.serviceWorker.ready`。
+- 若未提供 `serviceWorkerUrl`，默认使用 `@mars/web-sw` 导出的 `DEFAULT_WEB_SW_SERVICE_WORKER_URL`（当前值 `'/@mars/web-sw/sw.js'`），解析失败时回退到 `'/sw.js'`。
+- 当前实现不会通过 boot 选项注入 `serviceWorkerScope`；该字段已移除。
+- 只有在 Service Worker 全局上下文可用时，才会在该上下文安装 fetch/install/activate 拦截桥接。
+
+新增约束（Kernel 持有 serviceWorker 成员）：
+
+- `kernel.serviceWorker` 为唯一 SW 控制入口，封装 `navigator.serviceWorker`。
+- Host 与插件不得直接绕过该成员调用 `navigator.serviceWorker.*`。
+- 注册成功后必须发布 `service-worker.register` hook。
 
 示例（package CJS 脚本在 SW 转为 ESM 后返回）：
 
 ```ts
 const container = await BunContainer.boot({
+  serviceWorkerUrl: '/sw.js',
+  serviceWorkerRegisterOptions: { scope: '/' },
   serviceWorkerScripts: {
     '/__bun__/worker/pkg.js': {
       source: 'module.exports = 7',
@@ -142,6 +210,21 @@ const container = await BunContainer.boot({
 - Kernel 实例必须持有唯一 command registry；外部命令扩展统一通过 `use(plugin)` 注入。
 - `bun add/install/i` 必须在 kernel 控制面分发；禁止在 SW 与 process-executor worker 中实现包管理语义。
 
+新增能力（ServiceWorkerController）：
+
+- `kernel.serviceWorker.register()`
+- `kernel.serviceWorker.unregister()`
+- `kernel.serviceWorker.getRegistration()`
+- `kernel.serviceWorker.getRegistrations()`
+- `kernel.serviceWorker.postMessageToActive(message, transfer?)`
+
+新增 hook 事件：
+
+- `boot`
+- `service-worker.before-register`
+- `service-worker.register`
+- `service-worker.register.error`
+
 ### 2.3 Service Worker 网络面
 
 对内入口：@mars/web-sw
@@ -156,6 +239,13 @@ const container = await BunContainer.boot({
 - 对内路由仅依赖 Kernel 端口表。
 - SW 重启后通过心跳与重建流程恢复路由状态。
 - SW 仅负责网络路由与 worker 脚本分发，禁止承载 bun CLI 包管理语义。
+
+新增模块请求拦截契约：
+
+- SW 仅拦截“明确命名空间”的模块请求，禁止泛匹配。
+- 建议命名空间：`/__bun__/modules/*`（与虚拟服务路由 `__bun__/:port` 区分）。
+- 非命名空间请求一律透传或按既有虚拟端口路由处理。
+- 命中模块请求后，SW 不直接解析模块，必须通过 `postMessage` 请求 kernel。
 
 ### 2.4 Process 运行面
 
@@ -228,8 +318,46 @@ const container = await BunContainer.boot({
 1. Host 调用 `@mars/web-client` `BunContainer.boot(options)`。
 2. `@mars/web-client` 创建控制面通道（目标态：SharedWorker/ServiceWorker + MessagePort）。
 3. `@mars/web-kernel` `boot()` 初始化进程表、端口表、stdio 总线、SAB bridge。
-4. `@mars/web-runtime` 完成 ProcessBootstrap 初始化队列（transpiler/bundler 可选）。
-5. `@mars/web-client` 接收 ready 信号，容器状态转 `ready`。
+4. `@mars/web-kernel` 运行 InitializerPipeline：wasm 初始化、发布 `boot` hook、计算 `serviceWorkerUrl`、其他任务。
+5. `@mars/web-kernel` 调用 `kernel.serviceWorker.register()` 并发布 `service-worker.register` hook。
+6. `@mars/web-runtime` 完成 ProcessBootstrap 初始化队列（transpiler/bundler 可选）。
+7. `@mars/web-client` 接收 ready 信号，容器状态转 `ready`。
+
+#### A.1 模块请求链路（新增）
+
+1. 页面或 Worker 请求 `'/__bun__/modules/<specifier>'`。
+2. SW `fetch` 命中模块命名空间，构造 `ModuleRequestMessage` 并 `postMessage` 到 kernel。
+3. kernel 解析 specifier、加载模块源码或二进制产物，生成 `ArrayBuffer`。
+4. kernel 回发 `ModuleResponseMessage`（含 contentType/status/headers/buffer）。
+5. SW 将返回数据封装为 `Response` 并回给请求方。
+
+消息协议（草案）：
+
+```ts
+type ModuleRequestMessage = {
+  type: 'MODULE_REQUEST'
+  requestId: string
+  pathname: string
+  method: string
+  headers: Array<[string, string]>
+}
+
+type ModuleResponseMessage = {
+  type: 'MODULE_RESPONSE'
+  requestId: string
+  status: number
+  headers: Array<[string, string]>
+  contentType?: string
+  buffer?: ArrayBuffer
+  error?: string
+}
+```
+
+协议约束：
+
+- `requestId` 必须全局唯一并一一对应。
+- `buffer` 使用 Transferable 传输，避免拷贝。
+- kernel 处理失败必须返回结构化错误，不允许 SW 静默降级。
 
 #### B. Mount 链路（对齐 WebContainer.mount）
 
@@ -359,7 +487,7 @@ class WebServiceWorkerManager {
 }
 
 // 全链路集成入口（订阅 portRegistered 维护 pid→port map，cleanup 解订）
-function installServiceWorkerFromKernel(
+function installKernelServiceWorkerBridge(
   kernel: KernelSwBridge,
   target: ServiceWorkerGlobalLike,
   handlerRegistry: ServeHandlerRegistry,

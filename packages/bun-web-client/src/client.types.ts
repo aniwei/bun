@@ -1,4 +1,4 @@
-import type { KernelProcessExecutor } from '@mars/web-kernel'
+import type { Kernel, KernelModuleRequestHandler, KernelProcessExecutor } from '@mars/web-kernel'
 
 export type BunContainerWorkerScriptDescriptor = {
   source: string
@@ -132,19 +132,18 @@ export interface BunContainerBootOptions {
   scope?: string
   /** 可选执行器注入（用于 runtime 接管 executeProcess） */
   processExecutor?: KernelProcessExecutor
-  /** 是否在 boot 时自动安装 SW ↔ kernel 路由桥（默认 true） */
-  installServiceWorkerFromKernel?: boolean
-  /** 显式指定一个 Service Worker-like scope（便于宿主或测试注入） */
-  serviceWorkerScope?: {
-    addEventListener(type: 'fetch' | 'install' | 'activate', listener: Function): void
-    removeEventListener?(type: 'fetch' | 'install' | 'activate', listener: Function): void
-    skipWaiting?(): Promise<void> | void
-    clients?: { claim?(): Promise<void> | void }
-  }
+  /** 选择执行哪些 kernel 初始化器（默认 'all'） */
+  initializers?: 'all' | string[]
+  /** 主线程注册 Service Worker 的脚本 URL（默认使用 @mars/web-sw 提供的地址，兜底 '/sw.js'） */
+  serviceWorkerUrl?: string
+  /** 主线程注册 Service Worker 时透传给 register() 的选项 */
+  serviceWorkerRegisterOptions?: RegistrationOptions
   /** 覆盖默认的 serve handler 解析器（默认读取 @mars/web-runtime serve registry） */
   serveHandlerRegistry?: {
     getHandler(port: number): ((request: Request) => Promise<Response> | Response) | null
   }
+  /** 模块命名空间请求处理器（对应 /__bun__/modules/*） */
+  moduleRequestHandler?: KernelModuleRequestHandler
   /**
    * 可选：SW 拦截返回的 worker 脚本表（key 必须是绝对 pathname）。
    * 例如："/__bun__/worker/bun-process.js"、"/__bun__/worker/pkg.js"。
@@ -157,6 +156,16 @@ export interface BunContainerBootOptions {
    * 缺省时走原文返回策略，不会自动转译。
    */
   serviceWorkerScriptProcessor?: BunContainerWorkerScriptProcessor
+  /** 插件 hook 回调（由 kernel 在启动阶段发布） */
+  hooks?: {
+    boot?: Array<(payload: { kernel: Kernel; serviceWorkerUrl: string }) => void | Promise<void>>
+    serviceWorkerBeforeRegister?: Array<(
+      payload: { kernel: Kernel; serviceWorkerUrl: string }
+    ) => void | Promise<void>>
+    serviceWorkerRegister?: Array<(
+      payload: { kernel: Kernel; serviceWorkerUrl: string; registered: boolean }
+    ) => void | Promise<void>>
+  }
 }
 
 export type BunContainerOptions = BunContainerBootOptions

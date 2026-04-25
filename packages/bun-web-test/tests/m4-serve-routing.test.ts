@@ -3,6 +3,8 @@ import { Kernel } from '../../../packages/bun-web-kernel/src'
 import { clearServeRegistry, getServeHandler, serve } from '../../../packages/bun-web-runtime/src/serve'
 import {
   createFetchRouter,
+  createModuleMessageHandler,
+  createModuleRequestRouter,
   createKernelDispatcher,
   createKernelPortResolver,
   detectWorkerScriptModuleType,
@@ -10,9 +12,11 @@ import {
   EsbuildWorkerScriptProcessor,
   extractVirtualPort,
   installFetchInterceptor,
-  installServiceWorkerFromKernel,
+  installKernelServiceWorkerBridge,
+  installModuleMessageBridge,
   installServiceWorkerRuntime,
   installWorkerScriptInterceptor,
+  isModuleRequestPath,
   isVirtualBunRequest,
   registerWorkerScript,
   resolveVirtualPid,
@@ -96,6 +100,63 @@ describe('M4 serve + service worker routing', () => {
 
     const response = await router(new Request('http://example.com/'))
     expect(response).toBeNull()
+  })
+
+  test('module request helpers recognize only the module namespace', async () => {
+    expect(isModuleRequestPath('/__bun__/modules/pkg/index.js')).toBe(true)
+    expect(isModuleRequestPath('/__bun__/modules')).toBe(true)
+    expect(isModuleRequestPath('/__bun__/worker/bun-process.js')).toBe(false)
+
+    const router = createModuleRequestRouter({
+      async requestModule(message) {
+        expect(message.type).toBe('MODULE_REQUEST')
+        expect(message.pathname).toBe('/__bun__/modules/pkg/index.js')
+        expect(message.method).toBe('GET')
+
+        return {
+          type: 'MODULE_RESPONSE',
+          requestId: message.requestId,
+          status: 200,
+          headers: [['X-Module', 'yes']],
+          contentType: 'application/javascript',
+          buffer: new TextEncoder().encode('export default 42').buffer,
+        }
+      },
+    })
+
+    const response = await router(new Request('http://localhost/__bun__/modules/pkg/index.js'))
+    expect(response).not.toBeNull()
+    expect(response!.status).toBe(200)
+    expect(response!.headers.get('Content-Type')).toBe('application/javascript')
+    expect(response!.headers.get('X-Module')).toBe('yes')
+    expect(await response!.text()).toBe('export default 42')
+
+    const passthrough = await router(new Request('http://localhost/__bun__/worker/bun-process.js'))
+    expect(passthrough).toBeNull()
+  })
+
+  test('module request router does not overwrite explicit Content-Type header', async () => {
+    const router = createModuleRequestRouter({
+      async requestModule(message) {
+        return {
+          type: 'MODULE_RESPONSE',
+          requestId: message.requestId,
+          status: 200,
+          headers: [
+            ['Content-Type', 'text/plain'],
+            ['X-Source', 'kernel'],
+          ],
+          contentType: 'application/javascript',
+          buffer: new TextEncoder().encode('plain-body').buffer,
+        }
+      },
+    })
+
+    const response = await router(new Request('http://localhost/__bun__/modules/pkg/content-type.js'))
+    expect(response).not.toBeNull()
+    expect(response!.headers.get('Content-Type')).toBe('text/plain')
+    expect(response!.headers.get('X-Source')).toBe('kernel')
+    expect(await response!.text()).toBe('plain-body')
   })
 
   test('fetch router dispatches to matched serve handler', async () => {
@@ -330,7 +391,7 @@ describe('A0-5 SW ↔ kernel integration', () => {
     expect(response.status).toBe(502)
   })
 
-  test('installServiceWorkerFromKernel wires kernel port table to SW routing', async () => {
+  test('installKernelServiceWorkerBridge wires kernel port table to SW routing', async () => {
     await Kernel.shutdown()
     clearServeRegistry()
 
@@ -352,7 +413,7 @@ describe('A0-5 SW ↔ kernel integration', () => {
     }
 
     const registry = { getHandler: (port: number) => getServeHandler(port) }
-    const uninstall = installServiceWorkerFromKernel(kernel, scope, registry)
+    const uninstall = installKernelServiceWorkerBridge(kernel, scope, registry)
 
     let responsePromise: Promise<Response> | null = null
     listeners.get('fetch')![0]({
@@ -369,7 +430,7 @@ describe('A0-5 SW ↔ kernel integration', () => {
     clearServeRegistry()
   })
 
-  test('installServiceWorkerFromKernel tracks portRegistered events for host-style routing', async () => {
+  test('installKernelServiceWorkerBridge tracks portRegistered events for host-style routing', async () => {
     await Kernel.shutdown()
     clearServeRegistry()
 
@@ -386,13 +447,13 @@ describe('A0-5 SW ↔ kernel integration', () => {
       clients: { claim() {} },
     }
 
-    // Register serve handler and then emit portRegistered AFTER installServiceWorkerFromKernel
+    // Register serve handler and then emit portRegistered AFTER installKernelServiceWorkerBridge
     // (simulates runtime registering port after boot)
     const registry = {
       getHandler: (port: number) =>
         port === 4802 ? ((_req: Request) => new Response('from-pid-820')) : null,
     }
-    const uninstall = installServiceWorkerFromKernel(kernel, scope, registry)
+    const uninstall = installKernelServiceWorkerBridge(kernel, scope, registry)
 
     // Simulate runtime calling registerPort which emits portRegistered
     kernel.registerPort(820, 4802)
@@ -412,7 +473,7 @@ describe('A0-5 SW ↔ kernel integration', () => {
     clearServeRegistry()
   })
 
-  test('installServiceWorkerFromKernel cleanup removes portRegistered subscription', async () => {
+  test('installKernelServiceWorkerBridge cleanup removes portRegistered subscription', async () => {
     await Kernel.shutdown()
 
     let listenCount = 0
@@ -430,14 +491,14 @@ describe('A0-5 SW ↔ kernel integration', () => {
     }
     const registry = { getHandler: () => null }
 
-    const uninstall = installServiceWorkerFromKernel(fakeKernel, scope, registry)
+    const uninstall = installKernelServiceWorkerBridge(fakeKernel, scope, registry)
     expect(listenCount).toBe(1)
 
     uninstall()
     expect(listenCount).toBe(0)
   })
 
-  test('installServiceWorkerFromKernel can serve worker script before kernel routing', async () => {
+  test('installKernelServiceWorkerBridge can serve worker script before kernel routing', async () => {
     const listeners = new Map<string, Function[]>()
     const add = (type: string, fn: Function) => {
       listeners.set(type, [...(listeners.get(type) ?? []), fn])
@@ -460,7 +521,7 @@ describe('A0-5 SW ↔ kernel integration', () => {
     const store: WorkerScriptStore = new Map()
     registerWorkerScript(store, '/__bun__/worker/bun-process.js', 'export default 1')
 
-    const uninstall = installServiceWorkerFromKernel(
+    const uninstall = installKernelServiceWorkerBridge(
       kernel,
       scope,
       { getHandler: () => null },
@@ -477,6 +538,128 @@ describe('A0-5 SW ↔ kernel integration', () => {
     expect(res.status).toBe(200)
     expect(await res.text()).toBe('export default 1')
     uninstall()
+  })
+
+  test('installKernelServiceWorkerBridge routes module namespace before kernel virtual routing', async () => {
+    const listeners = new Map<string, Function[]>()
+    const add = (type: string, fn: Function) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), fn])
+    }
+
+    const scope = {
+      addEventListener(type: 'fetch' | 'install' | 'activate', fn: Function) { add(type, fn) },
+      removeEventListener() {},
+      skipWaiting() {},
+      clients: { claim() {} },
+    }
+
+    const kernel = {
+      resolvePort: () => 123,
+      subscribe() {
+        return () => {}
+      },
+    }
+
+    const uninstall = installKernelServiceWorkerBridge(
+      kernel,
+      scope,
+      {
+        getHandler: () => (_req: Request) => new Response('virtual-route-should-not-win'),
+      },
+      {
+        moduleRequestBridge: {
+          async requestModule(message) {
+            return {
+              type: 'MODULE_RESPONSE',
+              requestId: message.requestId,
+              status: 200,
+              headers: [],
+              contentType: 'application/javascript',
+              buffer: new TextEncoder().encode(`module:${message.pathname}`).buffer,
+            }
+          },
+        },
+      },
+    )
+
+    let responsePromise: Promise<Response> | null = null
+    listeners.get('fetch')![0]({
+      request: new Request('http://localhost/__bun__/modules/pkg/index.js'),
+      respondWith(r: Promise<Response> | Response) { responsePromise = Promise.resolve(r) },
+    })
+
+    const response = await responsePromise!
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('module:/__bun__/modules/pkg/index.js')
+
+    uninstall()
+  })
+
+  test('installModuleMessageBridge responds to MODULE_REQUEST via event.source.postMessage', async () => {
+    const listeners = new Map<string, Function[]>()
+    const add = (type: string, fn: Function) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), fn])
+    }
+    const remove = (type: string, fn: Function) => {
+      listeners.set(type, (listeners.get(type) ?? []).filter(entry => entry !== fn))
+    }
+
+    const scope = {
+      addEventListener(type: 'fetch' | 'install' | 'activate' | 'message', fn: Function) {
+        add(type, fn)
+      },
+      removeEventListener(type: 'fetch' | 'install' | 'activate' | 'message', fn: Function) {
+        remove(type, fn)
+      },
+      skipWaiting() {},
+      clients: { claim() {} },
+    }
+
+    let posted: unknown = null
+    let postedTransfer: ArrayBuffer[] | undefined
+    const uninstall = installModuleMessageBridge(scope, {
+      async requestModule(message) {
+        return {
+          type: 'MODULE_RESPONSE',
+          requestId: message.requestId,
+          status: 200,
+          headers: [['X-Bridge', 'sw']],
+          contentType: 'application/javascript',
+          buffer: new TextEncoder().encode('bridge:ok').buffer,
+        }
+      },
+    })
+
+    listeners.get('message')![0]({
+      data: {
+        type: 'MODULE_REQUEST',
+        requestId: 'req-sw-message',
+        pathname: '/__bun__/modules/pkg/bridge.js',
+        method: 'GET',
+        headers: [],
+      },
+      source: {
+        postMessage(message: unknown, transfer?: ArrayBuffer[]) {
+          posted = message
+          postedTransfer = transfer
+        },
+      },
+    })
+
+    await Promise.resolve()
+
+    expect(posted).not.toBeNull()
+    expect((posted as { type: string }).type).toBe('MODULE_RESPONSE')
+    expect((posted as { requestId: string }).requestId).toBe('req-sw-message')
+    expect((posted as { status: number }).status).toBe(200)
+    expect((posted as { headers: Array<[string, string]> }).headers).toEqual([['X-Bridge', 'sw']])
+    expect((posted as { contentType: string }).contentType).toBe('application/javascript')
+    expect(new TextDecoder().decode((posted as { buffer: ArrayBuffer }).buffer)).toBe('bridge:ok')
+    expect(postedTransfer).toHaveLength(1)
+    expect(postedTransfer![0]).toBe((posted as { buffer: ArrayBuffer }).buffer)
+
+    uninstall()
+    expect(listeners.get('message') ?? []).toHaveLength(0)
   })
 })
 

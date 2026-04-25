@@ -112,7 +112,7 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 | A0-5 | packages/bun-web-sw/src/sw.ts | 端口路由与 server-ready 事件透传对齐 | 100% | 已完成 | 已升级为类化管理：`WebServiceWorkerManager` 统一 install/activate/fetch 生命周期，`KernelServiceWorkerBridgeManager` 负责 kernel 端口表接入；路由顺序固定为 worker script -> kernel virtual route -> passthrough fetch。新增脚本处理器链：`detectWorkerScriptModuleType` 判定 package CJS/ESM（扩展名 + package.type），`EsbuildWorkerScriptProcessor` 将 CJS 转为 ESM 后返回执行脚本。职责冻结：SW 仅负责路由与脚本分发，不承载 bun 包管理命令语义。 |
 | A0-6 | packages/bun-web-test/tests/m7-client-sdk.test.ts | 将 stub 假设改为真实链路断言 | 82% | 进行中 | 已新增 `boot(processExecutor)` 注入断言，并将 `server-ready` 用例改为真实链路（`Bun.serve` -> runtime registerPort -> kernel portRegistered -> client 透传），验证 `url/host/port/protocol` 载荷契约；新增 `boot({ workerUrl })` 覆盖断言，锁定默认执行器工厂在脚本 URL 模式下的接线行为 |
 | A0-7 | packages/bun-web-test/tests/m8-example-flow.test.ts | example 链路验证 boot->mount->spawn->server-ready | 92% | 进行中 | `@mars/web-example` 已平台化为可扩展 use-case registry（vite-react-ts/express/koa/fastify/hono/bun-serve-routes），`runBunWebExample` 支持 `useCase` 选择并保持默认兼容；m8 example/ecosystem 定向回归通过（18/18） |
-| A0-8 | docs/rfc/bun-in-browser-webcontainer-api-layer-design.md + docs/rfc/bun-in-browser-module-design.md | 文档与实现同步（调用矩阵、职责、事件契约） | 88% | 进行中 | 已同步类化 SW 管理与脚本处理契约：`WebServiceWorkerManager`、`WorkerScriptProcessor`、`installServiceWorkerFromKernel(..., { workerScripts, scriptProcessor })`，并补充 package CJS/ESM 判定与 CJS->ESM（esbuild）转译约束；职责冻结保持不变：`bun add/install/i` 归 kernel+installer，SW/runtime process-executor 不承载包管理语义。 |
+| A0-8 | docs/rfc/bun-in-browser-webcontainer-api-layer-design.md + docs/rfc/bun-in-browser-module-design.md | 文档与实现同步（调用矩阵、职责、事件契约） | 94% | 进行中 | 已同步类化 SW 管理与脚本处理契约：`WebServiceWorkerManager`、`WorkerScriptProcessor`、SW ↔ kernel 路由桥接能力与 `workerScripts/scriptProcessor` 选项，并补充 package CJS/ESM 判定与 CJS->ESM（esbuild）转译约束；新增 `serviceWorkerUrl/serviceWorkerRegisterOptions` 主线程注册说明（`navigator.serviceWorker.register` + `ready`），并明确不再通过 boot 注入 `serviceWorkerScope`；职责冻结保持不变：`bun add/install/i` 归 kernel+installer，SW/runtime process-executor 不承载包管理语义。 |
 
 ### A0 验收命令（计划）
 
@@ -128,6 +128,88 @@ bunx oxlint "packages/bun-web-*/src/**/*.{ts,tsx}" --fix
 - 缓解：先改测试为“双轨断言”（过渡期允许适配层），再切主路径。
 
 当前进展说明：2026-04-25 本轮继续推进 A0 控制面收敛：`@mars/web-kernel` 的 `executeProcess` 保持“可注入执行器（processExecutor）+ 默认 stub”模式；`@mars/web-runtime` 的 `process-executor` 已在 `Bun.serve` 路径上报端口与元信息（`host/protocol`）；`@mars/web-kernel` 的 `portRegistered` 事件已扩展为 `{ pid, port, host, protocol }` 并在 registerPort 时发布；`@mars/web-client` 已消费该事件并透传为 SDK `server-ready`（URL 由 `${protocol}://${host}:${port}` 生成），不再依赖脚本文本启发式。新增对默认 runtime 执行器接线的稳定性收敛：`@mars/web-client` 显式声明 `@mars/web-runtime` 依赖，并保留源码路径候选以覆盖工作区测试解析；在默认执行器动态加载失败时输出一次性诊断告警（保留注入执行器覆盖能力）。职责分工明确：`runtime.spawn` 当前负责进程句柄/生命周期编排，`executeProcess` 命令执行由 `processExecutor` 负责。本轮将 bun 脚本执行升级为 worker-only（移除 inline fallback，不再主路径直接 await `AsyncFunction`），worker 不可用时返回明确失败语义；同时保持 `process.exit/Bun.exit`、throw=1、unknown=127 契约。进一步完成“脚本拦截”接线：`process-executor.worker.ts` 独立脚本化、SW 新增 `registerWorkerScript/installWorkerScriptInterceptor`，client 默认执行器优先走 `createRuntimeProcessExecutor({ workerUrl })`，并修复显式 `workerUrl` 被缓存吞掉的问题（显式 URL 场景按实例绕过缓存）。新增分层冻结结论：`bun add/install/i` 将接入 kernel 命令控制面并复用 installer，SW 与 runtime process-executor 不承载包管理语义。新增回归与验证：`m7-client-sdk` 22/22、`m4-serve-routing` 26/26、`m1-vfs-bootstrap` 85/85，局部合计 133/133；全量关键回归 `m1+m4+m7+m8` 合计 150/150 通过。
+
+## 1.2 Initializer + ServiceWorker 主动初始化计划（A1-A3）
+
+目标：
+
+- 将 SW 接入从“boot 条件执行”改为“Initializer 主动初始化流程”。
+- 由 kernel 持有 `serviceWorker` 成员，统一封装 `navigator.serviceWorker`。
+- 将模块请求拦截与 `postMessage` 往返协议稳定化并纳入回归。
+
+### A1 Stage Gate
+
+| 确认项 | 说明 | 当前状态 |
+| --- | --- | --- |
+| 目标与范围确认 | 只改初始化流程与协议，不改 installer 语义 | [ ] 待确认 |
+| 文件级任务确认 | A1-1 ~ A1-5 任务与文件已冻结 | [ ] 待确认 |
+| 依赖确认 | A0 控制面可用，SW 路由基线可用 | [ ] 待确认 |
+| 测试确认 | m7 + 新增 m4 模块拦截用例纳入门禁 | [ ] 待确认 |
+| 启动决策 | 允许进入 A1 实施 | [ ] 待确认 |
+
+### A1 TODO List（初始化器抽象）
+
+| ID | 文件 | 功能 | 完成度 | 状态 | 验收标准 |
+| --- | --- | --- | --- | --- | --- |
+| A1-1 | packages/bun-web-shared/src/initializer-pipeline.ts（建议新增） | 抽象通用 InitializerPipeline（register/run/ordered execution） | 0% | 未开始 | 支持 `id/order/shouldRun` 与按选项选择执行 |
+| A1-2 | packages/bun-web-runtime/src/process-bootstrap.ts | 复用共享调度抽象，保持 runtime 任务语义不变 | 0% | 未开始 | 现有 `runtime-transpiler-init/runtime-bundler-init` 用例全通过 |
+| A1-3 | packages/bun-web-kernel/src/kernel-initializer.ts（建议新增） | 新增 KernelInitializer，封装 wasm init、boot hook、sw url 计算 | 0% | 未开始 | `Kernel.boot -> initializer.run` 时序可观测且可测试 |
+| A1-4 | packages/bun-web-client/src/api.ts | `BunContainer.boot` 切换到新时序并透传 `initializers` 选项 | 0% | 未开始 | 不传选项走默认全量流程，兼容旧行为 |
+| A1-5 | packages/bun-web-test/tests/m7-client-sdk.test.ts | 新增启动时序断言（initializer before sw register） | 0% | 未开始 | 至少 1 条严格顺序断言通过 |
+
+### A2 Stage Gate
+
+| 确认项 | 说明 | 当前状态 |
+| --- | --- | --- |
+| 目标与范围确认 | 只引入 kernel.serviceWorker 封装与 hook 发布 | [ ] 待确认 |
+| 文件级任务确认 | A2-1 ~ A2-4 文件与接口冻结 | [ ] 待确认 |
+| 依赖确认 | A1 pipeline 可用 | [ ] 待确认 |
+| 测试确认 | m7 新增 hook/register/unregister 测试 | [ ] 待确认 |
+| 启动决策 | 允许进入 A2 实施 | [ ] 待确认 |
+
+### A2 TODO List（kernel.serviceWorker 封装）
+
+| ID | 文件 | 功能 | 完成度 | 状态 | 验收标准 |
+| --- | --- | --- | --- | --- | --- |
+| A2-1 | packages/bun-web-kernel/src/service-worker-controller.ts（建议新增） | 封装 `register/unregister/getRegistration/getRegistrations/postMessageToActive` | 0% | 未开始 | 在无 `navigator.serviceWorker` 环境下稳定降级 |
+| A2-2 | packages/bun-web-kernel/src/kernel.ts | 挂载 `kernel.serviceWorker` 成员并接入 Initializer | 0% | 未开始 | `Kernel.boot` 后可访问 controller |
+| A2-3 | packages/bun-web-kernel/src/kernel.hooks.ts（建议新增） | 发布 `boot/service-worker.before-register/service-worker.register` | 0% | 未开始 | hook 抛错不阻断主流程，错误可观测 |
+| A2-4 | packages/bun-web-test/tests/m7-client-sdk.test.ts | 注册流程与 hook 触发顺序测试 | 0% | 未开始 | 顺序断言 + 错误路径断言通过 |
+
+### A3 Stage Gate
+
+| 确认项 | 说明 | 当前状态 |
+| --- | --- | --- |
+| 目标与范围确认 | 仅实现模块命名空间拦截 + postMessage 协议 | [ ] 待确认 |
+| 文件级任务确认 | A3-1 ~ A3-5 文件与协议字段冻结 | [ ] 待确认 |
+| 依赖确认 | A2 serviceWorker controller 可用 | [ ] 待确认 |
+| 测试确认 | m4/m7 增加模块请求往返与错误语义测试 | [ ] 待确认 |
+| 启动决策 | 允许进入 A3 实施 | [ ] 待确认 |
+
+### A3 TODO List（模块拦截与 postMessage 协议）
+
+| ID | 文件 | 功能 | 完成度 | 状态 | 验收标准 |
+| --- | --- | --- | --- | --- | --- |
+| A3-1 | packages/bun-web-sw/src/sw.ts | 新增 `ModuleRequestInterceptor`，仅拦截 `/__bun__/modules/*` | 0% | 未开始 | 非命名空间请求不受影响 |
+| A3-2 | packages/bun-web-kernel/src/module-request-handler.ts（建议新增） | 处理 `MODULE_REQUEST` 并返回 `MODULE_RESPONSE`（buffer transferable） | 0% | 未开始 | 正常/错误路径均返回稳定结构 |
+| A3-3 | packages/bun-web-kernel/src/service-worker-controller.ts | 增加 postMessage request-response 相关辅助方法 | 0% | 未开始 | `requestId` 关联与超时回收可测 |
+| A3-4 | packages/bun-web-test/tests/m4-serve-routing.test.ts | 覆盖模块命名空间拦截与透传互斥 | 0% | 未开始 | 命中模块路由与普通路由互不污染 |
+| A3-5 | packages/bun-web-test/tests/m7-client-sdk.test.ts | 覆盖模块 buffer 返回、headers/status 语义 | 0% | 未开始 | buffer 内容与响应头断言通过 |
+
+### A1-A3 验收命令（计划）
+
+- `bunx --bun vitest run --config packages/bun-web-test/vitest.config.ts packages/bun-web-test/tests/m7-client-sdk.test.ts`
+- `bunx --bun vitest run --config packages/bun-web-test/vitest.config.ts packages/bun-web-test/tests/m4-serve-routing.test.ts`
+- `bunx --bun vitest run --config packages/bun-web-test/vitest.config.ts packages/bun-web-test/tests/m1-vfs-bootstrap.test.ts`
+
+### A1-A3 风险与缓解
+
+- 风险：initializer 抽象破坏 runtime 既有任务行为。
+  缓解：先适配层迁移，再逐步替换；保留原任务 id 与顺序测试。
+- 风险：`kernel.serviceWorker` 与主线程环境耦合导致 worker 环境报错。
+  缓解：controller 做能力探测，缺失时返回 no-op/结构化错误。
+- 风险：模块拦截规则与现有虚拟路由冲突。
+  缓解：固定命名空间优先级与匹配顺序，新增互斥测试锁定。
 ---
 
 ## 2. 总体完成度看板

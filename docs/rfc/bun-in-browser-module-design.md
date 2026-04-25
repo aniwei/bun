@@ -169,6 +169,107 @@ throw new MarsWebUnsupportedError('Bun.udpSocket', {
 | `@mars/web-installer` | 安装器（metadata/tarball/lockfile/layout） | host/cli/kernel | vfs/resolver | M3 |
 | `@mars/web-proxy-server` | 可选代理服务层 | preview/外部请求 | sw/runtime 旁路协作 | M4（可选） |
 
+## Initializer 与 ServiceWorker 新增模块契约（2026-04-26）
+
+### 1) `@mars/web-shared`：InitializerPipeline（建议新增）
+
+职责：
+
+- 提供通用初始化任务队列（注册、排序、执行、可选选择执行）。
+- 提供统一错误模型与任务可观测（task id、耗时、成功/失败）。
+
+边界：
+
+- 不持有 kernel/runtime 私有状态。
+- 不直接访问浏览器 API（如 `navigator.serviceWorker`）。
+
+建议 API：
+
+```ts
+export interface InitializerPipeline<TContext> {
+  register(task: {
+    id: string
+    order?: number
+    shouldRun?: (ctx: TContext) => boolean
+    run: (ctx: TContext) => void | Promise<void>
+  }): () => void
+  run(ctx: TContext, selected?: 'all' | string[]): Promise<void>
+}
+```
+
+### 2) `@mars/web-kernel`：KernelInitializer + ServiceWorkerController
+
+职责：
+
+- 在 `Kernel.boot` 后执行业务初始化任务（wasm、hooks、url 计算等）。
+- 持有 `kernel.serviceWorker` 成员，封装 `navigator.serviceWorker`。
+- 统一发布 hook：`boot`、`service-worker.before-register`、`service-worker.register`。
+
+边界：
+
+- 不在 kernel 内部实现 SW fetch 逻辑。
+- 不在 SW/runtime 中复制 boot hook 语义。
+
+建议 API：
+
+```ts
+export interface KernelServiceWorkerController {
+  register(): Promise<ServiceWorkerRegistration | null>
+  unregister(): Promise<boolean>
+  getRegistration(): Promise<ServiceWorkerRegistration | null>
+  getRegistrations(): Promise<ServiceWorkerRegistration[]>
+  postMessageToActive(message: unknown, transfer?: Transferable[]): boolean
+}
+```
+
+### 3) `@mars/web-sw`：ModuleRequestInterceptor（建议新增）
+
+职责：
+
+- 仅拦截模块命名空间请求：`/__bun__/modules/*`。
+- 将请求信息通过 `postMessage` 发给 kernel，等待响应后组装 `Response`。
+
+边界：
+
+- 不解析模块语义，不做包管理。
+- 不拦截非模块命名空间请求。
+
+建议 API：
+
+```ts
+export type ModuleRequestBridge = {
+  requestModule(message: {
+    requestId: string
+    pathname: string
+    method: string
+    headers: Array<[string, string]>
+  }): Promise<{
+    status: number
+    headers: Array<[string, string]>
+    contentType?: string
+    buffer?: ArrayBuffer
+    error?: string
+  }>
+}
+
+export function createModuleRequestRouter(
+  bridge: ModuleRequestBridge,
+): (request: Request) => Promise<Response | null>
+```
+
+### 4) `@mars/web-runtime`：保留 ProcessBootstrap Initializer，抽象调度层
+
+结论：
+
+- `web-runtime` 现有 `ProcessBootstrap.registerInitializer(...)` 保持不变。
+- 抽象“任务调度模型”到共享层，runtime 与 kernel 各自绑定上下文。
+- 禁止把 runtime 的进程上下文对象直接复用到 kernel 初始化链。
+
+迁移原则：
+
+- 先抽象接口，再替换实现。
+- 迁移期间保持 `runtime-transpiler-init` 与 `runtime-bundler-init` 任务 id 不变，避免测试抖动。
+
 ## 模块设计计划更新（2026-04-25）
 
 ### 目标
@@ -2143,6 +2244,8 @@ export interface BunContainerOptions {
   id?: string;
   workerUrl?: string;
   scope?: string;
+  serviceWorkerUrl?: string; // 主线程 register() 的 SW 脚本 URL，默认 '/@mars/web-sw/sw.js'（兜底 '/sw.js'）
+  serviceWorkerRegisterOptions?: RegistrationOptions; // 透传给 navigator.serviceWorker.register
 }
 
 export class BunContainer {
@@ -2187,6 +2290,13 @@ export interface ContainerProcess {
   input: WritableStream<Uint8Array>;
   write(data: string | Uint8Array): void;
 }
+
+Service Worker 注册约束：
+
+- `serviceWorkerUrl` 指向可被浏览器访问到的 Service Worker 脚本地址（同源）。
+- 未显式提供 `serviceWorkerUrl` 时，默认使用 `@mars/web-sw` 导出的 `DEFAULT_WEB_SW_SERVICE_WORKER_URL`（当前值 `'/@mars/web-sw/sw.js'`），并在解析失败时回退到 `'/sw.js'`。
+- SDK 在主线程调用 `navigator.serviceWorker.register(serviceWorkerUrl, serviceWorkerRegisterOptions)` 并等待 `ready`。
+- SDK 不再支持通过 boot 参数注入 `serviceWorkerScope`；SW 拦截桥仅在真实 Service Worker 全局上下文安装。
 
 // preview-manager.ts
 export class PreviewManager {

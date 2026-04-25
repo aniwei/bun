@@ -14,7 +14,40 @@
 
 import { describe, it, expect } from 'vitest'
 import { BunContainer, PreviewManager } from '@mars/web-client'
+import { Kernel } from '@mars/web-kernel'
 import type { ServerReadyEvent } from '@mars/web-client'
+
+function installMockServiceWorkerGlobalScope() {
+  const listeners = new Map<string, Function[]>()
+  const target = globalThis as Record<string, unknown>
+
+  const original = {
+    addEventListener: target.addEventListener,
+    removeEventListener: target.removeEventListener,
+    skipWaiting: target.skipWaiting,
+    clients: target.clients,
+  }
+
+  target.addEventListener = ((type: string, listener: Function) => {
+    listeners.set(type, [...(listeners.get(type) ?? []), listener])
+  }) as unknown
+
+  target.removeEventListener = ((type: string, listener: Function) => {
+    listeners.set(type, (listeners.get(type) ?? []).filter(item => item !== listener))
+  }) as unknown
+
+  target.skipWaiting = (() => {}) as unknown
+  target.clients = { claim() {} }
+
+  const restore = () => {
+    target.addEventListener = original.addEventListener
+    target.removeEventListener = original.removeEventListener
+    target.skipWaiting = original.skipWaiting
+    target.clients = original.clients
+  }
+
+  return { listeners, restore }
+}
 
 // ── BunContainer – 生命周期 ───────────────────────────────────────────────────
 
@@ -45,320 +78,866 @@ describe('BunContainer – lifecycle', () => {
     await expect(container.mount({ '/x.ts': 'x' })).rejects.toThrow('disposed')
   })
 
-  it('boot() wires service-worker bridge when scope is provided and cleans up on shutdown', async () => {
-    const listeners = new Map<string, Function[]>()
-    const addListener = (type: string, listener: Function) => {
-      listeners.set(type, [...(listeners.get(type) ?? []), listener])
-    }
-    const removeListener = (type: string, listener: Function) => {
-      listeners.set(type, (listeners.get(type) ?? []).filter(item => item !== listener))
-    }
+  it('boot() wires service-worker bridge when running in service worker scope and cleans up on shutdown', async () => {
+    const { listeners, restore } = installMockServiceWorkerGlobalScope()
 
-    const container = await BunContainer.boot({
-      installServiceWorkerFromKernel: true,
-      serviceWorkerScope: {
-        addEventListener(type: 'fetch' | 'install' | 'activate', listener: Function) {
-          addListener(type, listener)
+    try {
+      const container = await BunContainer.boot({
+        serveHandlerRegistry: {
+          getHandler: () => null,
         },
-        removeEventListener(type: 'fetch' | 'install' | 'activate', listener: Function) {
-          removeListener(type, listener)
-        },
-        skipWaiting() {},
-        clients: { claim() {} },
-      },
-      serveHandlerRegistry: {
-        getHandler: () => null,
-      },
-    })
+      })
 
-    expect((listeners.get('fetch') ?? []).length).toBeGreaterThan(0)
-    expect((listeners.get('install') ?? []).length).toBeGreaterThan(0)
-    expect((listeners.get('activate') ?? []).length).toBeGreaterThan(0)
+      expect((listeners.get('fetch') ?? []).length).toBeGreaterThan(0)
+      expect((listeners.get('install') ?? []).length).toBeGreaterThan(0)
+      expect((listeners.get('activate') ?? []).length).toBeGreaterThan(0)
 
-    await container.shutdown()
+      await container.shutdown()
 
-    expect(listeners.get('fetch') ?? []).toHaveLength(0)
-    expect(listeners.get('install') ?? []).toHaveLength(0)
-    expect(listeners.get('activate') ?? []).toHaveLength(0)
+      expect(listeners.get('fetch') ?? []).toHaveLength(0)
+      expect(listeners.get('install') ?? []).toHaveLength(0)
+      expect(listeners.get('activate') ?? []).toHaveLength(0)
+    } finally {
+      restore()
+    }
   })
 
-  it('boot() does not install service-worker bridge when installServiceWorkerFromKernel is false', async () => {
-    const listeners = new Map<string, Function[]>()
+  it('boot() registers service worker from main thread when serviceWorkerUrl is provided', async () => {
+    const originalNavigator = globalThis.navigator
+    const originalWindow = (globalThis as Record<string, unknown>).window
+    const originalSkipWaiting = (globalThis as Record<string, unknown>).skipWaiting
+    const originalClients = (globalThis as Record<string, unknown>).clients
+    const registerCalls: Array<{ url: string; options?: RegistrationOptions }> = []
 
-    const container = await BunContainer.boot({
-      installServiceWorkerFromKernel: false,
-      serviceWorkerScope: {
-        addEventListener(type: 'fetch' | 'install' | 'activate', listener: Function) {
-          listeners.set(type, [...(listeners.get(type) ?? []), listener])
+    Object.defineProperty(globalThis, 'window', {
+      value: {},
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'skipWaiting', {
+      value: undefined,
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'clients', {
+      value: undefined,
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        serviceWorker: {
+          register: async (url: string, options?: RegistrationOptions) => {
+            registerCalls.push({ url, options })
+            return {} as ServiceWorkerRegistration
+          },
+          ready: Promise.resolve({} as ServiceWorkerRegistration),
         },
-        removeEventListener() {},
-        skipWaiting() {},
-        clients: { claim() {} },
       },
-      serveHandlerRegistry: {
-        getHandler: () => null,
+      configurable: true,
+    })
+
+    try {
+      const container = await BunContainer.boot({
+        serviceWorkerUrl: '/sw.js',
+        serviceWorkerRegisterOptions: { scope: '/' },
+      })
+
+      expect(registerCalls).toHaveLength(1)
+      expect(registerCalls[0]?.url).toBe('/sw.js')
+      expect(registerCalls[0]?.options).toEqual({ scope: '/' })
+
+      await container.shutdown()
+    } finally {
+      Object.defineProperty(globalThis, 'window', {
+        value: originalWindow,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'skipWaiting', {
+        value: originalSkipWaiting,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'clients', {
+        value: originalClients,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+      })
+    }
+  })
+
+  it('boot() runs boot, before-register, register, and register-hook in order', async () => {
+    const originalNavigator = globalThis.navigator
+    const originalWindow = (globalThis as Record<string, unknown>).window
+    const originalSkipWaiting = (globalThis as Record<string, unknown>).skipWaiting
+    const originalClients = (globalThis as Record<string, unknown>).clients
+    const order: string[] = []
+
+    Object.defineProperty(globalThis, 'window', {
+      value: {},
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'skipWaiting', {
+      value: undefined,
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'clients', {
+      value: undefined,
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        serviceWorker: {
+          register: async (_url: string, _options?: RegistrationOptions) => {
+            order.push('register-call')
+            return {} as ServiceWorkerRegistration
+          },
+          ready: Promise.resolve({} as ServiceWorkerRegistration),
+        },
+      },
+      configurable: true,
+    })
+
+    try {
+      const container = await BunContainer.boot({
+        serviceWorkerUrl: '/sw.js',
+        hooks: {
+          boot: [() => order.push('boot-hook')],
+          serviceWorkerBeforeRegister: [() => order.push('sw-before-register-hook')],
+          serviceWorkerRegister: [() => order.push('sw-register-hook')],
+        },
+      })
+
+      expect(order).toEqual([
+        'boot-hook',
+        'sw-before-register-hook',
+        'register-call',
+        'sw-register-hook',
+      ])
+
+      await container.shutdown()
+    } finally {
+      Object.defineProperty(globalThis, 'window', {
+        value: originalWindow,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'skipWaiting', {
+        value: originalSkipWaiting,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'clients', {
+        value: originalClients,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+      })
+    }
+  })
+
+  it('boot() exposes kernel.serviceWorker controller', async () => {
+    const container = await BunContainer.boot()
+
+    expect(Kernel.instance.serviceWorker).toBeDefined()
+    expect(typeof Kernel.instance.serviceWorker.register).toBe('function')
+    expect(typeof Kernel.instance.serviceWorker.unregister).toBe('function')
+
+    await container.shutdown()
+  })
+
+  it('boot() routes module namespace requests through kernel moduleRequestHandler', async () => {
+    const { listeners, restore } = installMockServiceWorkerGlobalScope()
+
+    try {
+      const container = await BunContainer.boot({
+        serveHandlerRegistry: {
+          getHandler: () => null,
+        },
+        moduleRequestHandler: async request => ({
+          requestId: request.requestId,
+          status: 200,
+          headers: [['X-Module-Path', request.pathname]],
+          contentType: 'application/javascript',
+          buffer: new TextEncoder().encode('export const answer = 42').buffer,
+        }),
+      })
+
+      let responsePromise: Promise<Response> | null = null
+      listeners.get('fetch')![0]({
+        request: new Request('http://localhost/__bun__/modules/pkg/index.js'),
+        respondWith(response: Promise<Response> | Response) {
+          responsePromise = Promise.resolve(response)
+        },
+      })
+
+      const response = await responsePromise!
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Content-Type')).toBe('application/javascript')
+      expect(response.headers.get('X-Module-Path')).toBe('/__bun__/modules/pkg/index.js')
+      expect(await response.text()).toBe('export const answer = 42')
+
+      await container.shutdown()
+    } finally {
+      restore()
+    }
+  })
+
+  it('kernel.serviceWorker module request bridge preserves requestId and wraps handler errors', async () => {
+    const container = await BunContainer.boot({
+      moduleRequestHandler: async request => {
+        if (request.pathname.endsWith('/fail.js')) {
+          throw new Error('module boom')
+        }
+
+        return {
+          requestId: request.requestId,
+          status: 200,
+          headers: [],
+          contentType: 'application/javascript',
+          buffer: new TextEncoder().encode(`ok:${request.pathname}`).buffer,
+        }
       },
     })
 
-    expect(listeners.get('fetch') ?? []).toHaveLength(0)
-    expect(listeners.get('install') ?? []).toHaveLength(0)
-    expect(listeners.get('activate') ?? []).toHaveLength(0)
+    const bridge = Kernel.instance.serviceWorker.createModuleRequestBridge({ timeoutMs: 100 })
+
+    const ok = await bridge.requestModule({
+      type: 'MODULE_REQUEST',
+      requestId: 'req-ok',
+      pathname: '/__bun__/modules/pkg/ok.js',
+      method: 'GET',
+      headers: [],
+    })
+
+    expect(ok.type).toBe('MODULE_RESPONSE')
+    expect(ok.requestId).toBe('req-ok')
+    expect(ok.status).toBe(200)
+    expect(new TextDecoder().decode(ok.buffer!)).toBe('ok:/__bun__/modules/pkg/ok.js')
+
+    const failure = await bridge.requestModule({
+      type: 'MODULE_REQUEST',
+      requestId: 'req-fail',
+      pathname: '/__bun__/modules/pkg/fail.js',
+      method: 'GET',
+      headers: [],
+    })
+
+    expect(failure.type).toBe('MODULE_RESPONSE')
+    expect(failure.requestId).toBe('req-fail')
+    expect(failure.status).toBe(500)
+    expect(failure.error).toContain('module boom')
 
     await container.shutdown()
+  })
+
+  it('kernel.serviceWorker module request bridge resolves through configured transport', async () => {
+    const container = await BunContainer.boot()
+    const controller = Kernel.instance.serviceWorker
+
+    controller.configureModuleRequestTransport({
+      send(message) {
+        queueMicrotask(() => {
+          controller.receiveModuleResponse({
+            type: 'MODULE_RESPONSE',
+            requestId: message.requestId,
+            status: 200,
+            headers: [['X-Transport', 'yes']],
+            contentType: 'application/javascript',
+            buffer: new TextEncoder().encode(`transport:${message.pathname}`).buffer,
+          })
+        })
+      },
+    })
+
+    const bridge = controller.createModuleRequestBridge({ timeoutMs: 100 })
+    const response = await bridge.requestModule({
+      type: 'MODULE_REQUEST',
+      requestId: 'req-transport',
+      pathname: '/__bun__/modules/pkg/transport.js',
+      method: 'GET',
+      headers: [],
+    })
+
+    expect(response.requestId).toBe('req-transport')
+    expect(response.status).toBe(200)
+    expect(response.headers).toEqual([['X-Transport', 'yes']])
+    expect(new TextDecoder().decode(response.buffer!)).toBe('transport:/__bun__/modules/pkg/transport.js')
+
+    controller.configureModuleRequestTransport(null)
+    await container.shutdown()
+  })
+
+  it('kernel.serviceWorker module message listener handles MODULE_RESPONSE payloads', async () => {
+    const container = await BunContainer.boot()
+    const controller = Kernel.instance.serviceWorker
+    const listener = controller.createModuleMessageListener()
+
+    controller.configureModuleRequestTransport({
+      send(message) {
+        queueMicrotask(() => {
+          listener({
+            data: {
+              type: 'MODULE_RESPONSE',
+              requestId: message.requestId,
+              status: 200,
+              headers: [],
+              contentType: 'application/javascript',
+              buffer: new TextEncoder().encode('listener:ok').buffer,
+            },
+          })
+        })
+      },
+    })
+
+    const bridge = controller.createModuleRequestBridge({ timeoutMs: 100 })
+    const response = await bridge.requestModule({
+      type: 'MODULE_REQUEST',
+      requestId: 'req-listener',
+      pathname: '/__bun__/modules/pkg/listener.js',
+      method: 'GET',
+      headers: [],
+    })
+
+    expect(response.requestId).toBe('req-listener')
+    expect(new TextDecoder().decode(response.buffer!)).toBe('listener:ok')
+
+    controller.configureModuleRequestTransport(null)
+    await container.shutdown()
+  })
+
+  it('kernel.serviceWorker module request bridge falls back to postMessageToActive transport', async () => {
+    const originalNavigator = globalThis.navigator
+    const posted: unknown[] = []
+
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        serviceWorker: {
+          controller: {
+            postMessage(message: unknown) {
+              posted.push(message)
+              queueMicrotask(() => {
+                Kernel.instance.serviceWorker.receiveModuleResponse({
+                  type: 'MODULE_RESPONSE',
+                  requestId: (message as { requestId: string }).requestId,
+                  status: 200,
+                  headers: [],
+                  contentType: 'application/javascript',
+                  buffer: new TextEncoder().encode('postmessage:ok').buffer,
+                })
+              })
+            },
+          },
+        },
+      },
+      configurable: true,
+    })
+
+    try {
+      const container = await BunContainer.boot()
+      const bridge = Kernel.instance.serviceWorker.createModuleRequestBridge({ timeoutMs: 100 })
+
+      const response = await bridge.requestModule({
+        type: 'MODULE_REQUEST',
+        requestId: 'req-postmessage',
+        pathname: '/__bun__/modules/pkg/postmessage.js',
+        method: 'GET',
+        headers: [['X-Test', '1']],
+      })
+
+      expect(posted).toHaveLength(1)
+      expect((posted[0] as { type: string }).type).toBe('MODULE_REQUEST')
+      expect(response.requestId).toBe('req-postmessage')
+      expect(new TextDecoder().decode(response.buffer!)).toBe('postmessage:ok')
+
+      await container.shutdown()
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+      })
+    }
+  })
+
+  it('kernel.serviceWorker module request bridge rejects when no active controller is available', async () => {
+    const originalNavigator = globalThis.navigator
+
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        serviceWorker: {
+          controller: null,
+        },
+      },
+      configurable: true,
+    })
+
+    try {
+      const container = await BunContainer.boot()
+      const bridge = Kernel.instance.serviceWorker.createModuleRequestBridge({ timeoutMs: 100 })
+
+      await expect(
+        bridge.requestModule({
+          type: 'MODULE_REQUEST',
+          requestId: 'req-no-controller',
+          pathname: '/__bun__/modules/pkg/no-controller.js',
+          method: 'GET',
+          headers: [],
+        }),
+      ).rejects.toThrow('No active service worker controller available for module request transport')
+
+      await container.shutdown()
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+      })
+    }
+  })
+
+  it('kernel.serviceWorker module request bridge rejects duplicate in-flight request ids', async () => {
+    const container = await BunContainer.boot()
+    const controller = Kernel.instance.serviceWorker
+
+    controller.configureModuleRequestTransport({
+      send() {
+        return new Promise(() => {})
+      },
+    })
+
+    const bridge = controller.createModuleRequestBridge({ timeoutMs: 1000 })
+    const first = bridge.requestModule({
+      type: 'MODULE_REQUEST',
+      requestId: 'req-duplicate',
+      pathname: '/__bun__/modules/pkg/first.js',
+      method: 'GET',
+      headers: [],
+    })
+
+    await expect(
+      bridge.requestModule({
+        type: 'MODULE_REQUEST',
+        requestId: 'req-duplicate',
+        pathname: '/__bun__/modules/pkg/second.js',
+        method: 'GET',
+        headers: [],
+      }),
+    ).rejects.toThrow('Duplicate module request id: req-duplicate')
+
+    controller.receiveModuleResponse({
+      type: 'MODULE_RESPONSE',
+      requestId: 'req-duplicate',
+      status: 200,
+      headers: [],
+    })
+    await first
+
+    controller.configureModuleRequestTransport(null)
+    await container.shutdown()
+  })
+
+  it('kernel.serviceWorker module request bridge rejects on transport timeout', async () => {
+    const container = await BunContainer.boot()
+    const controller = Kernel.instance.serviceWorker
+
+    controller.configureModuleRequestTransport({
+      send() {
+        return new Promise(() => {})
+      },
+    })
+
+    const bridge = controller.createModuleRequestBridge({ timeoutMs: 10 })
+
+    await expect(
+      bridge.requestModule({
+        type: 'MODULE_REQUEST',
+        requestId: 'req-timeout',
+        pathname: '/__bun__/modules/pkg/timeout.js',
+        method: 'GET',
+        headers: [],
+      }),
+    ).rejects.toThrow('Module request timed out: /__bun__/modules/pkg/timeout.js')
+
+    controller.configureModuleRequestTransport(null)
+    await container.shutdown()
+  })
+
+  it('kernel shutdown rejects pending module requests immediately', async () => {
+    const container = await BunContainer.boot()
+    const controller = Kernel.instance.serviceWorker
+
+    controller.configureModuleRequestTransport({
+      send() {
+        return new Promise(() => {})
+      },
+    })
+
+    const bridge = controller.createModuleRequestBridge({ timeoutMs: 1000 })
+    const pending = bridge.requestModule({
+      type: 'MODULE_REQUEST',
+      requestId: 'req-shutdown-pending',
+      pathname: '/__bun__/modules/pkg/pending.js',
+      method: 'GET',
+      headers: [],
+    })
+
+    await container.shutdown()
+
+    await expect(pending).rejects.toThrow('Kernel service worker controller disposed')
+  })
+
+  it('boot() installs and removes navigator.serviceWorker message listener on main thread', async () => {
+    const originalNavigator = globalThis.navigator
+    const originalWindow = (globalThis as Record<string, unknown>).window
+    const originalSkipWaiting = (globalThis as Record<string, unknown>).skipWaiting
+    const originalClients = (globalThis as Record<string, unknown>).clients
+    const listeners = new Map<string, Function[]>()
+
+    Object.defineProperty(globalThis, 'window', {
+      value: {},
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'skipWaiting', {
+      value: undefined,
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'clients', {
+      value: undefined,
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        serviceWorker: {
+          addEventListener(type: string, listener: Function) {
+            listeners.set(type, [...(listeners.get(type) ?? []), listener])
+          },
+          removeEventListener(type: string, listener: Function) {
+            listeners.set(type, (listeners.get(type) ?? []).filter(item => item !== listener))
+          },
+          controller: {
+            postMessage() {},
+          },
+          register: async () => ({} as ServiceWorkerRegistration),
+          ready: Promise.resolve({} as ServiceWorkerRegistration),
+        },
+      },
+      configurable: true,
+    })
+
+    try {
+      const container = await BunContainer.boot({
+        moduleRequestHandler: async request => ({
+          requestId: request.requestId,
+          status: 200,
+          headers: [],
+        }),
+      })
+
+      expect((listeners.get('message') ?? []).length).toBe(1)
+
+      await container.shutdown()
+
+      expect(listeners.get('message') ?? []).toHaveLength(0)
+    } finally {
+      Object.defineProperty(globalThis, 'window', {
+        value: originalWindow,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'skipWaiting', {
+        value: originalSkipWaiting,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'clients', {
+        value: originalClients,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+      })
+    }
+  })
+
+  it('boot() registers service worker with web-sw package default URL when serviceWorkerUrl is not provided', async () => {
+    const originalNavigator = globalThis.navigator
+    const originalWindow = (globalThis as Record<string, unknown>).window
+    const originalSkipWaiting = (globalThis as Record<string, unknown>).skipWaiting
+    const originalClients = (globalThis as Record<string, unknown>).clients
+    const registerCalls: Array<{ url: string; options?: RegistrationOptions }> = []
+
+    Object.defineProperty(globalThis, 'window', {
+      value: {},
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'skipWaiting', {
+      value: undefined,
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'clients', {
+      value: undefined,
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        serviceWorker: {
+          register: async (url: string, options?: RegistrationOptions) => {
+            registerCalls.push({ url, options })
+            return {} as ServiceWorkerRegistration
+          },
+          ready: Promise.resolve({} as ServiceWorkerRegistration),
+        },
+      },
+      configurable: true,
+    })
+
+    try {
+      const container = await BunContainer.boot()
+
+      expect(registerCalls).toHaveLength(1)
+      expect(registerCalls[0]?.url).toBe('/@mars/web-sw/sw.js')
+      expect(registerCalls[0]?.options).toBeUndefined()
+
+      await container.shutdown()
+    } finally {
+      Object.defineProperty(globalThis, 'window', {
+        value: originalWindow,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'skipWaiting', {
+        value: originalSkipWaiting,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'clients', {
+        value: originalClients,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+      })
+    }
   })
 
   it('boot() passes serviceWorkerScripts to SW bridge for script interception', async () => {
-    const listeners = new Map<string, Function[]>()
-    const addListener = (type: string, listener: Function) => {
-      listeners.set(type, [...(listeners.get(type) ?? []), listener])
-    }
+    const { listeners, restore } = installMockServiceWorkerGlobalScope()
 
-    const container = await BunContainer.boot({
-      installServiceWorkerFromKernel: true,
-      serviceWorkerScope: {
-        addEventListener(type: 'fetch' | 'install' | 'activate', listener: Function) {
-          addListener(type, listener)
+    try {
+      const container = await BunContainer.boot({
+        serveHandlerRegistry: {
+          getHandler: () => null,
         },
-        removeEventListener() {},
-        skipWaiting() {},
-        clients: { claim() {} },
-      },
-      serveHandlerRegistry: {
-        getHandler: () => null,
-      },
-      serviceWorkerScripts: {
-        '/__bun__/worker/custom.js': 'export default 42',
-      },
-    })
+        serviceWorkerScripts: {
+          '/__bun__/worker/custom.js': 'export default 42',
+        },
+      })
 
-    let responsePromise: Promise<Response> | null = null
-    listeners.get('fetch')![0]({
-      request: new Request('http://localhost/__bun__/worker/custom.js'),
-      respondWith(response: Promise<Response> | Response) {
-        responsePromise = Promise.resolve(response)
-      },
-    })
+      let responsePromise: Promise<Response> | null = null
+      listeners.get('fetch')![0]({
+        request: new Request('http://localhost/__bun__/worker/custom.js'),
+        respondWith(response: Promise<Response> | Response) {
+          responsePromise = Promise.resolve(response)
+        },
+      })
 
-    const response = await responsePromise!
-    expect(response.status).toBe(200)
-    expect(await response.text()).toBe('export default 42')
+      const response = await responsePromise!
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe('export default 42')
 
-    await container.shutdown()
+      await container.shutdown()
+    } finally {
+      restore()
+    }
   })
 
   it('boot() applies serviceWorkerScriptProcessor for package-style CJS script', async () => {
-    const listeners = new Map<string, Function[]>()
-    const addListener = (type: string, listener: Function) => {
-      listeners.set(type, [...(listeners.get(type) ?? []), listener])
-    }
+    const { listeners, restore } = installMockServiceWorkerGlobalScope()
 
-    const container = await BunContainer.boot({
-      installServiceWorkerFromKernel: true,
-      serviceWorkerScope: {
-        addEventListener(type: 'fetch' | 'install' | 'activate', listener: Function) {
-          addListener(type, listener)
+    try {
+      const container = await BunContainer.boot({
+        serveHandlerRegistry: {
+          getHandler: () => null,
         },
-        removeEventListener() {},
-        skipWaiting() {},
-        clients: { claim() {} },
-      },
-      serveHandlerRegistry: {
-        getHandler: () => null,
-      },
-      serviceWorkerScripts: {
-        '/__bun__/worker/pkg.js': {
-          source: 'module.exports = 7',
-          packageName: 'pkg',
-          packageType: 'commonjs',
+        serviceWorkerScripts: {
+          '/__bun__/worker/pkg.js': {
+            source: 'module.exports = 7',
+            packageName: 'pkg',
+            packageType: 'commonjs',
+          },
         },
-      },
-      serviceWorkerScriptProcessor: {
-        async process(input) {
-          if (input.detectedModuleType === 'cjs') {
+        serviceWorkerScriptProcessor: {
+          async process(input) {
+            if (input.detectedModuleType === 'cjs') {
+              return {
+                source: `export default (${JSON.stringify(input.descriptor.source)})`,
+                contentType: 'text/javascript',
+              }
+            }
+
             return {
-              source: `export default (${JSON.stringify(input.descriptor.source)})`,
+              source: input.descriptor.source,
               contentType: 'text/javascript',
             }
-          }
-
-          return {
-            source: input.descriptor.source,
-            contentType: 'text/javascript',
-          }
+          },
         },
-      },
-    })
+      })
 
-    let responsePromise: Promise<Response> | null = null
-    listeners.get('fetch')![0]({
-      request: new Request('http://localhost/__bun__/worker/pkg.js'),
-      respondWith(response: Promise<Response> | Response) {
-        responsePromise = Promise.resolve(response)
-      },
-    })
+      let responsePromise: Promise<Response> | null = null
+      listeners.get('fetch')![0]({
+        request: new Request('http://localhost/__bun__/worker/pkg.js'),
+        respondWith(response: Promise<Response> | Response) {
+          responsePromise = Promise.resolve(response)
+        },
+      })
 
-    const response = await responsePromise!
-    expect(response.status).toBe(200)
-    expect(await response.text()).toContain('module.exports = 7')
+      const response = await responsePromise!
+      expect(response.status).toBe(200)
+      expect(await response.text()).toContain('module.exports = 7')
 
-    await container.shutdown()
+      await container.shutdown()
+    } finally {
+      restore()
+    }
   })
 
   it('boot() keeps package-style CJS script unchanged when no processor is provided', async () => {
-    const listeners = new Map<string, Function[]>()
-    const addListener = (type: string, listener: Function) => {
-      listeners.set(type, [...(listeners.get(type) ?? []), listener])
+    const { listeners, restore } = installMockServiceWorkerGlobalScope()
+
+    try {
+      const container = await BunContainer.boot({
+        serveHandlerRegistry: {
+          getHandler: () => null,
+        },
+        serviceWorkerScripts: {
+          '/__bun__/worker/raw-cjs.js': {
+            source: 'module.exports = 9',
+            packageName: 'raw',
+            packageType: 'commonjs',
+          },
+        },
+      })
+
+      let responsePromise: Promise<Response> | null = null
+      listeners.get('fetch')![0]({
+        request: new Request('http://localhost/__bun__/worker/raw-cjs.js'),
+        respondWith(response: Promise<Response> | Response) {
+          responsePromise = Promise.resolve(response)
+        },
+      })
+
+      const response = await responsePromise!
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe('module.exports = 9')
+
+      await container.shutdown()
+    } finally {
+      restore()
     }
-
-    const container = await BunContainer.boot({
-      installServiceWorkerFromKernel: true,
-      serviceWorkerScope: {
-        addEventListener(type: 'fetch' | 'install' | 'activate', listener: Function) {
-          addListener(type, listener)
-        },
-        removeEventListener() {},
-        skipWaiting() {},
-        clients: { claim() {} },
-      },
-      serveHandlerRegistry: {
-        getHandler: () => null,
-      },
-      serviceWorkerScripts: {
-        '/__bun__/worker/raw-cjs.js': {
-          source: 'module.exports = 9',
-          packageName: 'raw',
-          packageType: 'commonjs',
-        },
-      },
-    })
-
-    let responsePromise: Promise<Response> | null = null
-    listeners.get('fetch')![0]({
-      request: new Request('http://localhost/__bun__/worker/raw-cjs.js'),
-      respondWith(response: Promise<Response> | Response) {
-        responsePromise = Promise.resolve(response)
-      },
-    })
-
-    const response = await responsePromise!
-    expect(response.status).toBe(200)
-    expect(await response.text()).toBe('module.exports = 9')
-
-    await container.shutdown()
   })
 
   it('boot() treats moduleFormat=esm as higher priority than packageType=commonjs', async () => {
-    const listeners = new Map<string, Function[]>()
-    const addListener = (type: string, listener: Function) => {
-      listeners.set(type, [...(listeners.get(type) ?? []), listener])
+    const { listeners, restore } = installMockServiceWorkerGlobalScope()
+
+    try {
+      const container = await BunContainer.boot({
+        serveHandlerRegistry: {
+          getHandler: () => null,
+        },
+        serviceWorkerScripts: {
+          '/__bun__/worker/force-esm.js': {
+            source: 'module.exports = 11',
+            packageName: 'force-esm',
+            packageType: 'commonjs',
+            moduleFormat: 'esm',
+          },
+        },
+        serviceWorkerScriptProcessor: {
+          process(input) {
+            return {
+              source: `//detected:${input.detectedModuleType}\n${input.descriptor.source}`,
+              contentType: 'text/javascript',
+            }
+          },
+        },
+      })
+
+      let responsePromise: Promise<Response> | null = null
+      listeners.get('fetch')![0]({
+        request: new Request('http://localhost/__bun__/worker/force-esm.js'),
+        respondWith(response: Promise<Response> | Response) {
+          responsePromise = Promise.resolve(response)
+        },
+      })
+
+      const response = await responsePromise!
+      expect(response.status).toBe(200)
+      expect(await response.text()).toContain('//detected:esm')
+
+      await container.shutdown()
+    } finally {
+      restore()
     }
-
-    const container = await BunContainer.boot({
-      installServiceWorkerFromKernel: true,
-      serviceWorkerScope: {
-        addEventListener(type: 'fetch' | 'install' | 'activate', listener: Function) {
-          addListener(type, listener)
-        },
-        removeEventListener() {},
-        skipWaiting() {},
-        clients: { claim() {} },
-      },
-      serveHandlerRegistry: {
-        getHandler: () => null,
-      },
-      serviceWorkerScripts: {
-        '/__bun__/worker/force-esm.js': {
-          source: 'module.exports = 11',
-          packageName: 'force-esm',
-          packageType: 'commonjs',
-          moduleFormat: 'esm',
-        },
-      },
-      serviceWorkerScriptProcessor: {
-        process(input) {
-          return {
-            source: `//detected:${input.detectedModuleType}\n${input.descriptor.source}`,
-            contentType: 'text/javascript',
-          }
-        },
-      },
-    })
-
-    let responsePromise: Promise<Response> | null = null
-    listeners.get('fetch')![0]({
-      request: new Request('http://localhost/__bun__/worker/force-esm.js'),
-      respondWith(response: Promise<Response> | Response) {
-        responsePromise = Promise.resolve(response)
-      },
-    })
-
-    const response = await responsePromise!
-    expect(response.status).toBe(200)
-    expect(await response.text()).toContain('//detected:esm')
-
-    await container.shutdown()
   })
 
   it('boot() throws stable error when serviceWorkerScripts descriptor source is invalid', async () => {
-    await expect(
-      BunContainer.boot({
-        installServiceWorkerFromKernel: true,
-        serviceWorkerScope: {
-          addEventListener() {},
-          removeEventListener() {},
-          skipWaiting() {},
-          clients: { claim() {} },
-        },
-        serveHandlerRegistry: {
-          getHandler: () => null,
-        },
-        serviceWorkerScripts: {
-          '/__bun__/worker/invalid.js': {
-            source: 123 as unknown as string,
+    const { restore } = installMockServiceWorkerGlobalScope()
+    try {
+      await expect(
+        BunContainer.boot({
+          serveHandlerRegistry: {
+            getHandler: () => null,
           },
-        },
-      }),
-    ).rejects.toThrow('[BunContainer.boot] serviceWorkerScripts[/__bun__/worker/invalid.js].source must be a string')
+          serviceWorkerScripts: {
+            '/__bun__/worker/invalid.js': {
+              source: 123 as unknown as string,
+            },
+          },
+        }),
+      ).rejects.toThrow('[BunContainer.boot] serviceWorkerScripts[/__bun__/worker/invalid.js].source must be a string')
+    } finally {
+      restore()
+    }
   })
 
   it('boot() throws stable error when serviceWorkerScripts key is not absolute pathname', async () => {
-    await expect(
-      BunContainer.boot({
-        installServiceWorkerFromKernel: true,
-        serviceWorkerScope: {
-          addEventListener() {},
-          removeEventListener() {},
-          skipWaiting() {},
-          clients: { claim() {} },
-        },
-        serveHandlerRegistry: {
-          getHandler: () => null,
-        },
-        serviceWorkerScripts: {
-          'relative/worker.js': 'export default 1',
-        },
-      }),
-    ).rejects.toThrow('[BunContainer.boot] serviceWorkerScripts key must be an absolute pathname')
+    const { restore } = installMockServiceWorkerGlobalScope()
+    try {
+      await expect(
+        BunContainer.boot({
+          serveHandlerRegistry: {
+            getHandler: () => null,
+          },
+          serviceWorkerScripts: {
+            'relative/worker.js': 'export default 1',
+          },
+        }),
+      ).rejects.toThrow('[BunContainer.boot] serviceWorkerScripts key must be an absolute pathname')
+    } finally {
+      restore()
+    }
   })
 
   it('boot() validates Map-shaped serviceWorkerScripts keys as absolute pathnames', async () => {
-    await expect(
-      BunContainer.boot({
-        installServiceWorkerFromKernel: true,
-        serviceWorkerScope: {
-          addEventListener() {},
-          removeEventListener() {},
-          skipWaiting() {},
-          clients: { claim() {} },
-        },
-        serveHandlerRegistry: {
-          getHandler: () => null,
-        },
-        serviceWorkerScripts: new Map([
-          ['not-absolute.js', 'export default 1'],
-        ]),
-      }),
-    ).rejects.toThrow('[BunContainer.boot] serviceWorkerScripts key must be an absolute pathname')
+    const { restore } = installMockServiceWorkerGlobalScope()
+    try {
+      await expect(
+        BunContainer.boot({
+          serveHandlerRegistry: {
+            getHandler: () => null,
+          },
+          serviceWorkerScripts: new Map([
+            ['not-absolute.js', 'export default 1'],
+          ]),
+        }),
+      ).rejects.toThrow('[BunContainer.boot] serviceWorkerScripts key must be an absolute pathname')
+    } finally {
+      restore()
+    }
   })
 })
 
