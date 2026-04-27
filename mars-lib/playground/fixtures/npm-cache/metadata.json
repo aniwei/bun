@@ -1,0 +1,44 @@
+{
+  "packages": [
+    {
+      "name": "express",
+      "version": "0.0.0-mars",
+      "files": {
+        "index.js": "module.exports = { framework: 'express', runtime: 'mars' }"
+      }
+    },
+    {
+      "name": "koa",
+      "version": "0.0.0-mars",
+      "files": {
+        "index.js": "module.exports = { framework: 'koa', runtime: 'mars' }"
+      }
+    },
+    {
+      "name": "vite",
+      "version": "0.0.0-mars",
+      "dependencies": {
+        "react": "latest",
+        "typescript": "^0.0.0"
+      },
+      "files": {
+        "index.js": "module.exports = { createServer() { return 'mars-vite' } }"
+      }
+    },
+    {
+      "name": "react",
+      "version": "0.0.0-mars",
+      "files": {
+        "index.js": "module.exports = { createElement: (...args) => args }"
+      }
+    },
+    {
+      "name": "typescript",
+      "version": "0.0.1-mars",
+      "tarballKey": "typescript-0.0.0-mars.tgz",
+      "files": {
+        "index.js": "module.exports = { version: '0.0.1-mars' }"
+      }
+    }
+  ]
+}

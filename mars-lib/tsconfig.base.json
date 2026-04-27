@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "ignoreDeprecations": "6.0",
+    "baseUrl": ".",
+    "paths": {
+      "@mars/bridge": ["packages/mars-bridge/src/index.ts"],
+      "@mars/vfs": ["packages/mars-vfs/src/index.ts"],
+      "@mars/kernel": ["packages/mars-kernel/src/index.ts"],
+      "@mars/sw": ["packages/mars-sw/src/index.ts"],
+      "@mars/shared": ["packages/mars-shared/src/index.ts"],
+      "@mars/runtime": ["packages/mars-runtime/src/index.ts"],
+      "@mars/resolver": ["packages/mars-resolver/src/index.ts"],
+      "@mars/transpiler": ["packages/mars-transpiler/src/index.ts"],
+      "@mars/loader": ["packages/mars-loader/src/index.ts"],
+      "@mars/installer": ["packages/mars-installer/src/index.ts"],
+      "@mars/bundler": ["packages/mars-bundler/src/index.ts"],
+      "@mars/node": ["packages/mars-node/src/index.ts"],
+      "@mars/shell": ["packages/mars-shell/src/index.ts"],
+      "@mars/client": ["packages/mars-client/src/index.ts"],
+      "@mars/test": ["packages/mars-test/src/index.ts"]
+    }
+  }
+}

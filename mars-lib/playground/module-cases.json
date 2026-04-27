@@ -1,0 +1,152 @@
+[
+  {
+    "id": "vfs-shell",
+    "phase": "Phase 1",
+    "module": "vfs-shell",
+    "playground": "core-modules/bun",
+    "entry": "core-modules/bun/vfs-shell.ts",
+    "acceptance": "packages/mars-test/src/phase1.acceptance.test.ts",
+    "status": "covered",
+    "description": "Runtime、VFS 和 MarsShell playground 用例覆盖 runtime boot、VFS 基础读写、目录 stat、shell 命令和结构化 grep。"
+  },
+  {
+    "id": "bun-file",
+    "phase": "Phase 1",
+    "module": "bun-file",
+    "playground": "core-modules/bun",
+    "entry": "core-modules/bun/bun-file.ts",
+    "acceptance": "packages/mars-test/src/phase1.acceptance.test.ts",
+    "status": "covered",
+    "description": "Bun.file 和 Bun.write playground 用例覆盖 MarsVFS 上的 JSON 写入、size 和 file.json() 读取。"
+  },
+  {
+    "id": "bun-serve",
+    "phase": "Phase 1",
+    "module": "bun-serve",
+    "playground": "core-modules/bun",
+    "entry": "core-modules/bun/bun-serve.ts",
+    "acceptance": "packages/mars-test/src/phase1.acceptance.test.ts",
+    "status": "covered",
+    "description": "Bun.serve playground 用例覆盖虚拟端口注册、preview URL 和 runtime.fetch() 转发。"
+  },
+  {
+    "id": "phase1-node-http-express",
+    "phase": "Phase 1",
+    "module": "node-http",
+    "playground": "express",
+    "entry": "express/server.ts",
+    "acceptance": "packages/mars-test/src/phase1.acceptance.test.ts",
+    "status": "covered",
+    "description": "Express 风格 HTTP handler 映射到 Mars node:http 虚拟服务。"
+  },
+  {
+    "id": "phase1-node-http-koa",
+    "phase": "Phase 1",
+    "module": "node-http",
+    "playground": "koa",
+    "entry": "koa/server.ts",
+    "acceptance": "packages/mars-test/src/phase1.acceptance.test.ts",
+    "status": "covered",
+    "description": "Koa async middleware 风格 handler 映射到 Mars node:http 虚拟服务。"
+  },
+  {
+    "id": "phase2-resolver-browser-map",
+    "phase": "Phase 2",
+    "module": "resolver",
+    "playground": "core-modules/resolver",
+    "entry": "core-modules/resolver/browser-map.json",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "Resolver playground 用例覆盖 package browser field/map、exports/imports、pattern fallback 和禁用映射。"
+  },
+  {
+    "id": "phase2-transpiler-core",
+    "phase": "Phase 2",
+    "module": "transpiler",
+    "playground": "core-modules/transpiler",
+    "entry": "core-modules/transpiler/app.tsx",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "Transpiler playground 用例覆盖 static import、dynamic import、基础 JSX 和 export async function。"
+  },
+  {
+    "id": "phase2-loader-core",
+    "phase": "Phase 2",
+    "module": "loader",
+    "playground": "core-modules/loader",
+    "entry": "core-modules/loader/entry.tsx",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "Loader playground 用例覆盖 TSX 执行、static import、dynamic import、JSON require 和 CJS require。"
+  },
+  {
+    "id": "phase2-runtime-run-core",
+    "phase": "Phase 2",
+    "module": "runtime-run",
+    "playground": "core-modules/runtime",
+    "entry": "core-modules/runtime/run-entry.ts",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "Runtime playground 用例覆盖 MarsRuntime.run() 和 stdout/stderr stream 映射。"
+  },
+  {
+    "id": "phase2-installer-core",
+    "phase": "Phase 2",
+    "module": "installer",
+    "playground": "core-modules/installer",
+    "entry": "core-modules/installer/dependencies.ts",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "Installer playground 用例声明离线安装入口依赖，并配合 npm-cache fixture 真实安装递归依赖。"
+  },
+  {
+    "id": "phase2-bundler-core",
+    "phase": "Phase 2",
+    "module": "bundler-dev-server",
+    "playground": "core-modules/bundler",
+    "entry": "core-modules/bundler/vite.config.ts",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "Bundler playground 用例覆盖 Vite root、alias、define、DevServer module response 和 HMR 路径归一。"
+  },
+  {
+    "id": "phase2-tsx-loader",
+    "phase": "Phase 2",
+    "module": "loader-transpiler",
+    "playground": "tsx",
+    "entry": "tsx/app.tsx",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "基础 TSX/JSX 转换和 loader 执行入口。"
+  },
+  {
+    "id": "phase2-vite-dev-server",
+    "phase": "Phase 2",
+    "module": "bundler-dev-server",
+    "playground": "vite-react-ts",
+    "entry": "vite-react-ts/src/App.tsx",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "Vite React TS playground 由 DevServer 加载，覆盖 root、alias、define、module response 和 HMR 基础路径。"
+  },
+  {
+    "id": "phase2-installer-fixtures",
+    "phase": "Phase 2",
+    "module": "installer",
+    "playground": "fixtures/npm-cache",
+    "entry": "fixtures/npm-cache/metadata.json",
+    "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
+    "status": "covered",
+    "description": "离线 npm cache fixture 已登记，并通过 loadPlaygroundPackageCache() 从 metadata/tarball key 真实安装递归依赖。"
+  },
+  {
+    "id": "phase3-bun-build-vite-entry",
+    "phase": "Phase 3",
+    "module": "bun-build",
+    "playground": "vite-react-ts",
+    "entry": "vite-react-ts/src/App.tsx",
+    "acceptance": "packages/mars-test/src/phase3.acceptance.test.ts",
+    "status": "prework",
+    "description": "Bun.build 可构建 Vite React TS playground entry；Phase 2 Done 前仅作为 gated prework。"
+  }
+]

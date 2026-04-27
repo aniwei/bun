@@ -1,0 +1,20 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "mars-lib",
+      "dependencies": {
+        "@swc/wasm-web": "^1.15.32",
+      },
+      "devDependencies": {
+        "typescript": "6.0.2",
+      },
+    },
+  },
+  "packages": {
+    "@swc/wasm-web": ["@swc/wasm-web@1.15.32", "", {}, "sha512-AcYyrrz+BSuH8uepTJetaToMtkyQJX5RKTmitkVKPJ1AdUy6NEN+ex1apsPlkr6Mas0FEWq+DmJ+4hKzNOLKIA=="],
+
+    "typescript": ["typescript@6.0.2", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-bGdAIrZ0wiGDo5l8c++HWtbaNCWTS4UTv7RaTH/ThVIgjkveJt83m74bBHMJkuCbslY8ixgLBVZJIOiQlQTjfQ=="],
+  }
+}

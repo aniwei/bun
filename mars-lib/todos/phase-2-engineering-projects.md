@@ -1,0 +1,98 @@
+# Phase 2: 工程化项目运行
+
+- 状态: Done
+- 总完成百分比: 100%
+- 测试状态: Pass
+- 依赖 Phase: Phase 1 Runtime 最小闭环必须通过
+- 对应技术设计文档: `mars-lib/rfc/0001-mars-lib-technical-design.md`
+- 代码审计文档: `mars-lib/todos/phase-2-code-audit.md`
+- Playground 接入矩阵: `mars-lib/playground/README.md`
+- Playground 功能模块用例: `mars-lib/playground/module-cases.json`
+- 相关章节: 6 用户侧 API, 9 MarsVFS 接口, 13 Mars Loader / Resolver / Transpiler, 16 Vite + React + TypeScript 支持, 17 Package Installer 与离线缓存, 19.3 VFS 模块加载, 20.3 Vite + React + TypeScript, 20.4 直接执行 TSX, 21 验收测试接口, 22 M2
+
+## 开始前确认
+
+### 技术设计核对
+
+- 确认 Phase 2 在 Phase 1 的 Runtime、VFS、Kernel、Service Worker、Bun.serve、Shell 基础上继续扩展，不重写 Phase 1 已稳定接口。
+- 确认 MarsResolver 需要支持相对路径、绝对路径、bare package、`package.json exports/imports/main/module/browser`、扩展名补全、目录 index、`tsconfig paths`。
+- 确认 MarsTranspiler 需要覆盖 `.ts`、`.tsx`、`.jsx` 转译，并输出 imports、diagnostics、source map 可选数据。
+- 确认 ModuleLoader 需要支持 ESM/CJS bridge、JSON、TS/TSX 执行、模块缓存和 invalidation。
+- 确认 MarsInstaller 需要有离线 cache 路径，验收不依赖外部 registry。
+- 确认 Vite M1 范围是协议兼容层，而不是完整复刻 Node 版 Vite。
+- 确认 `.tsx` 直接执行需要通过 resolver -> transpiler -> loader -> process stdout 或 virtual server 输出完成闭环。
+
+### 代码风格
+
+- 以 `mars-lib/AGENTS.md` 为默认基线，若子模块已有规范且冲突，需在变更说明中注明偏差理由。
+- TypeScript / JavaScript 尽量不使用分号 `;` 和双引号 `"`，避免超长行，复杂表达式主动换行。
+- 命名保持语义完整，除极小作用域临时变量外，不使用 `tmp`、`ctx`、`cfg`、`obj` 等泛化命名。
+- 导入顺序遵循 AGENTS 规则: 绝对 default -> 相对 default -> 绝对具名 -> 相对具名 -> type imports -> 样式/静态资源。
+- Resolver、Transpiler、Loader 保持函数职责单一，公共类型与实现拆分，避免单文件和单函数持续膨胀。
+- 单文件超过 1000 行必须拆分，优先按领域职责、运行时边界（runtime/kernel/vfs/loader/hooks）、types 与实现拆分。
+- Installer 写 lockfile 或缓存索引时必须排序，确保重复执行结果稳定且可回放。
+- 测试优先真实执行验收路径，不使用 mock/spyon 替代核心运行链路。
+- 提交前执行并通过 `ox format --check` 与 `ox lint --max-warnings 0`。
+
+### 前置依赖
+
+- Phase 1 `MarsRuntime.boot()`、MarsVFS、MarsKernel、Service Worker router、Bun API Facade、MarsShell 必须可用。
+- Phase 1 Express/Koa 基础验收必须通过。
+
+### Transpiler 取舍说明
+
+- 当前 M2 已接入社区 `@swc/wasm-web`，默认 transpiler 通过 SWC WASM 处理 TS/TSX/JSX、CommonJS 输出、classic JSX pragma 和 sourcemap 字段。
+- wasm 初始化状态、并发复用和失败重试统一下沉到 `@mars/shared` 的 `createWasmLoader()`，SWC adapter 只负责声明 `@swc/wasm-web` 的初始化函数。
+- `BasicTranspiler` 仍保留为 fallback: wasm 初始化失败时继续支撑验收，且同步 `require()` 在 SWC 尚未初始化前仍可用。
+- 验收口径以可执行语义和 import graph 为准，不再绑定 SWC 具体生成代码文本；后续硬化重点是 worker 缓存、完整 source map 和更完整的 ESM 语义。
+
+## Todo
+
+| ID | 状态 | 完成百分比 | 测试通过 | 文件/模块 | 功能介绍 | 完成时设计核对 |
+| --- | --- | ---: | --- | --- | --- | --- |
+| M2-01 | Done | 100% | Pass | `mars-lib/packages/mars-resolver/src/types.ts` | 定义 `ResolveContext`、`ResolveResult`、resolver fs adapter、conditions、extensions。 | 核对 RFC 第 13 节 Resolve 接口。 |
+| M2-02 | Done | 100% | Pass | `mars-lib/packages/mars-resolver/src/package-json.ts` | 读取并解析 `package.json` 的 main/module/browser/exports/imports 字段。 | 核对 RFC 第 13 节 package 字段要求。 |
+| M2-03 | Done | 100% | Pass | `mars-lib/packages/mars-resolver/src/exports.ts` | 实现 package exports 条件匹配、subpath、pattern fallback。 | 已覆盖条件 exports/imports 与 `*` pattern fallback。 |
+| M2-04 | Done | 100% | Pass | `mars-lib/packages/mars-resolver/src/tsconfig-paths.ts` | 实现 `baseUrl` 和 `paths` 匹配，返回候选绝对路径。 | 已接入 `resolve()` 主链路并覆盖测试。 |
+| M2-05 | Done | 100% | Pass | `mars-lib/packages/mars-resolver/src/resolve.ts` | 实现相对、绝对、bare package、扩展名补全、目录 index resolve。 | 主链路已覆盖 exports/imports/subpath/tsconfig paths，并补齐 package browser field/map 验收。 |
+| M2-06 | Done | 100% | Pass | `mars-lib/packages/mars-transpiler/src/types.ts` | 定义 `TransformInput`、`TransformResult`、`ImportRecord`、`Diagnostic`。 | 核对 RFC 第 13 节 Transpiler 接口。 |
+| M2-07 | Done | 100% | Pass | `mars-lib/packages/mars-transpiler/src/swc.ts`, `mars-lib/packages/mars-shared/src/wasm-loader.ts` | 提供 SWC WASM transpiler，支持 ts/tsx/jsx 到 Mars 可执行 js，并复用共享 wasm loader。 | 默认使用 `@swc/wasm-web`，wasm 初始化由 `@mars/shared` 管理，保留 BasicTranspiler fallback；dynamic import 仍降级到 `__mars_dynamic_import()`，JSX 使用 Mars helper。 |
+| M2-08 | Done | 100% | Pass | `mars-lib/packages/mars-transpiler/src/scan-imports.ts` | 扫描 static import、require、dynamic import，用于 module graph。 | 核对 RFC 第 13 节 `scanImports`。 |
+| M2-09 | Done | 100% | Pass | `mars-lib/packages/mars-loader/src/module-record.ts` | 定义 LoadedModule、ModuleNamespace、缓存记录和状态机。 | 核对 RFC 第 13 节 ModuleLoader。 |
+| M2-10 | Done | 100% | Pass | `mars-lib/packages/mars-loader/src/cjs.ts` | 实现 CommonJS wrapper、`require()`、`module.exports`、JSON require。 | CJS require 与 JSON require 已覆盖，并可通过 resolver 递归加载依赖。 |
+| M2-11 | Done | 100% | Pass | `mars-lib/packages/mars-loader/src/esm.ts` | 实现 ESM import 入口、动态 import、模块缓存。 | static import 经 transpiler 降级后可执行，dynamic import 已接入 loader cache；完整 live binding 作为后续硬化项。 |
+| M2-12 | Done | 100% | Pass | `mars-lib/packages/mars-loader/src/loader.ts` | 串联 resolver、VFS、transpiler、CJS/ESM evaluate、invalidate。 | resolver/transpiler/evaluate/cache 已串联，TSX、static import、dynamic import 与 CJS/JSON 真实执行已覆盖。 |
+| M2-13 | Done | 100% | Pass | `mars-lib/packages/mars-runtime/src/run-entry.ts` | 实现 `MarsRuntime.run(entry)` 和 `bun app.tsx` 执行路径。 | TS/TSX entry 已可执行，console stdout/stderr 已映射到 ProcessHandle streams。 |
+| M2-14 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/types.ts` | 定义 InstallOptions、InstallResult、ResolvedPackage、PackageMetadata、PackageCache、PackageInstaller。 | 已核对 RFC 第 17 节 Installer 接口。 |
+| M2-15 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/cache.ts` | 实现 metadata/tarball 内存离线缓存接口，支持确定性验收 fixture 注入。 | 已提供 fixture manifest -> MemoryPackageCache 入口，并由 playground npm-cache 真实加载验收。 |
+| M2-16 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/plan.ts` | 实现最小依赖安装计划，支持 root dependencies/devDependencies 递归解析并排序。 | 已核对 RFC 第 17 节 node_modules 写入路径，支持 latest、exact、基础 `^`/`~` 兼容版本选择。 |
+| M2-17 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/write-node-modules.ts` | 将解析后的包写入 MarsVFS `/workspace/node_modules` 和 `mars-lock.json`。 | 已通过 resolver 从写入后的 node_modules 解析 package。 |
+| M2-18 | Done | 100% | Pass | `mars-lib/packages/mars-bundler/src/dev-server.ts` | 实现 Vite 协议兼容 DevServer listen/close/transformRequest/loadModule。 | `/@vite/client`、`/src/App.tsx`、vite config root、alias、define、HMR root 与 playground Vite TSX 加载已验收；完整插件 pipeline 作为后续硬化项。 |
+| M2-19 | Done | 100% | Pass | `mars-lib/packages/mars-bundler/src/module-graph.ts` | 实现 Vite dev module graph、依赖关系和 invalidate。 | HMR invalidation 已验收，基础 imports/importers 图已接入 dev server。 |
+| M2-20 | Done | 100% | Pass | `mars-lib/packages/mars-bundler/src/vite-client.ts` | 提供 `/@vite/client` 虚拟模块。 | 已通过 dev server response 验收。 |
+| M2-21 | Done | 100% | Pass | `mars-lib/packages/mars-bundler/src/hmr-channel.ts` | 实现 MessageChannel 风格 HMR payload 通道。 | payload 发送已验收；浏览器 WebSocket 兼容层作为 Phase 3 WebSocket/HMR 硬化项。 |
+| M2-22 | Done | 100% | Pass | `mars-lib/packages/mars-bundler/src/vite-config.ts` | 读取 `vite.config.ts` 的 root、resolve.alias、define、server.hmr 核心字段。 | root、server.hmr、alias 与 define 已接入 DevServer 验收；复杂 config 表达式与插件配置作为后续硬化项。 |
+| M2-23 | Done | 100% | Pass | `mars-lib/packages/mars-sw/src/module-response.ts` | 将 VFS 模块请求转成 transpiled JavaScript Response。 | 已接入 ServiceWorkerRouter，并通过 dev server module response 验收。 |
+| M2-24 | Done | 100% | Pass | `mars-lib/playground/tsx/app.tsx` | 编写直接执行 TSX 验收样例。 | TSX JSX 执行已由 acceptance 覆盖，通过 `loadPlaygroundFiles()` 纳入统一 playground fixture，并校验 first screen render model。 |
+| M2-25 | Done | 100% | Pass | `mars-lib/playground/vite-react-ts/` | 放置 Vite React TS 验收项目骨架。 | package/index/src/vite.config/src/App.tsx 已落盘，由 dev server、loader render model 和 Bun.build 从真实 playground fixture 加载验收，且 playground TSX 已纳入 typecheck。 |
+| M2-26 | Done | 100% | Pass | `mars-lib/playground/fixtures/npm-cache/` | 放置 express/koa/vite/react/typescript 等离线 tgz fixture。 | metadata、tarball key 与包文件内容已落盘，并通过 `loadPlaygroundPackageCache()` 真实安装验收。 |
+| M2-27 | Done | 100% | Pass | `mars-lib/packages/mars-test/src/phase2.acceptance.test.ts` | 覆盖 resolver、tsx 执行、installer 离线安装、Vite client/module response 与 HMR。 | 已覆盖 browser map、static/dynamic import、基础 JSX、stdout/stderr、installer fixture、dev server、module response、HMR、vite config root、alias、define、统一 playground fixture 与 first screen render model。 |
+
+## Phase 完成标准
+
+- MarsResolver 能解析验收项目中的相对路径、bare package、exports/imports、tsconfig paths。
+- MarsTranspiler 能转译 `.ts`、`.tsx`、`.jsx`，并输出 imports 和 diagnostics。
+- ModuleLoader 能执行 `.tsx` 文件并返回正确 stdout 或 virtual server 输出。
+- MarsInstaller 能从离线 cache 写入验收项目需要的 `node_modules`。
+- Vite React TS 项目可以通过 playground fixture 加载，并由 loader 验证 first screen render model。
+- 修改 `src/App.tsx` 后 HMR 生效，且不重启整个 runtime。
+- Playground 已接入 `playground/core-modules`、`playground/tsx`、`playground/vite-react-ts` 与 `playground/fixtures/npm-cache`，并通过 `loadPlaygroundFiles()` / `loadPlaygroundPackageCache()` 被 Phase 2 acceptance test 真实加载；功能模块用例已登记到 `playground/module-cases.json` 并校验真实入口文件。
+- Phase 2 测试全部通过；最新完整验证为 `bun run test`，结果 `35 pass / 0 fail / 141 expect() calls`。
+
+## 状态更新规则
+
+1. 每完成一个 Todo，必须回查 RFC 对应章节，确认文件职责没有越界。
+2. Todo 未接入真实验收测试前，完成百分比不得超过 80%。
+3. 涉及 Phase 1 接口改动时，必须重新运行 Phase 1 相关验收。
+4. Phase 总完成百分比按 Todo 完成百分比平均计算。
+5. 所有 Todo 为 `Done`、Phase 1/2 验收通过、playground 接入矩阵、`module-cases.json` 和 RFC 已同步后，Phase 状态更新为 `Done`。

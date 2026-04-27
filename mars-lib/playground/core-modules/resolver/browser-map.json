@@ -1,0 +1,20 @@
+{
+  "importer": "/workspace/src/index.ts",
+  "files": {
+    "/workspace/src/index.ts": "",
+    "/workspace/package.json": "{\"imports\":{\"#shared\":\"./src/shared.ts\"}}",
+    "/workspace/src/shared.ts": "export const shared = true",
+    "/workspace/node_modules/browser-demo/package.json": "{\"main\":\"server.js\",\"exports\":{\"./feature\":{\"browser\":\"./feature.browser.ts\",\"default\":\"./feature.node.ts\"}},\"browser\":{\"./server.js\":\"./browser.js\",\"./disabled.js\":false}}",
+    "/workspace/node_modules/browser-demo/server.js": "module.exports = 'server'",
+    "/workspace/node_modules/browser-demo/browser.js": "module.exports = 'browser'",
+    "/workspace/node_modules/browser-demo/disabled.js": "module.exports = 'disabled'",
+    "/workspace/node_modules/browser-demo/feature.browser.ts": "export const target = 'browser-feature'",
+    "/workspace/node_modules/browser-demo/feature.node.ts": "export const target = 'node-feature'"
+  },
+  "expected": {
+    "#shared": "/workspace/src/shared.ts",
+    "browser-demo": "/workspace/node_modules/browser-demo/browser.js",
+    "browser-demo/feature": "/workspace/node_modules/browser-demo/feature.browser.ts",
+    "browser-demo/disabled": null
+  }
+}

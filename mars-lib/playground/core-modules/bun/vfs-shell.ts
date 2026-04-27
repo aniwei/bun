@@ -1,0 +1,8 @@
+export const readmePath = "README.md"
+export const readmeText = "hello mars"
+export const sourceDir = "src"
+export const sourcePath = "src/app.ts"
+export const sourceCode = "const answer = 42"
+export const shellScript = "pwd && ls && cat README.md"
+export const grepFile = "/workspace/tmp/search.txt"
+export const grepText = "hello from shell"

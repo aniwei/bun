@@ -1,0 +1,22 @@
+{
+  "name": "mars-lib",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.13",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "bun test packages/mars-test/src/phase1.acceptance.test.ts packages/mars-test/src/phase2.acceptance.test.ts packages/mars-test/src/phase3.acceptance.test.ts",
+    "typecheck": "bunx tsc -p tsconfig.json --noEmit",
+    "lint": "ox lint",
+    "format": "ox format",
+    "check": "bun run typecheck && bun run test"
+  },
+  "devDependencies": {
+    "typescript": "6.0.2"
+  },
+  "dependencies": {
+    "@swc/wasm-web": "^1.15.32"
+  }
+}
