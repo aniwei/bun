@@ -1,0 +1,20 @@
+{
+  "name": "@mars/web-test",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "test": "bunx --bun vitest run --config ./vitest.config.ts",
+    "test:watch": "bunx --bun vitest --config ./vitest.config.ts",
+    "test:official": "bunx --bun vitest run --config ./vitest.config.ts -t \"official replay\"",
+    "test:official:update-baseline": "bunx --bun vitest run --config ./vitest.config.ts -t \"official replay\""
+  },
+  "devDependencies": {
+    "tsdown": "^0.14.2",
+    "typescript": "6.0.2",
+    "vitest": "^2.1.8"
+  }
+}

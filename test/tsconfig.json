@@ -16,7 +16,12 @@
       "@faasjs/larger/*": ["./js/bun/resolve/*/larger-index.js"],
       "bake/*": ["../src/bake/client/*"],
       "_util/*": ["./_util/*"],
-      "js/*": ["./js/*"]
+      "js/*": ["./js/*"],
+      "@mars/web-kernel": ["../packages/bun-web-kernel/src/index.ts"],
+      "@mars/web-node": ["../packages/bun-web-node/src/index.ts"],
+      "@mars/web-runtime": ["../packages/bun-web-runtime/src/index.ts"],
+      "@mars/web-shared": ["../packages/bun-web-shared/src/index.ts"],
+      "@mars/web-vfs": ["../packages/bun-web-vfs/src/index.ts"]
     },
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
@@ -28,6 +33,7 @@
     "**/*.tsx",
     "**/*.mts",
     "**/*.cts",
+    "../packages/bun-web-*/src/**/*.ts",
     "../src/js/internal-for-testing.ts",
     "../scripts/glob-sources.ts",
     "../scripts/build/error.ts",

@@ -56,6 +56,10 @@ pub const enable_tinycc = build_options.enable_tinycc;
 pub const codegen_path = build_options.codegen_path;
 pub const codegen_embed = build_options.codegen_embed;
 
+/// WASM 构建是否启用浏览器运行时 profile（即接入 JSI + sys_wasm + wasm_event_loop）。
+/// 非 wasm 构建始终为 false。
+pub const wasm_browser_runtime: bool = isWasm and build_options.wasm_profile == .browser_runtime;
+
 pub const version: std.SemanticVersion = build_options.version;
 pub const version_string = std.fmt.comptimePrint("{d}.{d}.{d}", .{ version.major, version.minor, version.patch });
 
@@ -115,7 +119,8 @@ pub const OperatingSystem = enum {
             .mac => .macos,
             .linux => .linux,
             .windows => .windows,
-            .wasm => unreachable,
+            // wasm32-freestanding（浏览器 WASM 目标，由 Host 提供 syscall 等能力）
+            .wasm => .freestanding,
         };
     }
 
