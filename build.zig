@@ -16,6 +16,13 @@ const Arch = std.Target.Cpu.Arch;
 
 const OperatingSystem = @import("src/env.zig").OperatingSystem;
 
+pub const WasmProfile = enum {
+    /// 只编译 transpiler + scan（现有 packages/bun-wasm 的既有行为）
+    transpiler_only,
+    /// 启用 JSI / VFS / wasm_event_loop，作为浏览器运行时
+    browser_runtime,
+};
+
 const pathRel = fs.path.relative;
 
 const zero_sha = "0000000000000000000000000000000000000000";
@@ -56,6 +63,11 @@ const BunBuildOptions = struct {
     cached_options_module: ?*Module = null,
     windows_shim: ?WindowsShim = null,
     llvm_codegen_threads: ?u32 = null,
+    /// WASM 构建剥离档位：
+    ///   - transpiler_only：仅编译 transpiler + scan，不引入 jsi/sys_wasm/event loop
+    ///   - browser_runtime：启用 JSI + VFS + wasm_event_loop，目标浏览器运行时
+    /// 非 wasm 构建时忽略。
+    wasm_profile: WasmProfile = .transpiler_only,
 
     pub fn isBaseline(this: *const BunBuildOptions) bool {
         return this.arch.isX86() and
@@ -90,6 +102,7 @@ const BunBuildOptions = struct {
         opts.addOption([]const u8, "reported_nodejs_version", b.fmt("{f}", .{this.reported_nodejs_version}));
         opts.addOption(bool, "zig_self_hosted_backend", this.no_llvm);
         opts.addOption(bool, "override_no_export_cpp_apis", this.override_no_export_cpp_apis);
+        opts.addOption(WasmProfile, "wasm_profile", this.wasm_profile);
 
         const mod = opts.createModule();
         this.cached_options_module = mod;
@@ -264,6 +277,7 @@ pub fn build(b: *Build) !void {
         .enable_tinycc = b.option(bool, "enable_tinycc", "Enable TinyCC for FFI JIT compilation") orelse true,
         .use_mimalloc = b.option(bool, "use_mimalloc", "Use mimalloc as default allocator") orelse false,
         .llvm_codegen_threads = b.option(u32, "llvm_codegen_threads", "Number of threads to use for LLVM codegen") orelse 1,
+        .wasm_profile = b.option(WasmProfile, "wasm_profile", "WASM build profile (transpiler_only | browser_runtime); ignored for non-wasm targets") orelse .transpiler_only,
     };
 
     // zig build obj
@@ -860,11 +874,25 @@ fn addInternalImports(b: *Build, mod: *Module, opts: *BunBuildOptions) void {
     const async_path = switch (os) {
         .linux, .mac => "src/async/posix_event_loop.zig",
         .windows => "src/async/windows_event_loop.zig",
+        .wasm => switch (opts.wasm_profile) {
+            .browser_runtime => "src/async/wasm_event_loop.zig",
+            .transpiler_only => "src/async/stub_event_loop.zig",
+        },
         else => "src/async/stub_event_loop.zig",
     };
     mod.addAnonymousImport("async", .{
         .root_source_file = b.path(async_path),
     });
+
+    // JSI / VFS — only wired up for wasm browser_runtime profile
+    if (os == .wasm and opts.wasm_profile == .browser_runtime) {
+        mod.addAnonymousImport("jsi", .{
+            .root_source_file = b.path("src/jsi/jsi.zig"),
+        });
+        mod.addAnonymousImport("sys_wasm", .{
+            .root_source_file = b.path("src/sys_wasm/sys_wasm.zig"),
+        });
+    }
 
     // Generated code exposed as individual modules.
     inline for (.{
