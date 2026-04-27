@@ -42,6 +42,10 @@
 - `src/js/thirdparty/ws.js` 的 MarsWeb 前缀重命名已回退，待后续重新提交并复测。
 - 2026-04-25 本轮补充：`@mars/web-installer` 的 `installFromManifest()` 新增 `optionalDependencies` 最小语义（失败跳过、不阻塞安装），并已补齐根依赖与 transitive optional 失败边界回放用例。
 - 2026-04-25 本轮补充：调用层职责冻结，`bun add/install/i` 归属 `@mars/web-kernel` 控制面并复用 `@mars/web-installer`；`@mars/web-runtime` 的 process-executor 与 `@mars/web-sw` 仅负责脚本执行与分发，不承载包管理语义。
+- 2026-04-26 状态同步：A1/A2/A3 主链拆分已落地（`kernel-initializer`、`kernel.hooks`、`module-request-handler`）；下一步收敛点聚焦在 runtime initializer 抽象统一（A1-2）与历史残留文件类型诊断清理，以确保文档“已完成”口径与仓库当前可编译状态一致。
+- 2026-04-26 推进更新：`@mars/web-runtime` 的 `ProcessBootstrap` 已切换到共享 `InitializerPipeline` 调度路径，`bootstrapInitializers` 选择执行语义保持不变，进入回归验证阶段。
+- 2026-04-26 推进更新：`@mars/web-sw` 已收敛为 `sw.ts` 单一实现源，模块命名空间统一为 `/__bun__/modules/*`，与 A3 协议约束保持一致。
+- 2026-04-26 推进更新：`m1-vfs-bootstrap` 已补齐 `ProcessBootstrap` 的迁移语义回归（initializer `order`、同 `id` 覆盖、`bootstrapInitializers='all'`）；当前 client/runtime/sw 目录级类型诊断为零。
 
 ---
 
@@ -617,10 +621,10 @@ export interface ProcessBootstrapInitializer {
 
 export class ProcessBootstrap {
   registerInitializer(initializer: ProcessBootstrapInitializer): () => void;
-  bootstrap(opts: ProcessBootstrapOptions, stdioPort?: MessagePort | null): Promise<BootstrappedContext>;
+  boot(opts: ProcessBootstrapOptions, stdioPort?: MessagePort | null): Promise<BootstrappedContext>;
 }
 
-export async function bootstrapProcessWorker(opts: ProcessBootstrapOptions): Promise<void>;
+export async function bootstrapProcessWorker(opts: ProcessBootstrapOptions, stdioPort?: MessagePort | null): Promise<BootstrappedContext>;
 // 在 Process Worker 顶层调用，注入全局 Bun / process / require 等
 
 // transpiler-runtime.ts
@@ -1352,7 +1356,7 @@ export class WebServiceWorkerManager {
   uninstall(): void
 }
 
-export class KernelServiceWorkerBridgeManager {
+export class ServiceWorkerRuntime {
   constructor(
     kernel: KernelSwBridge,
     target: ServiceWorkerGlobalLike,

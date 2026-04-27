@@ -151,7 +151,7 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      const kernel = await Kernel.boot({});
+      const kernel = new Kernel({});
       const supervisor = new RuntimeProcessSupervisor(kernel);
       const seenStdout: string[] = [];
       const seenExitCodes: number[] = [];
@@ -198,7 +198,7 @@ describe("M1-8 核心验收", () => {
         unsubscribeStdio();
       } finally {
         supervisor.dispose();
-        await Kernel.shutdown();
+        await kernel.shutdown();
       }
     `);
     expect(stdout.trim()).toBe("OK");
@@ -216,7 +216,7 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      const kernel = await Kernel.boot({});
+      const kernel = new Kernel({});
       const seenExitCodes: number[] = [];
       const seenSignals: Array<number | null> = [];
 
@@ -528,7 +528,7 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      const kernel = await Kernel.boot({});
+      const kernel = new Kernel({});
 
       try {
         const child = spawn({
@@ -554,7 +554,7 @@ describe("M1-8 核心验收", () => {
 
         console.log('OK');
       } finally {
-        await Kernel.shutdown();
+        await kernel.shutdown();
       }
     `);
     expect(stdout.trim()).toBe("OK");
@@ -572,7 +572,7 @@ describe("M1-8 核心验收", () => {
         hostProcess.exit(1);
       };
 
-      const kernel = await Kernel.boot({});
+      const kernel = new Kernel({});
       const received: Uint8Array[] = [];
 
       try {
@@ -606,7 +606,7 @@ describe("M1-8 核心验收", () => {
 
         console.log('OK');
       } finally {
-        await Kernel.shutdown();
+        await kernel.shutdown();
       }
     `);
     expect(stdout.trim()).toBe("OK");

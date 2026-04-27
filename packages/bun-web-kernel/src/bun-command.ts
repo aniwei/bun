@@ -2,13 +2,13 @@ import type { KernelConfig, KernelProcessExecutionRequest, KernelProcessExecutio
 
 type BunAddDependencyField = 'dependencies' | 'devDependencies' | 'optionalDependencies' | 'peerDependencies'
 
-type BunAddOptions = {
+interface BunAddOptions {
   installAfterAdd: boolean
   targetField: BunAddDependencyField
   packageSpecifiers: string[]
 }
 
-type BunCommandOptions = {
+interface BunCommandExecutorOptions {
   readMountedText(path: string): string | null
   writeMounted(path: string, content: string): void
   getManifestPath(cwd: string | undefined): string
@@ -109,8 +109,8 @@ function parseBunAddOptions(args: string[]): BunAddOptions | { error: string } {
   }
 }
 
-export class BunCommand {
-  constructor(private readonly options: BunCommandOptions) {}
+export class BunCommandExecutor {
+  constructor(private readonly options: BunCommandExecutorOptions) {}
 
   async execute(
     args: string[],
@@ -118,17 +118,28 @@ export class BunCommand {
   ): Promise<KernelProcessExecutionResult> {
     const subcommand = args[0]
 
-    if (subcommand === 'install' || subcommand === 'i') {
-      if (args.length > 1) {
-        return await this.executeBunAdd(request, args.slice(1))
-      }
-      return await this.executeBunInstall(request)
+    switch (subcommand) {
+      case 'run':
+        return await this.executeRun(request)
+      case 'install':
+      case 'i':
+        return await this.executeInstall(request)
+        break
+      case 'add':
+        return await this.executeAdd(request, args.slice(1))
+      case 'version':
+        // TODO
+        // return await this.executeVersion()
+      default:
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: `Unsupported bun subcommand: ${subcommand}\n`,
+        }
     }
+  }
 
-    if (subcommand === 'add') {
-      return await this.executeBunAdd(request, args.slice(1))
-    }
-
+  private async executeRun(request: KernelProcessExecutionRequest): Promise<KernelProcessExecutionResult> {
     if (!this.options.processWorkerExecutor) {
       return {
         exitCode: 1,
@@ -140,7 +151,7 @@ export class BunCommand {
     return await this.options.processWorkerExecutor(request)
   }
 
-  private async executeBunInstall(
+  private async executeInstall(
     request: KernelProcessExecutionRequest,
   ): Promise<KernelProcessExecutionResult> {
     const cwd = request.cwd ?? '/'
@@ -288,7 +299,7 @@ export class BunCommand {
     }
   }
 
-  private async executeBunAdd(
+  private async executeAdd(
     request: KernelProcessExecutionRequest,
     packages: string[],
   ): Promise<KernelProcessExecutionResult> {
@@ -371,7 +382,7 @@ export class BunCommand {
       }
     }
 
-    const installResult = await this.executeBunInstall(request)
+    const installResult = await this.executeInstall(request)
     if (installResult.exitCode !== 0) {
       return installResult
     }
@@ -383,3 +394,7 @@ export class BunCommand {
     }
   }
 }
+
+export function createBunCommandExecutor(options: BunCommandExecutorOptions): BunCommandExecutor {
+  return new BunCommandExecutor(options)
+} 

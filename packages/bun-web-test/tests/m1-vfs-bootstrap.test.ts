@@ -1545,7 +1545,7 @@ describe('bootstrapProcessWorker', () => {
       },
     })
 
-    await bootstrap.bootstrap({
+    await bootstrap.boot({
       kernel: { vfs: null } as any,
       pid: 1,
       argv: ['bun', 'queue.ts'],
@@ -1569,7 +1569,7 @@ describe('bootstrapProcessWorker', () => {
       },
     })
 
-    await bootstrap.bootstrap({
+    await bootstrap.boot({
       kernel: { vfs: null } as any,
       pid: 2,
       argv: ['bun', 'skip.ts'],
@@ -1580,7 +1580,7 @@ describe('bootstrapProcessWorker', () => {
     })
     expect(calls).toEqual([])
 
-    await bootstrap.bootstrap({
+    await bootstrap.boot({
       kernel: { vfs: null } as any,
       pid: 3,
       argv: ['bun', 'run.ts'],
@@ -1592,7 +1592,7 @@ describe('bootstrapProcessWorker', () => {
     expect(calls).toEqual(['flagged'])
 
     unregister()
-    await bootstrap.bootstrap({
+    await bootstrap.boot({
       kernel: { vfs: null } as any,
       pid: 4,
       argv: ['bun', 'off.ts'],
@@ -1616,7 +1616,7 @@ describe('bootstrapProcessWorker', () => {
       },
     })
 
-    await bootstrap.bootstrap({
+    await bootstrap.boot({
       kernel: { vfs: null } as any,
       pid: 5,
       argv: ['bun', 'selected.ts'],
@@ -1628,6 +1628,93 @@ describe('bootstrapProcessWorker', () => {
     })
 
     expect(calls).toEqual(['default-gated'])
+  })
+
+  test('ProcessBootstrap runs all initializers when bootstrapInitializers is all', async () => {
+    const bootstrap = new ProcessBootstrap()
+    const calls: string[] = []
+
+    bootstrap.registerInitializer({
+      id: 'all-gated',
+      shouldRun: ({ opts }) => opts.initializeTranspiler === true,
+      run: () => {
+        calls.push('all-gated')
+      },
+    })
+
+    await bootstrap.boot({
+      kernel: { vfs: null } as any,
+      pid: 55,
+      argv: ['bun', 'all.ts'],
+      env: {},
+      cwd: '/',
+      sabBuffer: null,
+      initializeTranspiler: false,
+      bootstrapInitializers: 'all',
+    })
+
+    expect(calls).toEqual(['all-gated'])
+  })
+
+  test('ProcessBootstrap respects initializer order priority after pipeline migration', async () => {
+    const bootstrap = new ProcessBootstrap()
+    const calls: string[] = []
+
+    bootstrap.registerInitializer({
+      id: 'late',
+      order: 20,
+      run: () => {
+        calls.push('late')
+      },
+    })
+    bootstrap.registerInitializer({
+      id: 'early',
+      order: 10,
+      run: () => {
+        calls.push('early')
+      },
+    })
+
+    await bootstrap.boot({
+      kernel: { vfs: null } as any,
+      pid: 6,
+      argv: ['bun', 'order.ts'],
+      env: {},
+      cwd: '/',
+      sabBuffer: null,
+    })
+
+    expect(calls).toEqual(['early', 'late'])
+  })
+
+  test('ProcessBootstrap keeps id replacement semantics after pipeline migration', async () => {
+    const bootstrap = new ProcessBootstrap()
+    const calls: string[] = []
+
+    bootstrap.registerInitializer({
+      id: 'replaceable',
+      run: () => {
+        calls.push('old')
+      },
+    })
+
+    bootstrap.registerInitializer({
+      id: 'replaceable',
+      run: () => {
+        calls.push('new')
+      },
+    })
+
+    await bootstrap.boot({
+      kernel: { vfs: null } as any,
+      pid: 7,
+      argv: ['bun', 'replace.ts'],
+      env: {},
+      cwd: '/',
+      sabBuffer: null,
+    })
+
+    expect(calls).toEqual(['new'])
   })
 
   test('returns process with correct pid/argv/cwd', async () => {

@@ -11,13 +11,13 @@ import { SyncSyscallUnavailableError } from '../../../packages/bun-web-kernel/sr
 describe('bun-web M1 kernel + vfs smoke', () => {
   test('kernel boot and spawn returns pid', async () => {
     const vfs = new VFS()
-    const kernel = await Kernel.boot({ maxProcesses: 4 }, vfs)
+    const kernel = new Kernel({ maxProcesses: 4 }, vfs)
     const proc = await kernel.spawn({ argv: ['bun', 'run', 'index.ts'] })
 
     expect(proc.pid).toBeGreaterThan(0)
     expect(kernel.processes.list().length).toBe(1)
 
-    await Kernel.shutdown()
+    await kernel.shutdown()
   })
 
   test('vfs read write and readdir works', () => {
@@ -32,7 +32,7 @@ describe('bun-web M1 kernel + vfs smoke', () => {
   })
 
   test('process bootstrap stores context', async () => {
-    const kernel = await Kernel.boot()
+    const kernel = new Kernel()
     const proc = await kernel.spawn({ argv: ['bun', 'run', 'script.ts'] })
 
     await bootstrapProcessWorker({
@@ -52,7 +52,7 @@ describe('bun-web M1 kernel + vfs smoke', () => {
 
     expect(scope.__BUN_WEB_PROCESS_CONTEXT__?.pid).toBe(proc.pid)
 
-    await Kernel.shutdown()
+    await kernel.shutdown()
   })
 
   test('node process shape works in m1', () => {

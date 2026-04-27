@@ -1,5 +1,5 @@
 import { Subscription } from '@mars/web-shared'
-import type { ContainerEventMap, ServerReadyEvent } from './client.types'
+import type { ContainerEvents, ServerReadyEvent } from './client.types'
 
 type ReadyCallback = (event: ServerReadyEvent) => void
 type PreviewManagerEvents = {
@@ -7,7 +7,7 @@ type PreviewManagerEvents = {
 }
 
 type ServerReadySource = {
-  on(event: 'server-ready', listener: (event: ContainerEventMap['server-ready']) => void): () => void
+  on(event: 'server-ready', listener: ContainerEvents['server-ready']): () => void
 }
 
 /**

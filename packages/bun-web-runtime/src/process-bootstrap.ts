@@ -2,6 +2,7 @@ import { createProcess, installProcessGlobal } from '@mars/web-node'
 import { installBunGlobals } from './bun-globals'
 import { initRuntimeBundler } from './bundler-runtime'
 import { initRuntimeTranspiler } from './transpiler-runtime'
+import { InitializerPipeline } from '@mars/web-shared'
 import type { Kernel } from '@mars/web-kernel'
 import type { RuntimeBundlerInitOptions } from './bundler-runtime'
 
@@ -119,48 +120,20 @@ export interface BootstrappedContext {
 }
 
 export class ProcessBootstrap {
-  private readonly initializers: ProcessBootstrapInitializer[] = []
+  private readonly initializerPipeline = new InitializerPipeline<ProcessBootstrapInitializerContext>()
 
   registerInitializer(initializer: ProcessBootstrapInitializer): () => void {
-    const existingIndex = this.initializers.findIndex(item => item.id === initializer.id)
-    if (existingIndex >= 0) {
-      this.initializers.splice(existingIndex, 1)
-    }
-    this.initializers.push(initializer)
-
-    return () => {
-      const index = this.initializers.findIndex(item => item.id === initializer.id)
-      if (index >= 0) {
-        this.initializers.splice(index, 1)
-      }
-    }
+    return this.initializerPipeline.register(initializer)
   }
 
-  async bootstrap(
+  async boot(
     opts: ProcessBootstrapOptions,
     /** Optional MessagePort to send stdio back through. When null, uses globalThis.postMessage. */
     stdioPort?: MessagePort | null,
   ): Promise<BootstrappedContext> {
     const scope = globalThis as Record<string, unknown>
     const initializerContext: ProcessBootstrapInitializerContext = { opts, scope }
-    const runAllInitializers = opts.bootstrapInitializers === 'all'
-    const selectedInitializers = Array.isArray(opts.bootstrapInitializers)
-      ? new Set(opts.bootstrapInitializers)
-      : null
-
-    for (const initializer of this.initializers) {
-      const explicitlySelected = runAllInitializers || selectedInitializers?.has(initializer.id) === true
-
-      if (selectedInitializers && !explicitlySelected) {
-        continue
-      }
-
-      if (!explicitlySelected && initializer.shouldRun && !initializer.shouldRun(initializerContext)) {
-        continue
-      }
-
-      await initializer.run(initializerContext)
-    }
+    await this.initializerPipeline.run(initializerContext, opts.bootstrapInitializers)
 
     const port = stdioPort ?? null
     const fallbackPostMessage: PostMessageFn | null =
@@ -172,6 +145,7 @@ export class ProcessBootstrap {
 
     const stdout = new StdioWriter(port, opts.pid, 'stdout', fallbackPostMessage)
     const stderr = new StdioWriter(port, opts.pid, 'stderr', fallbackPostMessage)
+    const bunGlobal = (globalThis as Record<string, unknown>).Bun as { version?: string } | undefined
 
     // 1. Create process object
     const proc = createProcess({
@@ -179,7 +153,7 @@ export class ProcessBootstrap {
       argv: opts.argv,
       env: opts.env,
       cwd: opts.cwd,
-      version: typeof Bun !== 'undefined' ? Bun.version : '0.0.0-web',
+      version: bunGlobal?.version ?? '0.0.0-web',
       stdin: {
         read: () => null,
       },
@@ -269,6 +243,6 @@ export async function bootstrapProcessWorker(
   /** Optional MessagePort to send stdio back through. When null, uses globalThis.postMessage. */
   stdioPort?: MessagePort | null,
 ): Promise<BootstrappedContext> {
-  return defaultProcessBootstrap.bootstrap(opts, stdioPort)
+  return defaultProcessBootstrap.boot(opts, stdioPort)
 }
 

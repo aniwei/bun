@@ -248,7 +248,7 @@ export function spawn(options: RuntimeSpawnOptions): ChildProcess {
     throw new Error('spawn requires a non-empty cmd array')
   }
 
-  const kernel = options.kernel ?? Kernel.instance
+  const kernel = options.kernel ?? new Kernel(options.kernelConfig ?? {})
   const ownSupervisor = options.supervisor ? null : new RuntimeProcessSupervisor(kernel)
   const supervisor = options.supervisor ?? ownSupervisor!
 

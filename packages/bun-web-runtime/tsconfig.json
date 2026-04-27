@@ -12,5 +12,10 @@
     "sourceMap": true,
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts", "../bun-web-node/src/process.ts", "tsdown.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "../bun-web-node/src/process.ts",
+    "tsdown.config.ts"
+  ]
 }

@@ -68,6 +68,18 @@ export type KernelServiceWorkerRegisterHook = (payload: {
   registered: boolean
 }) => void | Promise<void>
 
+export type KernelServiceWorkerHookStage =
+  | 'boot'
+  | 'service-worker.before-register'
+  | 'service-worker.register'
+
+export type KernelServiceWorkerRegisterErrorHook = (payload: {
+  kernel: Kernel
+  serviceWorkerUrl: string
+  stage: KernelServiceWorkerHookStage
+  error: unknown
+}) => void | Promise<void>
+
 export interface KernelPortRegistration {
   host?: string
   protocol?: 'http' | 'https'
@@ -86,6 +98,7 @@ export interface KernelConfig {
   moduleRequestHandler?: KernelModuleRequestHandler
   serviceWorkerBeforeRegisterHooks?: KernelServiceWorkerBeforeRegisterHook[]
   serviceWorkerRegisterHooks?: KernelServiceWorkerRegisterHook[]
+  serviceWorkerRegisterErrorHooks?: KernelServiceWorkerRegisterErrorHook[]
 }
 
 export interface KernelProcessExecutionRequest {

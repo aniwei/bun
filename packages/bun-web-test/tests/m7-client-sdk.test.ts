@@ -239,12 +239,154 @@ describe('BunContainer – lifecycle', () => {
     }
   })
 
+  it('boot() continues when lifecycle hooks throw and publishes register.error hook', async () => {
+    const originalNavigator = globalThis.navigator
+    const originalWindow = (globalThis as Record<string, unknown>).window
+    const originalSkipWaiting = (globalThis as Record<string, unknown>).skipWaiting
+    const originalClients = (globalThis as Record<string, unknown>).clients
+    const stages: string[] = []
+
+    Object.defineProperty(globalThis, 'window', {
+      value: {},
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'skipWaiting', {
+      value: undefined,
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'clients', {
+      value: undefined,
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        serviceWorker: {
+          register: async () => ({} as ServiceWorkerRegistration),
+          ready: Promise.resolve({} as ServiceWorkerRegistration),
+        },
+      },
+      configurable: true,
+    })
+
+    try {
+      const container = await BunContainer.boot({
+        serviceWorkerUrl: '/sw.js',
+        hooks: {
+          boot: [() => { throw new Error('boot hook failure') }],
+          serviceWorkerBeforeRegister: [() => { throw new Error('before register hook failure') }],
+          serviceWorkerRegister: [() => { throw new Error('register hook failure') }],
+          serviceWorkerRegisterError: [payload => stages.push(payload.stage)],
+        },
+      })
+
+      expect(container.status).toBe('ready')
+      expect(stages).toEqual([
+        'boot',
+        'service-worker.before-register',
+        'service-worker.register',
+      ])
+
+      await container.shutdown()
+    } finally {
+      Object.defineProperty(globalThis, 'window', {
+        value: originalWindow,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'skipWaiting', {
+        value: originalSkipWaiting,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'clients', {
+        value: originalClients,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+      })
+    }
+  })
+
+  it('boot() publishes service-worker.register.error hook when registration fails', async () => {
+    const originalNavigator = globalThis.navigator
+    const originalWindow = (globalThis as Record<string, unknown>).window
+    const originalSkipWaiting = (globalThis as Record<string, unknown>).skipWaiting
+    const originalClients = (globalThis as Record<string, unknown>).clients
+    const errors: Array<{ stage: string; message: string }> = []
+
+    Object.defineProperty(globalThis, 'window', {
+      value: {},
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'skipWaiting', {
+      value: undefined,
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'clients', {
+      value: undefined,
+      configurable: true,
+    })
+
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        serviceWorker: {
+          register: async () => {
+            throw new Error('register boom')
+          },
+          ready: Promise.resolve({} as ServiceWorkerRegistration),
+        },
+      },
+      configurable: true,
+    })
+
+    try {
+      const container = await BunContainer.boot({
+        serviceWorkerUrl: '/sw.js',
+        hooks: {
+          serviceWorkerRegisterError: [payload => {
+            errors.push({
+              stage: payload.stage,
+              message: payload.error instanceof Error ? payload.error.message : String(payload.error),
+            })
+          }],
+        },
+      })
+
+      expect(container.status).toBe('ready')
+      expect(errors).toHaveLength(1)
+      expect(errors[0]?.stage).toBe('service-worker.register')
+      expect(errors[0]?.message).toContain('register boom')
+
+      await container.shutdown()
+    } finally {
+      Object.defineProperty(globalThis, 'window', {
+        value: originalWindow,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'skipWaiting', {
+        value: originalSkipWaiting,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'clients', {
+        value: originalClients,
+        configurable: true,
+      })
+      Object.defineProperty(globalThis, 'navigator', {
+        value: originalNavigator,
+        configurable: true,
+      })
+    }
+  })
+
   it('boot() exposes kernel.serviceWorker controller', async () => {
     const container = await BunContainer.boot()
 
-    expect(Kernel.instance.serviceWorker).toBeDefined()
-    expect(typeof Kernel.instance.serviceWorker.register).toBe('function')
-    expect(typeof Kernel.instance.serviceWorker.unregister).toBe('function')
+    expect(container._kernel.serviceWorker).toBeDefined()
+    expect(typeof container._kernel.serviceWorker.register).toBe('function')
+    expect(typeof container._kernel.serviceWorker.unregister).toBe('function')
 
     await container.shutdown()
   })
@@ -336,7 +478,7 @@ describe('BunContainer – lifecycle', () => {
 
   it('kernel.serviceWorker module request bridge resolves through configured transport', async () => {
     const container = await BunContainer.boot()
-    const controller = Kernel.instance.serviceWorker
+    const controller = container._kernel.serviceWorker
 
     controller.configureModuleRequestTransport({
       send(message) {
@@ -373,7 +515,7 @@ describe('BunContainer – lifecycle', () => {
 
   it('kernel.serviceWorker module message listener handles MODULE_RESPONSE payloads', async () => {
     const container = await BunContainer.boot()
-    const controller = Kernel.instance.serviceWorker
+    const controller = container._kernel.serviceWorker
     const listener = controller.createModuleMessageListener()
 
     controller.configureModuleRequestTransport({
@@ -420,7 +562,7 @@ describe('BunContainer – lifecycle', () => {
             postMessage(message: unknown) {
               posted.push(message)
               queueMicrotask(() => {
-                Kernel.instance.serviceWorker.receiveModuleResponse({
+                container._kernel.serviceWorker.receiveModuleResponse({
                   type: 'MODULE_RESPONSE',
                   requestId: (message as { requestId: string }).requestId,
                   status: 200,
@@ -438,7 +580,7 @@ describe('BunContainer – lifecycle', () => {
 
     try {
       const container = await BunContainer.boot()
-      const bridge = Kernel.instance.serviceWorker.createModuleRequestBridge({ timeoutMs: 100 })
+      const bridge = container._kernel.serviceWorker.createModuleRequestBridge({ timeoutMs: 100 })
 
       const response = await bridge.requestModule({
         type: 'MODULE_REQUEST',
@@ -476,7 +618,7 @@ describe('BunContainer – lifecycle', () => {
 
     try {
       const container = await BunContainer.boot()
-      const bridge = Kernel.instance.serviceWorker.createModuleRequestBridge({ timeoutMs: 100 })
+      const bridge = container._kernel.serviceWorker.createModuleRequestBridge({ timeoutMs: 100 })
 
       await expect(
         bridge.requestModule({
@@ -499,7 +641,7 @@ describe('BunContainer – lifecycle', () => {
 
   it('kernel.serviceWorker module request bridge rejects duplicate in-flight request ids', async () => {
     const container = await BunContainer.boot()
-    const controller = Kernel.instance.serviceWorker
+    const controller = container._kernel.serviceWorker
 
     controller.configureModuleRequestTransport({
       send() {
@@ -540,7 +682,7 @@ describe('BunContainer – lifecycle', () => {
 
   it('kernel.serviceWorker module request bridge rejects on transport timeout', async () => {
     const container = await BunContainer.boot()
-    const controller = Kernel.instance.serviceWorker
+    const controller = container._kernel.serviceWorker
 
     controller.configureModuleRequestTransport({
       send() {

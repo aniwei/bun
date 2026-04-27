@@ -20,6 +20,7 @@
     "@mars/web-bundler": "workspace:*",
     "@mars/web-kernel": "workspace:*",
     "@mars/web-node": "workspace:*",
+    "@mars/web-shared": "workspace:*",
     "@mars/web-shell": "workspace:*",
     "@mars/web-transpiler": "workspace:*",
     "@mars/web-vfs": "workspace:*"

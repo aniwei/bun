@@ -65,10 +65,9 @@ describe('M4 serve + service worker routing', () => {
   })
 
   test('serve register/reload/stop lifecycle works with kernel port table', async () => {
-    await Kernel.shutdown()
     clearServeRegistry()
 
-    const kernel = await Kernel.boot({})
+    const kernel = new Kernel({})
     const app = serve(
       {
         port: 4401,
@@ -88,7 +87,7 @@ describe('M4 serve + service worker routing', () => {
     app.stop()
     expect(kernel.resolvePort(4401)).toBeNull()
 
-    await Kernel.shutdown()
+    await kernel.shutdown()
     clearServeRegistry()
   })
 

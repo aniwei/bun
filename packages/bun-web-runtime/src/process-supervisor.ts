@@ -53,11 +53,15 @@ export class RuntimeProcessSupervisor {
       if (payload.pid !== pid) return
       onExit?.(payload.code)
     }
-    this.kernel.on('processExit', handleExit)
+    const kernelEvents = this.kernel as unknown as {
+      on?: (event: 'processExit', listener: (payload: { pid: Pid; code: number }) => void) => void
+      off?: (event: 'processExit', listener: (payload: { pid: Pid; code: number }) => void) => void
+    }
+    kernelEvents.on?.('processExit', handleExit)
 
     const cleanup = () => {
       detachPort()
-      this.kernel.off('processExit', handleExit)
+      kernelEvents.off?.('processExit', handleExit)
       if (this.cleanupByPid.get(pid) === cleanup) {
         this.cleanupByPid.delete(pid)
       }

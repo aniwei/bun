@@ -1,4 +1,4 @@
-export type PortResolver = {
+export interface PortResolver {
   resolvePort(port: number): number | null
 }
 
@@ -36,7 +36,7 @@ export type ServiceWorkerGlobalLike = FetchEventTargetLike & {
   }
 }
 
-abstract class AbstractSwLifecycleManager {
+abstract class ServiceWorkerLifecycle {
   private cleanup: (() => void) | null = null
 
   install(): () => void {
@@ -57,7 +57,7 @@ abstract class AbstractSwLifecycleManager {
 }
 
 const BUN_LOCAL_SUFFIX = '.bun.local'
-const MODULE_REQUEST_PREFIX = '/__bun__/modules/'
+const MODULE_REQUEST_PREFIX = '/__bun__/module/'
 
 function parsePortSegment(pathname: string): number | null {
   const parts = pathname.split('/').filter(Boolean)
@@ -399,7 +399,8 @@ function isAlreadyInitializedError(error: unknown): boolean {
 }
 
 async function defaultLoadEsbuild(): Promise<EsbuildTransformLike> {
-  const loaded = (await import('esbuild-wasm')) as unknown as EsbuildTransformLike
+  const moduleName = 'esbuild-wasm'
+  const loaded = (await import(moduleName)) as unknown as EsbuildTransformLike
   if (!loaded || typeof loaded.transform !== 'function') {
     throw new Error('esbuild-wasm transform is unavailable')
   }
@@ -542,7 +543,7 @@ export function installWorkerScriptInterceptor(
   return manager.install()
 }
 
-export class WorkerScriptInterceptorManager extends AbstractSwLifecycleManager {
+export class WorkerScriptInterceptorManager extends ServiceWorkerLifecycle {
   private readonly processor: WorkerScriptProcessor
 
   constructor(
@@ -644,7 +645,7 @@ type CompositeServiceWorkerOptions = {
   moduleRequestBridge?: ModuleRequestBridge
 }
 
-export class WebServiceWorkerManager extends AbstractSwLifecycleManager {
+export class WebServiceWorkerManager extends ServiceWorkerLifecycle {
   constructor(
     private readonly target: ServiceWorkerGlobalLike,
     private readonly resolver: PortResolver,
@@ -696,17 +697,21 @@ export class WebServiceWorkerManager extends AbstractSwLifecycleManager {
   }
 }
 
+export function  createServiceWorkerRuntime() {
+  
+}
+
 export function installKernelServiceWorkerBridge(
   kernel: KernelSwBridge,
   target: ServiceWorkerGlobalLike,
   handlerRegistry: ServeHandlerRegistry,
   options: KernelServiceWorkerBridgeOptions = {},
 ): () => void {
-  const manager = new KernelServiceWorkerBridgeManager(kernel, target, handlerRegistry, options)
+  const manager = new ServiceWorkerRuntime(kernel, target, handlerRegistry, options)
   return manager.install()
 }
 
-export class KernelServiceWorkerBridgeManager extends AbstractSwLifecycleManager {
+export class ServiceWorkerRuntime extends ServiceWorkerLifecycle {
   private readonly pidPortMap = new Map<number, number>()
 
   constructor(

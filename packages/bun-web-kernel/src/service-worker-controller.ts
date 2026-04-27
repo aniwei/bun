@@ -53,8 +53,14 @@ export class KernelServiceWorkerController {
   private moduleRequestHandler: KernelModuleRequestProtocolHandler | null = null
   private moduleRequestTransport: KernelModuleRequestTransport | null = null
   private readonly pendingModuleRequests = new Map<string, PendingModuleRequest>()
+  private moduleMessageListener: ((event: MessageEvent<KernelModuleMessage>) => void) | null = null
 
   dispose(reason = 'Kernel service worker controller disposed'): void {
+    const serviceWorker = getServiceWorkerContainer()
+    if (serviceWorker && this.moduleMessageListener) {
+      serviceWorker.removeEventListener?.('message', this.moduleMessageListener)
+    }
+
     for (const [, pending] of this.pendingModuleRequests) {
       clearTimeout(pending.timeoutId)
       pending.reject(new Error(reason))
@@ -64,6 +70,7 @@ export class KernelServiceWorkerController {
     this.registrationConfig = null
     this.moduleRequestHandler = null
     this.moduleRequestTransport = null
+    this.moduleMessageListener = null
   }
 
   configure(config: KernelServiceWorkerRegistrationConfig): void {
@@ -90,6 +97,26 @@ export class KernelServiceWorkerController {
   createModuleMessageListener(): (event: MessageEvent<KernelModuleMessage> | { data: KernelModuleMessage }) => void {
     return event => {
       void this.handleModuleMessage(event.data)
+    }
+  }
+
+  installMessageBridge(): (() => void) | null {
+    const serviceWorker = getServiceWorkerContainer()
+    if (!serviceWorker?.addEventListener) {
+      return null
+    }
+
+    const listener =
+      this.moduleMessageListener ??
+      (this.createModuleMessageListener() as (event: MessageEvent<KernelModuleMessage>) => void)
+    this.moduleMessageListener = listener
+    serviceWorker.addEventListener('message', listener)
+
+    return () => {
+      serviceWorker.removeEventListener?.('message', listener)
+      if (this.moduleMessageListener === listener) {
+        this.moduleMessageListener = null
+      }
     }
   }
 

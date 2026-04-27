@@ -12,6 +12,7 @@ import type {
   KernelShellCommandHook,
   KernelShellCommandRegistry,
   KernelInitializerContext,
+  KernelServiceWorkerHookStage,
   KernelModuleRequest,
   KernelModuleResponse,
   KernelInitializerTask,
@@ -21,10 +22,16 @@ import type {
   ProcessDescriptor,
   SpawnOptions,
 } from './kernel.types'
-import type { VFS } from '@mars/web-vfs'
-import { createBuiltinCommandRegistry } from '@mars/web-shell'
-import { BunCommand } from './bun-command'
+import { BunCommandExecutor, createBunCommandExecutor } from './bun-command'
+import { createCommandRegistry } from '@mars/web-shell'
 import { KernelServiceWorkerController } from './service-worker-controller'
+import { createKernelBootHooksInitializer } from './kernel-initializer'
+import {
+  publishServiceWorkerBeforeRegisterHooks,
+  publishServiceWorkerRegisterErrorHooks,
+  publishServiceWorkerRegisterHooks,
+} from './kernel.hooks'
+import type { VFS } from '@mars/web-vfs'
 
 type KernelEvents = Events & {
   stdio: (payload: { pid: Pid; kind: 'stdout' | 'stderr'; data: string }) => void
@@ -53,34 +60,9 @@ type KernelExecutionContext = KernelShellContext & {
 }
 
 export class Kernel extends Subscription<KernelEvents> {
-  private static current: Kernel | null = null
-
-  static async boot(config: KernelConfig = {}, vfs?: VFS): Promise<Kernel> {
-    if (Kernel.current) {
-      return Kernel.current
-    }
-
-    const kernel = new Kernel(config, vfs)
-    Kernel.current = kernel
-    return kernel
-  }
-
-  static async shutdown(): Promise<void> {
-    Kernel.current?.serviceWorker.dispose()
-    Kernel.current = null
-  }
-
-  static get instance(): Kernel {
-    if (!Kernel.current) {
-      throw new KernelStateError('Kernel has not been booted')
-    }
-
-    return Kernel.current
-  }
-
   private nextPid = 100
-  private readonly processTable = new ProcessTable()
   private readonly portTable = new Map<number, Pid>()
+  private readonly processTable = new ProcessTable()
   private readonly mountedFiles = new Map<string, string | Uint8Array>()
   private readonly bridge: SyscallBridge
   // stdio channels: pid → { stdout, stderr } MessageChannel ports
@@ -92,13 +74,14 @@ export class Kernel extends Subscription<KernelEvents> {
   // exited process codes awaiting waitpid reap
   private readonly exitedCodes = new Map<Pid, number>()
   private readonly commandRegistry: KernelShellCommandRegistry
-  private readonly bunCommand: BunCommand
+  private readonly bunCommand: BunCommandExecutor
   private readonly initializerPipeline = new InitializerPipeline<KernelInitializerContext>()
-  private readonly processWorkerExecutor?: KernelConfig['processExecutor']
   private readonly processExecutor: (request: KernelProcessExecutionRequest) => Promise<KernelProcessExecutionResult>
+  private readonly processWorkerExecutor?: KernelConfig['processExecutor']
+
   readonly serviceWorker: KernelServiceWorkerController
 
-  private constructor(
+  constructor(
     readonly config: KernelConfig,
     readonly vfs?: VFS,
   ) {
@@ -106,11 +89,11 @@ export class Kernel extends Subscription<KernelEvents> {
     const sab = new SharedArrayBuffer(config.sabSize ?? 1024 * 1024)
 
     this.bridge = new SyscallBridge(sab)
-    this.commandRegistry = createBuiltinCommandRegistry() as KernelShellCommandRegistry
     this.serviceWorker = new KernelServiceWorkerController()
-
+    this.commandRegistry = createCommandRegistry() as KernelShellCommandRegistry
     this.processWorkerExecutor = config.processExecutor
-    this.bunCommand = new BunCommand({
+
+    this.bunCommand = createBunCommandExecutor({
       readMountedText: path => this.readMountedText(path),
       writeMounted: (path, content) => this.writeMounted(path, content),
       getManifestPath: cwd => this.getManifestPath(cwd),
@@ -119,18 +102,12 @@ export class Kernel extends Subscription<KernelEvents> {
 
     this.registerKernelProcessWorkerCommands()
 
-    this.initializerPipeline.register({
-      id: 'kernel-boot-hooks',
-      order: 100,
-      run: async context => {
-        for (const hook of this.config.bootHooks ?? []) {
-          await hook({
-            kernel: context.kernel,
-            serviceWorkerUrl: context.serviceWorkerUrl,
-          })
-        }
-      },
-    })
+    this.initializerPipeline.register(
+      createKernelBootHooksInitializer({
+        bootHooks: this.config.bootHooks,
+        publishRegisterError: payload => this.publishServiceWorkerRegisterError(payload),
+      }),
+    )
 
     for (const initializer of this.config.initializers ?? []) {
       this.initializerPipeline.register(initializer)
@@ -141,6 +118,10 @@ export class Kernel extends Subscription<KernelEvents> {
     }
 
     this.processExecutor = async request => this.executeWithShellRegistry(request)
+  }
+
+  async shutdown(): Promise<void> {
+    this.serviceWorker.dispose()
   }
 
   registerInitializer(initializer: KernelInitializerTask): () => void {
@@ -161,22 +142,36 @@ export class Kernel extends Subscription<KernelEvents> {
   }
 
   async publishServiceWorkerRegister(registered: boolean, serviceWorkerUrl: string): Promise<void> {
-    for (const hook of this.config.serviceWorkerRegisterHooks ?? []) {
-      await hook({
-        kernel: this,
-        serviceWorkerUrl,
-        registered,
-      })
-    }
+    await publishServiceWorkerRegisterHooks({
+      config: this.config,
+      kernel: this,
+      serviceWorkerUrl,
+      registered,
+      publishRegisterError: payload => this.publishServiceWorkerRegisterError(payload),
+    })
   }
 
   async publishServiceWorkerBeforeRegister(serviceWorkerUrl: string): Promise<void> {
-    for (const hook of this.config.serviceWorkerBeforeRegisterHooks ?? []) {
-      await hook({
-        kernel: this,
-        serviceWorkerUrl,
-      })
-    }
+    await publishServiceWorkerBeforeRegisterHooks({
+      config: this.config,
+      kernel: this,
+      serviceWorkerUrl,
+      publishRegisterError: payload => this.publishServiceWorkerRegisterError(payload),
+    })
+  }
+
+  async publishServiceWorkerRegisterError(payload: {
+    stage: KernelServiceWorkerHookStage
+    serviceWorkerUrl: string
+    error: unknown
+  }): Promise<void> {
+    await publishServiceWorkerRegisterErrorHooks({
+      config: this.config,
+      kernel: this,
+      serviceWorkerUrl: payload.serviceWorkerUrl,
+      stage: payload.stage,
+      error: payload.error,
+    })
   }
 
   async handleModuleRequest(request: KernelModuleRequest): Promise<KernelModuleResponse> {
@@ -527,7 +522,9 @@ export class Kernel extends Subscription<KernelEvents> {
           if (this.vfs) {
             this.vfs.writeFileSync(
               file.path,
-              typeof file.content === 'string' ? file.content : Buffer.from(file.content),
+              typeof file.content === 'string'
+                ? file.content
+                : new TextDecoder().decode(file.content),
             )
           }
         }
