@@ -1,5 +1,6 @@
 export * from "./cache"
 export * from "./installer"
 export * from "./plan"
+export * from "./registry"
 export * from "./types"
 export * from "./write-node-modules"

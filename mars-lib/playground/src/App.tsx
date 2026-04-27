@@ -1,17 +1,19 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 
 import {
+  ensurePlaygroundRuntimeStatus,
   isPlaygroundCaseRunnable,
   moduleCases,
   runPlaygroundCase,
   runRunnablePlaygroundCases,
 } from "./browser-runtime"
 
-import type { PlaygroundRunResult } from "./browser-runtime"
+import type { PlaygroundRunResult, PlaygroundRuntimeStatus } from "./browser-runtime"
 
 export function App() {
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState<PlaygroundRunResult[]>([])
+  const [runtimeStatus, setRuntimeStatus] = useState<PlaygroundRuntimeStatus | null>(null)
   const runnableCases = useMemo(() => {
     return moduleCases.filter(playgroundCase => isPlaygroundCaseRunnable(playgroundCase.id))
   }, [])
@@ -22,6 +24,7 @@ export function App() {
   async function runAll() {
     setRunning(true)
     setResults(await runRunnablePlaygroundCases())
+    setRuntimeStatus(await ensurePlaygroundRuntimeStatus())
     setRunning(false)
   }
 
@@ -33,6 +36,14 @@ export function App() {
     setRunning(false)
   }
 
+  async function refreshRuntimeStatus() {
+    setRuntimeStatus(await ensurePlaygroundRuntimeStatus())
+  }
+
+  useEffect(() => {
+    void refreshRuntimeStatus()
+  }, [])
+
   return (
     <main className="shell">
       <header className="toolbar">
@@ -41,9 +52,48 @@ export function App() {
           <p>Vite + TypeScript + React</p>
         </div>
         <button type="button" onClick={runAll} disabled={running}>
-          {running ? "Running" : "Run Phase 1 + 2"}
+          {running ? "Running" : "Run All"}
         </button>
       </header>
+
+      <section className="runtime-strip" aria-label="runtime status">
+        <div className="runtime-strip-main">
+          <span className="case-module">Browser Runtime</span>
+          <div className="runtime-status-row">
+            <RuntimeBadge label="Secure" ok={runtimeStatus?.secureContext === true} />
+            <RuntimeBadge label="SAB" ok={runtimeStatus?.sharedArrayBuffer === true} />
+            <RuntimeBadge label="Isolated" ok={runtimeStatus?.crossOriginIsolated === true} />
+            <RuntimeBadge label="Service Worker" ok={runtimeStatus?.serviceWorkerReady === true} />
+            <RuntimeBadge label="Controller" ok={runtimeStatus?.serviceWorkerControlled === true} />
+          </div>
+          <dl className="runtime-details">
+            <div>
+              <dt>Origin</dt>
+              <dd>{runtimeStatus?.origin ?? "starting"}</dd>
+            </div>
+            <div>
+              <dt>SW script</dt>
+              <dd>{runtimeStatus?.serviceWorkerScriptURL ?? "starting"}</dd>
+            </div>
+            <div>
+              <dt>SW scope</dt>
+              <dd>{runtimeStatus?.serviceWorkerScope ?? "/"}</dd>
+            </div>
+            <div>
+              <dt>SW state</dt>
+              <dd>{runtimeStatus?.serviceWorkerState ?? "starting"}</dd>
+            </div>
+            <div>
+              <dt>Controller</dt>
+              <dd>{runtimeStatus?.serviceWorkerControllerURL ?? (runtimeStatus?.serviceWorkerRequiresReload ? "reload to claim page" : "not controlling yet")}</dd>
+            </div>
+          </dl>
+          {runtimeStatus?.error ? <pre>{runtimeStatus.error}</pre> : null}
+        </div>
+        <button type="button" onClick={refreshRuntimeStatus} disabled={running}>
+          Start / Refresh SW
+        </button>
+      </section>
 
       {phases.map(phase => (
         <section className="case-section" key={phase}>
@@ -76,5 +126,13 @@ export function App() {
         </section>
       ))}
     </main>
+  )
+}
+
+function RuntimeBadge(props: { label: string; ok: boolean }) {
+  return (
+    <span className={props.ok ? "status pass" : "status fail"}>
+      {props.label}
+    </span>
   )
 }

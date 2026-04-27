@@ -5,6 +5,7 @@ export interface TransformInput {
   code: string
   loader: Loader
   target?: "browser" | "bun" | "node"
+  format?: "commonjs" | "esm"
   sourcemap?: boolean
   define?: Record<string, string>
 }

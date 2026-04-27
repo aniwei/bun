@@ -1,4 +1,4 @@
-import { createInstallPlan, resolveCachedPackage } from "./plan"
+import { createInstallPlan, resolvePackage } from "./plan"
 import { writeNodeModules } from "./write-node-modules"
 
 import type {
@@ -18,7 +18,14 @@ export class MarsInstaller implements PackageInstaller {
   }
 
   async install(options: InstallOptions): Promise<InstallResult> {
-    const plan = await createInstallPlan(options, this.#options.cache)
+    const plan = await createInstallPlan(options, this.#options.cache, this.#options.registryClient)
+    for (const pkg of plan.packages) {
+      if (!pkg.tarballKey) continue
+      if (await this.#options.cache.getTarball(pkg.tarballKey)) continue
+      if (options.offline || !this.#options.registryClient) continue
+
+      await this.#options.cache.setTarball(pkg.tarballKey, await this.#options.registryClient.fetchTarball(pkg))
+    }
     await this.writeNodeModules(plan)
 
     return {
@@ -28,13 +35,19 @@ export class MarsInstaller implements PackageInstaller {
   }
 
   async resolvePackage(specifier: string, range: string): Promise<ResolvedPackage> {
-    return resolveCachedPackage(this.#options.cache, specifier, range)
+    return resolvePackage(this.#options.cache, specifier, range, {}, this.#options.registryClient)
   }
 
   async fetchTarball(pkg: ResolvedPackage): Promise<Uint8Array> {
     if (!pkg.tarballKey) return new Uint8Array()
 
-    return await this.#options.cache.getTarball(pkg.tarballKey) ?? new Uint8Array()
+    const cached = await this.#options.cache.getTarball(pkg.tarballKey)
+    if (cached) return cached
+    if (!this.#options.registryClient) return new Uint8Array()
+
+    const tarball = await this.#options.registryClient.fetchTarball(pkg)
+    await this.#options.cache.setTarball(pkg.tarballKey, tarball)
+    return tarball
   }
 
   async writeNodeModules(plan: InstallPlan): Promise<void> {

@@ -44,7 +44,7 @@ export class DefaultMarsBridgeEndpoint implements MarsBridgeEndpoint {
   readonly #timeoutMs: number
   readonly #idFactory: () => string
   readonly #pending = new Map<string, PendingRequest>()
-  readonly #listeners = new Map<string, Set<(payload: unknown, message: MarsMessage) => void>>()
+  readonly #listeners = new Map<string, Set<(payload: unknown, message: MarsMessage) => unknown | Promise<unknown>>>()
   readonly #handleMessage = (event: MessageEvent<MarsMessage | MarsResponse>) => {
     const message = event.data
 
@@ -127,10 +127,10 @@ export class DefaultMarsBridgeEndpoint implements MarsBridgeEndpoint {
 
   on<T>(
     type: string,
-    listener: (payload: T, message: MarsMessage<T>) => void,
+    listener: (payload: T, message: MarsMessage<T>) => unknown | Promise<unknown>,
   ): Disposable {
     const listeners = this.#listeners.get(type) ?? new Set()
-    const wrapped = listener as (payload: unknown, message: MarsMessage) => void
+    const wrapped = listener as (payload: unknown, message: MarsMessage) => unknown | Promise<unknown>
 
     listeners.add(wrapped)
     this.#listeners.set(type, listeners)
@@ -170,18 +170,34 @@ export class DefaultMarsBridgeEndpoint implements MarsBridgeEndpoint {
   }
 
   #handleRequest(message: MarsMessage): void {
+    if (message.target !== this.#source) return
+
     const listeners = this.#listeners.get(message.type)
     if (!listeners?.size) return
 
+    void this.#dispatchRequest(message, listeners)
+  }
+
+  async #dispatchRequest(
+    message: MarsMessage,
+    listeners: Set<(payload: unknown, message: MarsMessage) => unknown | Promise<unknown>>,
+  ): Promise<void> {
     for (const listener of listeners) {
       try {
-        listener(message.payload, message)
+        const payload = await listener(message.payload, message)
+        this.#transport.postMessage({
+          id: message.id,
+          ok: true,
+          payload,
+        })
+        return
       } catch (error) {
         this.#transport.postMessage({
           id: message.id,
           ok: false,
           error: serializeError(error),
         })
+        return
       }
     }
   }

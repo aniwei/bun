@@ -8,6 +8,8 @@ export interface PendingBuildOutput {
   path: string
   code: string
   loader: Loader
+  map?: string
+  mapPath?: string
 }
 
 export async function writeBuildOutputs(
@@ -20,9 +22,32 @@ export async function writeBuildOutputs(
     await vfs.mkdir(dirname(output.path), { recursive: true })
     await vfs.writeFile(output.path, output.code)
     artifacts.push(createBuildOutputArtifact(output))
+
+    if (output.map && output.mapPath) {
+      await vfs.writeFile(output.mapPath, output.map)
+      artifacts.push(createSourceMapArtifact(output.mapPath, output.map))
+    }
   }
 
   return artifacts
+}
+
+function createSourceMapArtifact(path: string, sourceMap: string): BuildOutputArtifact {
+  const bytes = new TextEncoder().encode(sourceMap)
+
+  return {
+    path,
+    kind: "source-map",
+    loader: "json",
+    size: bytes.byteLength,
+    text: async () => sourceMap,
+    arrayBuffer: async () => {
+      const arrayBuffer = new ArrayBuffer(bytes.byteLength)
+      new Uint8Array(arrayBuffer).set(bytes)
+
+      return arrayBuffer
+    },
+  }
 }
 
 function createBuildOutputArtifact(output: PendingBuildOutput): BuildOutputArtifact {

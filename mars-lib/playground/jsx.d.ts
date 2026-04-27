@@ -7,6 +7,7 @@ declare namespace JSX {
 declare const __MARS_LABEL__: string
 
 declare const Bun: {
+  sql(strings: TemplateStringsArray, ...values: Array<string | number | boolean | null>): Promise<Array<Record<string, string | number | boolean | null>>>
   file(path: string | URL): {
     text(): Promise<string>
   }
@@ -15,6 +16,7 @@ declare const Bun: {
 declare function require(specifier: string): Record<string, string | number>
 
 declare module "react" {
+  export function useEffect(effect: () => void | (() => void), deps: unknown[]): void
   export function useMemo<T>(factory: () => T, deps: unknown[]): T
   export function useState<T>(initialValue: T): [T, (nextValue: T | ((currentValue: T) => T)) => void]
 }
@@ -40,3 +42,10 @@ declare module "*?raw" {
   const source: string
   export default source
 }
+
+declare module "*.wasm?url" {
+  const url: string
+  export default url
+}
+
+declare const __MARS_WORKSPACE_ROOT__: string

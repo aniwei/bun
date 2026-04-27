@@ -1,10 +1,10 @@
 # Phase 3: API 覆盖与稳定性
 
-- 状态: Ready (Phase 2 Done, awaiting explicit start)
-- 总完成百分比: 12%
+- 状态: In Progress (Phase 3 prework started)
+- 总完成百分比: 59%
 - 测试状态: Pass
 - 依赖 Phase: Phase 1、Phase 2 已通过
-- 执行策略: Phase 3 需要用户明确启动后再进入主线实现；当前仅保留已完成的低风险预研切片与兼容矩阵维护。
+- 执行策略: Phase 3 已开始推进低风险预研切片；当前优先把命令层、Kernel pid、stdio、ServiceWorker/Worker 边界逐段补齐，并保持 Phase 1/2 验收不回退。
 - 对应技术设计文档: `mars-lib/rfc/0001-mars-lib-technical-design.md`
 - Playground 接入矩阵: `mars-lib/playground/README.md`
 - Playground 功能模块用例: `mars-lib/playground/module-cases.json`
@@ -17,9 +17,12 @@
 - 确认 Phase 3 不改变 Phase 1/2 的验收主线，只在现有 MarsRuntime、MarsKernel、MarsVFS、MarsLoader、MarsBundler 基础上扩展 API 覆盖率和稳定性。
 - 确认 `Bun.spawn()` 在浏览器中映射为受控 Worker 或内置命令，不承诺 native 子进程。
 - 确认 `Bun.spawnSync()` 在无 SharedArrayBuffer 环境下允许降级为明确错误或 async fallback，具体策略需要记录在未决问题中。
-- 确认 `Bun.build()` 可以先复用 MarsBundler 的构建能力，输出到 MarsVFS。
+- 确认 `Bun.build()` 可以先复用 MarsBundler 的 `esbuild-wasm` transform 能力，输出到 MarsVFS。
+- 确认运行时转译和 build 转译分工明确: MarsTranspiler/MarsLoader 继续通过 `@swc/wasm-web` 执行 TS/TSX/JSX，`Bun.build()` 预研切片独立使用 `esbuild-wasm` 输出构建产物。
+- 确认 `bun run index.ts` 先作为 MarsShell 命令层切片接入当前内存态 Kernel pid、`runEntryScript()`、SWC WASM loader 和 stdio bridge；后续再替换为 Kernel Worker + Process Worker 隔离模型。
+- 确认真实 ServiceWorker 链路仍未完成: 当前已具备 `fetch` event handler、registration/bootstrap、client/SW bridge、真实 playground SW scope smoke、页面级 SW/SAB 状态面板、`/src/*.ts(x)` 源码 URL 首跳、VFS `node_modules` bare import 二跳、Vite host network fallback，以及 SW/Process Worker VFS 自动 fanout 切片；完整 npm graph 与 Vite special path 完整接管尚未完成。
 - 确认 crypto/password 可以优先使用 WebCrypto 或 Rust crypto wasm，所有输入输出类型需与 Bun 常见用法兼容。
-- 确认 sqlite 使用 WASM 模块并在 MarsVFS 上读写数据库文件。
+- 确认 sqlite 先以 MarsVFS-backed SQL prework 锁定 `Bun.sql` facade、database 文件持久化和常见查询验收；后续替换为 sqlite WASM 模块。
 - 确认 WebSocket upgrade 经由 Service Worker/虚拟服务器通道实现，浏览器安全限制下不提供原生 TCP。
 - 确认 OPFS 持久化用于恢复 runtime 文件状态，不替代内存层热路径。
 - 确认 Chrome 与 Firefox 验收要分别覆盖 SAB 与 async fallback profile。
@@ -39,41 +42,46 @@
 ### 前置依赖
 
 - Phase 1: Runtime、VFS、Kernel、SW、Shell、Express/Koa 验收通过。
-- Phase 2: Resolver、Transpiler、Loader、Installer、Vite React TS、TSX 执行、playground 矩阵与文档同步验收通过。
+- Phase 2: Resolver、`@swc/wasm-web` Transpiler、Loader、Installer、Vite React TS、TSX 执行、playground 矩阵与文档同步验收通过。
 
 ## Todo
 
 | ID | 状态 | 完成百分比 | 测试通过 | 文件/模块 | 功能介绍 | 完成时设计核对 |
 | --- | --- | ---: | --- | --- | --- | --- |
-| M3-01 | In Progress | 65% | Pass | `mars-lib/packages/mars-runtime/src/compat-matrix.ts` | 定义 Bun API 兼容矩阵，记录 supported/partial/unsupported/fallback。 | 已记录 M1/M3 已实现 API 与 planned API，并由 Phase3 测试覆盖 `Bun.build` 条目；后续新增 API 需持续补全。 |
-| M3-02 | Not Started | 0% | Not Run | `mars-lib/packages/mars-kernel/src/process-worker-factory.ts` | 实现受控 Process Worker 创建、初始化、销毁。 | 核对 RFC 第 8 和第 23.2 节进程限制。 |
-| M3-03 | Not Started | 0% | Not Run | `mars-lib/packages/mars-kernel/src/stdio.ts` | 实现 stdin/stdout/stderr stream 桥接、backpressure 和关闭语义。 | 核对 RFC 第 8 节 stdio 事件。 |
-| M3-04 | Not Started | 0% | Not Run | `mars-lib/packages/mars-runtime/src/bun-spawn.ts` | 实现 `Bun.spawn()` 到 Process Worker 或内置命令的映射。 | 核对 RFC 第 11 与第 23.2 节。 |
-| M3-05 | Not Started | 0% | Not Run | `mars-lib/packages/mars-runtime/src/bun-spawn-sync.ts` | 实现 `Bun.spawnSync()` 的 SAB 路径和无 SAB 降级错误。 | 核对 RFC 第 23.3 与第 24 节未决问题。 |
-| M3-06 | In Progress | 70% | Pass | `mars-lib/packages/mars-bundler/src/build.ts` | 实现 `Bun.build()` 底层构建入口，支持 entrypoints/outdir/outfile/format/target。 | 已支持 entrypoints、outfile/outdir、format、target、define、sourcemap 占位与 VFS 读取；可构建 vite playground entry；完整依赖 bundling/splitting/minify 待补。 |
-| M3-07 | In Progress | 70% | Pass | `mars-lib/packages/mars-bundler/src/output-writer.ts` | 将 build 产物、source map、logs 写入 MarsVFS。 | 已写入 MarsVFS、自动创建输出目录，并返回 text/arrayBuffer artifact；source map 文件输出待补。 |
-| M3-08 | In Progress | 70% | Pass | `mars-lib/packages/mars-runtime/src/bun-build.ts` | 将 `Bun.build()` facade 接到 MarsBundler。 | `runtime.bun.build()` 已接入 MarsBundler 并覆盖 TSX entry 验收；Bun BuildResult 完整结构待补。 |
-| M3-09 | Not Started | 0% | Not Run | `mars-lib/packages/mars-crypto/src/hasher.ts` | 实现 `Bun.CryptoHasher` 常用算法，优先 sha1/sha256/sha512/md5。 | 核对 RFC 第 11 与第 22 M3。 |
-| M3-10 | Not Started | 0% | Not Run | `mars-lib/packages/mars-crypto/src/password.ts` | 实现 `Bun.password.hash()`、`verify()` 的浏览器兼容路径。 | 核对 RFC 第 11 节 password API。 |
-| M3-11 | Not Started | 0% | Not Run | `mars-lib/packages/mars-node/src/crypto.ts` | 实现 `node:crypto` 验收路径子集，如 createHash、randomUUID、randomBytes。 | 核对 RFC 第 12 与第 22 M3。 |
-| M3-12 | Not Started | 0% | Not Run | `mars-lib/packages/mars-sqlite/src/sqlite-wasm.ts` | 加载 sqlite WASM，初始化数据库实例。 | 核对 RFC 第 11 和第 18 节 sqlite 边界。 |
-| M3-13 | Not Started | 0% | Not Run | `mars-lib/packages/mars-sqlite/src/vfs-adapter.ts` | 将 sqlite 文件读写适配到 MarsVFS。 | 核对 RFC 第 9 和第 22 M3。 |
-| M3-14 | Not Started | 0% | Not Run | `mars-lib/packages/mars-runtime/src/bun-sql.ts` | 提供 `Bun.sql` 或 SQLFactory facade。 | 核对 RFC 第 11 节 `Bun.sql`。 |
+| M3-01 | In Progress | 75% | Pass | `mars-lib/packages/mars-runtime/src/compat-matrix.ts` | 定义 Bun API 兼容矩阵，记录 supported/partial/unsupported/fallback。 | 已记录 M1/M3 已实现 API 与 planned API，并由 Phase3 测试覆盖 Bun.build、bun run、Bun.spawn、spawnSync fallback、CryptoHasher、node:crypto 与 Bun.sql 条目；后续新增 API 需持续补全。 |
+| M3-02 | In Progress | 88% | Pass | `mars-lib/packages/mars-kernel/src/process-worker-factory.ts`, `mars-lib/packages/mars-kernel/src/kernel-worker-bootstrap.ts`, `mars-lib/packages/mars-kernel/src/kernel-worker-client.ts`, `mars-lib/packages/mars-runtime/src/process-worker-bootstrap.ts`, `mars-lib/packages/mars-runtime/src/process-worker-script.ts` | 实现受控 Process Worker 创建、初始化、销毁。 | 已覆盖受控 worker boot/message/terminate 生命周期、无 worker URL 的 in-memory fallback、Worker URL + `new Worker()` native carrier、Kernel Worker `kernel.connect` bootstrap 到 Process Worker lifecycle/VFS patch/run RPC、页面侧 Kernel Worker `new Worker()` carrier、`kernel.spawn({ kind: "worker" })` 自动创建 Process Worker 并将 stdout/exit 回灌 Kernel、Process Worker runtime bootstrap 的 `Bun`/`process`/`require` 上下文注入、module Worker bootstrap source/Blob URL 生成、factory 绑定源 VFS 后的自动 write/delete fanout，以及 playground 真实浏览器 Blob module Worker smoke；script loading 自动化待补。 |
+| M3-03 | In Progress | 74% | Pass | `mars-lib/packages/mars-kernel/src/stdio.ts`, `mars-lib/packages/mars-kernel/src/kernel.ts`, `mars-lib/packages/mars-kernel/src/process-worker-factory.ts`, `mars-lib/packages/mars-runtime/src/process-worker-bootstrap.ts` | 实现 stdin/stdout/stderr stream 桥接、backpressure 和关闭语义。 | 已覆盖 ProcessHandle stdin readable、`write()` 输入、stdout/stderr readable、WritableStream mirror，补齐 Process Worker native carrier 的 `process.worker.stdin/stdout/stderr/exit` 消息协议，让 Process Worker runtime bootstrap 执行 `bun run <entry>` 后把 console stdout/stderr 转发为 worker 输出消息，并让 `kernel.spawn({ kind: "worker" })` 自动把 Process Worker stdout/stderr/exit 回灌到 Kernel pid；stdin consumer 和 backpressure 精细语义待补。 |
+| M3-04 | In Progress | 35% | Pass | `mars-lib/packages/mars-runtime/src/install-global.ts`, `mars-lib/packages/mars-client/src/runtime.ts` | 实现 `Bun.spawn()` 到 Process Worker 或内置命令的映射。 | 当前 `Bun.spawn({ cmd: ["bun", "run", "index.ts"] })` 和 `runtime.spawn("bun", ["run", "index.ts"])` 已复用内存态 Kernel pid 与 runEntryScript，并已有 stdin/stdout/stderr bridge 前置；通用命令、真实 Process Worker 待补。 |
+| M3-05 | In Progress | 25% | Pass | `mars-lib/packages/mars-runtime/src/install-global.ts` | 实现 `Bun.spawnSync()` 的 SAB 路径和无 SAB 降级错误。 | 当前 async browser profile 返回明确 unsupported fallback result；SAB 同步执行路径待补。 |
+| M3-06 | In Progress | 75% | Pass | `mars-lib/packages/mars-bundler/src/build.ts` | 实现 `Bun.build()` 底层构建入口，支持 entrypoints/outdir/outfile/format/target。 | 已改用 `esbuild-wasm` transform，支持 entrypoints、outfile/outdir、format、target、define、sourcemap 与 VFS 读取；可构建 vite playground entry；完整依赖 bundling/splitting/minify 待补。 |
+| M3-07 | In Progress | 82% | Pass | `mars-lib/packages/mars-bundler/src/output-writer.ts` | 将 build 产物、source map、logs 写入 MarsVFS。 | 已写入 MarsVFS、自动创建输出目录，并返回 text/arrayBuffer artifact；`sourcemap: true` 会额外写出 `.js.map` source-map artifact。完整 BuildResult artifact 元数据待补。 |
+| M3-08 | In Progress | 75% | Pass | `mars-lib/packages/mars-runtime/src/bun-build.ts` | 将 `Bun.build()` facade 接到 MarsBundler。 | `runtime.bun.build()` 已接入 MarsBundler 的 esbuild 路径并覆盖 TSX entry 验收；Bun BuildResult 完整结构待补。 |
+| M3-09 | In Progress | 70% | Pass | `mars-lib/packages/mars-crypto/src/hasher.ts`, `mars-lib/packages/mars-runtime/src/install-global.ts` | 实现 `Bun.CryptoHasher` 常用算法，优先 sha1/sha256/sha512/md5。 | 已通过 WebCrypto 覆盖 sha1/sha256/sha512 async digest，并为 md5 补 Mars fallback，接入 `Bun.CryptoHasher`、`createHashDigest`、`node:crypto.createHash` 和 playground fixture；同步 digest 兼容待补。 |
+| M3-10 | In Progress | 45% | Pass | `mars-lib/packages/mars-crypto/src/password.ts`, `mars-lib/packages/mars-runtime/src/install-global.ts` | 实现 `Bun.password.hash()`、`verify()` 的浏览器兼容路径。 | 已通过 WebCrypto PBKDF2-SHA256 fallback 覆盖 hash/verify；Bun bcrypt/argon2 格式兼容和 cost 参数完整映射待补。 |
+| M3-11 | In Progress | 60% | Pass | `mars-lib/packages/mars-node/src/crypto.ts` | 实现 `node:crypto` 验收路径子集，如 createHash、createHmac、randomUUID、randomBytes。 | 已覆盖 randomUUID、randomBytes、sha/md5 async createHash digest 与 async createHmac digest；完整同步 Hash/Hmac、cipher/sign/verify 待补。 |
+| M3-12 | In Progress | 20% | Pass | `mars-lib/packages/mars-sqlite/src/sqlite.ts` | 加载 sqlite WASM，初始化数据库实例。 | 当前先以 MarsVFS-backed sqlite prework 覆盖 database state、create/insert/select/count/update/delete；原生 sqlite WASM 引擎待补。 |
+| M3-13 | In Progress | 40% | Pass | `mars-lib/packages/mars-sqlite/src/sqlite.ts` | 将 sqlite 文件读写适配到 MarsVFS。 | 已将 database state 持久化到 MarsVFS JSON 文件，并覆盖 reopen 后读取；后续需替换为 sqlite page/file adapter。 |
+| M3-14 | In Progress | 45% | Pass | `mars-lib/packages/mars-runtime/src/install-global.ts`, `mars-lib/packages/mars-runtime/src/types.ts`, `mars-lib/packages/mars-sqlite/src/sqlite.ts` | 提供 `Bun.sql` 或 SQLFactory facade。 | 已接入 `Bun.sql` tagged query、`Bun.sql.db` 默认 database 和 `Bun.sql.open(path)`，playground 登记 `phase3-bun-sql`；Bun sqlite 完整同步 API 待补。 |
 | M3-15 | Not Started | 0% | Not Run | `mars-lib/packages/mars-webapis/src/websocket-server.ts` | 实现 VirtualServer WebSocket upgrade 适配层。 | 核对 RFC 第 11 和第 22 M3。 |
 | M3-16 | Not Started | 0% | Not Run | `mars-lib/packages/mars-sw/src/websocket-route.ts` | 在 Service Worker/Bridge 中分发 WebSocket upgrade 或 HMR 通道。 | 核对 RFC 第 10、第 16 和第 23.2 节。 |
-| M3-17 | Not Started | 0% | Not Run | `mars-lib/packages/mars-vfs/src/opfs-adapter.ts` | 实现 OPFS persistence adapter，支持 open/get/set/delete/keys/close。 | 核对 RFC 第 9 与第 22 M3。 |
-| M3-18 | Not Started | 0% | Not Run | `mars-lib/packages/mars-vfs/src/snapshot.ts` | 实现 snapshot/restore，支持 runtime 文件状态恢复。 | 核对 RFC 第 6、第 9 和第 22 M4 前置能力。 |
-| M3-19 | Not Started | 0% | Not Run | `mars-lib/packages/mars-kernel/src/capabilities.ts` | 检测 SharedArrayBuffer、Atomics.wait、OPFS、Service Worker 等能力。 | 核对 RFC 第 23.3 节 SAB 风险对策。 |
-| M3-20 | Not Started | 0% | Not Run | `mars-lib/packages/mars-test/src/browser-profiles.ts` | 定义 chromium/firefox、sab/async fallback、memory/opfs 测试 profile。 | 核对 RFC 第 20.6 与第 21 节。 |
-| M3-21 | In Progress | 18% | Pass | `mars-lib/packages/mars-test/src/phase3.acceptance.test.ts` | 覆盖重复 boot/dispose、spawn/kill、build、crypto、sqlite、OPFS restore。 | 已新增 Phase3 验收入口并覆盖 Bun.build、vite playground entry 与兼容矩阵；稳定性、crypto、sqlite、OPFS 待补。 |
-| M3-22 | In Progress | 60% | Pass | `mars-lib/docs/compatibility/bun-api.md` | 生成或维护 Bun API 兼容矩阵文档。 | 已新增 Bun API 兼容矩阵文档并记录 Bun.build 当前支持范围；后续 API 需同步维护。 |
+| M3-17 | In Progress | 55% | Pass | `mars-lib/packages/mars-vfs/src/opfs-adapter.ts` | 实现 OPFS persistence adapter，支持 open/get/set/delete/keys/close。 | 已覆盖 open/get/set/delete/keys/close 和无 OPFS 环境 memory fallback；真实浏览器 OPFS profile 自动化待补。 |
+| M3-18 | In Progress | 88% | Pass | `mars-lib/packages/mars-vfs/src/snapshot.ts`, `mars-lib/packages/mars-vfs/src/patch.ts`, `mars-lib/packages/mars-runtime/src/process-worker-script.ts`, `mars-lib/playground/vite.config.ts` | 实现 snapshot/restore，支持 runtime 文件状态恢复。 | 已覆盖 FileTree JSON-safe base64 序列化、跨 runtime restore，并接入 Process Worker bootstrap script 与真实 ServiceWorker scope smoke 的启动态 VFS hydrate；新增 JSON-safe VFS patch 协议，Process Worker runtime 可在 boot 后应用增量 write/delete patch 再显式 run，ServiceWorker bridge 可通过 `sw.vfs.patch` 更新 scope 内 module VFS，`MarsRuntime` 已能用 VFS watcher 将 `Bun.write()` / `vfs.writeFile()` 自动 fanout 到 ServiceWorker VFS，`MarsProcessWorkerFactory` 也可绑定源 VFS 自动 fanout 到 Process Worker VFS。增量 snapshot 和文件元数据待补。 |
+| M3-19 | In Progress | 74% | Pass | `mars-lib/packages/mars-kernel/src/capabilities.ts`, `mars-lib/playground/vite.config.ts`, `mars-lib/playground/src/App.tsx` | 检测 SharedArrayBuffer、Atomics.wait、OPFS、Service Worker 等能力。 | 已覆盖 ServiceWorker、SharedArrayBuffer、Atomics.wait、OPFS、WebCrypto、Worker 检测，并让 playground dev/preview 输出 COOP/COEP/CORP headers 进入 `crossOriginIsolated`；页面状态面板会自动启动真实 ServiceWorker 并显示 SAB/SW ready 状态。Chrome/Firefox 自动化 profile 待接。 |
+| M3-20 | In Progress | 60% | Pass | `mars-lib/packages/mars-test/src/browser-profiles.ts` | 定义 chromium/firefox、sab/async fallback、memory/opfs 测试 profile。 | 已定义 async fallback、SAB worker、OPFS persistence、ServiceWorker module profiles，并有 OPFS memory fallback 验收；Chrome/Firefox 自动化矩阵待接。 |
+| M3-21 | In Progress | 92% | Pass | `mars-lib/packages/mars-test/src/phase3.acceptance.test.ts` | 覆盖重复 boot/dispose、spawn/kill、build、crypto、sqlite、OPFS restore。 | 已覆盖 Bun facade version 读取 package version、Bun.build、Bun.build external source map artifact、bun run、Bun.spawn、spawnSync fallback、stdio bridge、process worker factory、Process Worker native carrier + stdio protocol、Process Worker runtime bootstrap context 注入和 `bun run` module stdout/exit、Process Worker bootstrap script source/Blob URL 生成、bootstrap script snapshot restore、Process Worker runtime incremental VFS patch 后显式 run、Process Worker factory VFS write 自动 fanout、Kernel Worker bridge 到 Process Worker patch/run RPC、ServiceWorker bridge incremental VFS patch 后 module fetch、runtime VFS write 自动 fanout 到 ServiceWorker bridge、playground 真实浏览器 Worker smoke 登记、真实 ServiceWorker scope smoke 登记、playground host SAB/SW 状态登记、SW/Kernel/Process bridge prework、ServiceWorker fetch event handler、ServiceWorker registration lifecycle、ServiceWorker bootstrap connect、ServiceWorker ESM module response、`/src/*.ts` 源码 URL 首跳、VFS `node_modules` bare import 二跳与 Vite host network fallback、Kernel Worker bootstrap connect、Kernel Worker native carrier、MessageChannel transport、CryptoHasher、Bun.password、node:crypto createHash/createHmac、Bun.sql MarsVFS-backed sqlite prework、VFS snapshot restore、OPFS adapter、capabilities/profile、vite playground entry 与兼容矩阵；ServiceWorker scope 内真实 fetch event 自动化待补。 |
+| M3-22 | In Progress | 95% | Pass | `mars-lib/docs/compatibility/bun-api.md` | 生成或维护 Bun API 兼容矩阵文档。 | 已记录执行拓扑、stdio bridge、process worker factory、Process Worker runtime bootstrap context 注入、SW/Kernel/Process bridge prework、ServiceWorker fetch event handler、ServiceWorker registration/bootstrap、ServiceWorker ESM module response、Kernel Worker bootstrap/native carrier、MessageChannel transport、Bun.build、bun run、Bun.spawn、spawnSync fallback、CryptoHasher、Bun.password、node:crypto、Bun.sql、VFS snapshot、OPFS adapter、capabilities/profile 当前范围；后续 API 需同步维护。 |
+| M3-23 | In Progress | 50% | Pass | `mars-lib/packages/mars-client/src/runtime.ts`, `mars-lib/playground/core-modules/runtime/bun-run-index.ts` | 将 `bun run index.ts` 接到 MarsShell 命令层、Kernel 虚拟 pid、`runEntryScript()` 和 stdio bridge。 | 已覆盖 shell、runtime.spawn、Bun.spawn 三条入口的 playground fixture 与 Phase 3 验收，并补齐 Kernel stdio bridge 前置；当前仍运行在内存态 JS realm，Process Worker 隔离待补。 |
+| M3-24 | In Progress | 97% | Pass | `mars-lib/packages/mars-sw/`, `mars-lib/packages/mars-kernel/`, `mars-lib/packages/mars-bridge/`, `mars-lib/packages/mars-runtime/`, `mars-lib/packages/mars-client/src/runtime.ts`, `mars-lib/playground/vite.config.ts`, `mars-lib/playground/src/App.tsx` | 串联真实 ServiceWorker 注册、Kernel Worker、Process Worker、模块请求拦截和 bridge 消息流。 | 已补 `@mars/bridge` async request/response、in-memory transport pair 与 postMessage/MessageChannel transport，并新增 SW bridge controller、bridge-backed ServiceWorker kernel client、ServiceWorker fetch event handler、ServiceWorker registration lifecycle 抽象、SW script bootstrap connect、ServiceWorker `/__mars__/module` ESM response、ServiceWorker `/src/*.ts(x)` 源码 URL 首跳、ServiceWorker VFS `node_modules` bare import 二跳、ServiceWorker `sw.vfs.patch` 运行期 VFS 更新、runtime VFS write 到 ServiceWorker bridge 的自动 fanout、Kernel Worker bootstrap connect/controller、页面侧 Kernel Worker `new Worker()` carrier、`kernel.spawn({ kind: "worker" })` 自动创建 Process Worker 并回灌 stdout/exit、Process Worker native carrier、Process Worker stdio protocol、Process Worker lifecycle/VFS patch/run RPC、Process Worker runtime bootstrap context 注入、Process Worker bootstrap script source/Blob URL/snapshot restore 生成和 Process Worker VFS 自动 fanout；验收与 playground 覆盖 client->SW fetch、SW->Kernel `server.request`、MessageChannel Kernel RPC、runtime boot register/ready/client bridge 握手、SW bootstrap 接管 MessagePort、SW ESM entry import 重写和依赖二跳加载、SW `/src/*.ts` 首跳、SW VFS `node_modules` bare import 二跳、SW bridge patch 后 module fetch、runtime `Bun.write()` 自动 fanout 后 module fetch、Kernel bootstrap 接管 MessagePort、Kernel Worker native carrier 接管 MessagePort、dispose unregister、Kernel->Process Worker boot/message/terminate/patch/run、Kernel spawn 自动 Process Worker、Worker URL native carrier、stdin/stdout/stderr bridge、worker scope 内 `Bun`/`process`/`require` 注入、`bun run <entry>` stdout/exit 回传、worker script URL 生成、真实浏览器 Blob module Worker smoke、Process Worker 增量 VFS patch 后显式 run、Process Worker factory 自动 fanout 后 patch ack、Vite 同源 ServiceWorker script 注册后的 SW scope `/__mars__/module` auto patch+fetch smoke，以及 playground dev/preview COOP/COEP/CORP headers + 页面级 SAB/SW ready 状态面板；SW 生成脚本已移除 top-level await，改用 `bootPromise` 串联 install/activate/fetch/RPC 初始化。完整浏览器 fetch event、完整 npm graph 和 Vite special paths 待补。 |
 
 ## Phase 完成标准
 
 - `Bun.spawn()` 可运行受控 Worker 或内置命令，stdio 和退出码稳定。
 - `Bun.spawnSync()` 在支持 SAB 的环境下可用，在不支持时有明确可测试的降级行为。
-- `Bun.build()` 可构建 M2 验收项目核心样例，并写入 MarsVFS。
+- `Bun.build()` 可通过 `esbuild-wasm` 构建 M2 验收项目核心样例，并写入 MarsVFS。
+- M2 运行时路径继续通过 `@swc/wasm-web` 执行 TS/TSX/JSX playground，Phase 3 新增 build 能力不得回退或绕过该验收基线。
 - Phase 3 API 切片必须接入 playground；当前 prework 已通过 `playground/vite-react-ts` 覆盖 `Bun.build`，并登记到 `playground/module-cases.json`，但仍不作为 Phase 3 Done 依据。
+- `bun run index.ts` 必须经 Shell 命令层创建 Kernel pid，stdout/stderr 通过 ProcessHandle 或 CommandResult 可观测，并登记到 playground 矩阵。
+- 真实 ServiceWorker/Kernel Worker/Process Worker 链路必须覆盖启动、请求拦截、bridge 分发、worker 注入、模块加载和退出码回传，未完成前不得把 Phase 3 标记为 Done。
 - `Bun.CryptoHasher`、`Bun.password`、`node:crypto` 常用路径通过测试。
 - `Bun.sql` 或 sqlite wasm 能在 MarsVFS 上创建、读写并恢复数据库文件。
 - WebSocket upgrade 或 HMR 通道不破坏 M2 Vite HMR。

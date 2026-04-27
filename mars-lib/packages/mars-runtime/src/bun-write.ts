@@ -1,3 +1,5 @@
+import { dirname } from "@mars/vfs"
+
 import type { RuntimeContext, MarsBunFile } from "./types"
 
 export async function bunWrite(
@@ -11,6 +13,11 @@ export async function bunWrite(
       ? destination.pathname
       : destination.path
   const bytes = await inputToBytes(input)
+  const parentDirectory = dirname(targetPath)
+
+  if (!context.vfs.existsSync(parentDirectory)) {
+    await context.vfs.mkdir(parentDirectory, { recursive: true })
+  }
 
   await context.vfs.writeFile(targetPath, bytes)
   return bytes.byteLength

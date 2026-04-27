@@ -59,7 +59,13 @@ export interface PackageInstaller {
   writeNodeModules(plan: InstallPlan): Promise<void>
 }
 
+export interface PackageRegistryClient {
+  fetchMetadata(name: string): Promise<PackageMetadata>
+  fetchTarball(pkg: ResolvedPackage): Promise<Uint8Array>
+}
+
 export interface MarsInstallerOptions {
   vfs: MarsVFS
   cache: PackageCache
+  registryClient?: PackageRegistryClient
 }

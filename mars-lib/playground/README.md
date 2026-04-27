@@ -21,18 +21,39 @@
 | Phase 1 | `core-modules/bun/` | `core-modules/bun/vfs-shell.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 runtime boot、VFS 基础读写、目录 stat、MarsShell 命令和结构化 grep。 |
 | Phase 1 | `core-modules/bun/` | `core-modules/bun/bun-file.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 `Bun.write()`、`Bun.file()`、file size 和 JSON 读取。 |
 | Phase 1 | `core-modules/bun/` | `core-modules/bun/bun-serve.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 `Bun.serve()` 虚拟端口注册、preview URL 和 `runtime.fetch()` 转发。 |
-| Phase 1 | `express/` | `express/server.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 node:http 风格虚拟服务与 Express hello world 路径。 |
-| Phase 1 | `koa/` | `koa/server.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 async middleware 风格虚拟服务路径。 |
+| Phase 1 | `node-http/` | `node-http/server.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖纯 `node:http` `createServer()`、`listen(0)` 动态端口、POST headers/body、`address()` 和 `close()` 解绑。 |
+| Phase 1 | `express/` | `express/server.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 Express 风格 `app.use()`、`app.get()`、`app.post()`、`app.listen()`，包含 middleware header、GET query、POST JSON body 和 `close()` 解绑。 |
+| Phase 1 | `koa/` | `koa/server.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 Koa 风格 `app.use()` 洋葱中间件、async `next()`、`app.listen()`，包含 after middleware header、GET query、POST body 和 `close()` 解绑。 |
 | Phase 2 | `core-modules/resolver/` | `core-modules/resolver/browser-map.json` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 package browser field/map、exports/imports、pattern fallback 和禁用映射。 |
 | Phase 2 | `core-modules/transpiler/` | `core-modules/transpiler/app.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 通过 `@swc/wasm-web` 覆盖 static import、dynamic import、JSX 和 export async function，wasm 初始化由 `@mars/shared` 统一管理。 |
-| Phase 2 | `core-modules/loader/` | `core-modules/loader/entry.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 TSX 执行、static import、dynamic import、JSON require 和 CJS require。 |
-| Phase 2 | `core-modules/runtime/` | `core-modules/runtime/run-entry.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 `MarsRuntime.run()` 和 stdout/stderr stream 映射。 |
-| Phase 2 | `core-modules/installer/` | `core-modules/installer/dependencies.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖离线安装入口依赖，并配合 npm-cache fixture 真实安装递归依赖。 |
+| Phase 2 | `core-modules/loader/` | `core-modules/loader/entry.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖经 SWC WASM 转译后的 TSX 执行、static import、dynamic import、JSON require 和 CJS require。 |
+| Phase 2 | `core-modules/runtime/` | `core-modules/runtime/run-entry.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 `MarsRuntime.run()` 通过 `@swc/wasm-web` 转译 TS entry，并映射 stdout/stderr stream。 |
+| Phase 2 | `core-modules/installer/` | `core-modules/installer/dependencies.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖离线安装入口依赖，写入 `package.json` 后通过 `bun install` shell 命令配合 npm-cache fixture 真实安装递归依赖。 |
+| Phase 2 | `core-modules/installer/` | `core-modules/installer/dependencies.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 registry fetch provider: cache miss 时拉取 package metadata，并由 `bun install` 写入 `node_modules`。 |
 | Phase 2 | `core-modules/bundler/` | `core-modules/bundler/vite.config.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 Vite root、alias、define、DevServer module response 和 HMR path。 |
-| Phase 2 | `tsx/` | `tsx/app.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖基础 TSX/JSX 转换、loader 执行、stdout/stderr 映射和 first screen render model。 |
-| Phase 2 | `vite-react-ts/` | `vite-react-ts/src/App.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 通过 `loadPlaygroundFiles("vite-react-ts")` 被 DevServer、loader render model 和 Bun.build 真实加载。 |
+| Phase 2 | `tsx/` | `tsx/app.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 `@swc/wasm-web` TSX/JSX 转换、loader 执行、stdout/stderr 映射和 first screen render model。 |
+| Phase 2 | `vite-react-ts/` | `vite-react-ts/src/App.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 通过 `loadPlaygroundFiles("vite-react-ts")` 被 DevServer 和 loader render model 真实加载；运行时转译走 SWC WASM，Bun.build 预研走 esbuild-wasm。 |
 | Phase 2 | `fixtures/npm-cache/` | `fixtures/npm-cache/metadata.json` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 通过 `loadPlaygroundPackageCache()` 加载离线 metadata/tarball keys，并安装 vite/react/typescript 递归依赖。 |
-| Phase 3 | `vite-react-ts/` | `vite-react-ts/src/App.tsx` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | `Bun.build` 可构建 playground entry；Phase 2 Done 前仅作为预研切片。 |
+| Phase 3 | `vite-react-ts/` | `vite-react-ts/src/App.tsx` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | `Bun.build` 通过 `esbuild-wasm` 构建 playground entry，并在 `sourcemap: true` 时写出 `.js.map` artifact；Phase 2 Done 前仅作为预研切片。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/bun-run-index.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | `bun run index.ts` 通过 MarsShell 命令层进入 Kernel 虚拟 pid、SWC WASM loader 和 stdio bridge；真实 Process Worker 与 ServiceWorker 模块拦截待补。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/bun-run-index.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | `Bun.spawn({ cmd: ["bun", "run", "index.ts"] })` 复用 bun run 执行链路；通用命令执行和 Process Worker 隔离待补。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/crypto.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | `Bun.CryptoHasher` / `node:crypto` 预研用例覆盖 WebCrypto sha256 digest、Mars md5 fallback 与 async createHmac，完整同步 Hash/Hmac 待补。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/password.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | `Bun.password` 预研用例覆盖 WebCrypto PBKDF2-SHA256 hash/verify fallback，bcrypt/argon2 待补。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/sqlite.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | `Bun.sql` 预研用例覆盖 MarsVFS-backed sqlite create/insert/select/update/delete、tagged query 和 database 文件持久化；原生 sqlite WASM 待补。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/snapshot.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | VFS snapshot 用例覆盖 workspace tree 序列化与跨 runtime restore，为 OPFS persistence adapter 做前置。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/stdio.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | Kernel stdio 用例覆盖 ProcessHandle stdin 写入、stdout/stderr stream 和 WritableStream mirror。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/opfs.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | OPFS persistence adapter 用例覆盖 open/get/set/delete/keys/close；无 OPFS 环境使用 memory fallback 保持验收稳定。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/process-worker.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | Process worker factory 用例覆盖受控 worker boot/message/terminate、in-memory fallback、Worker URL native carrier 和 stdin/stdout/stderr 消息协议；worker global 注入仍属后续链路。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/process-worker-bootstrap.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | Process Worker runtime bootstrap 用例覆盖 boot payload 注入 Bun/process/require 上下文，并以 argv/cwd/env context 驱动 worker scope。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/process-worker-script.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | Process Worker script 用例覆盖 module Worker bootstrap source 生成和 Blob URL 发布，为真实 workerURL 打包加载做前置。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/process-worker-script.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Smoke | 真实浏览器 Worker smoke 用例通过 Blob module URL 创建原生 Worker，从 VFS snapshot restore base tree，再由源 runtime `Bun.write()` 触发 Process Worker VFS 自动 fanout，boot Process Worker runtime，并验证 `bun run` entry 的 stdout/exit 回传。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/bridge-chain.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | ServiceWorker/Kernel/Process Worker bridge 用例覆盖 client->SW fetch、SW->Kernel bridge-backed server.request、MessageChannel transport、Kernel->Process Worker lifecycle、`process.worker.vfs.patch`、`process.worker.run`，以及 `kernel.spawn(kind: "worker")` 自动创建 Process Worker 后的 stdout/exit 回灌。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/service-worker-registration.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | ServiceWorker registration 用例覆盖 `createMarsRuntime({ serviceWorkerUrl })`、register/ready、client->SW MessageChannel 握手和 dispose unregister 生命周期。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/service-worker-bootstrap.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | ServiceWorker bootstrap 用例覆盖 SW script 收到 `sw.connect` MessagePort、安装 client bridge controller、处理 `sw.fetch` RPC、fetch event handler，以及 Vite host dev client/source 请求的 network fallback。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/service-worker-module-response.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | ServiceWorker module response 用例覆盖 `/src/*.ts` 原生源码 URL 首跳、`/__mars__/module` ESM 响应、入口 import 重写、相对依赖二跳和 VFS `node_modules` bare import 二跳加载。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/service-worker-scope-smoke.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Smoke | 真实 ServiceWorker scope smoke 用例通过 Vite 同源 SW 脚本注册真实 `navigator.serviceWorker`；生成脚本不使用 top-level await，而是以 `bootPromise` 完成 VFS hydrate，再由 `runtime.bun.write()` 触发 ServiceWorker VFS 自动 fanout，并通过 `sw.fetch` 验证 SW scope 内 `/__mars__/module` ESM 响应。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/kernel-worker-bootstrap.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Prework | Kernel Worker bootstrap 用例覆盖 worker 收到 `kernel.connect` MessagePort、安装 Kernel controller、页面侧 `new Worker()` carrier、响应 `kernel.boot` 和 Process Worker lifecycle RPC。 |
+| Phase 3 | `core-modules/runtime/` | `core-modules/runtime/playground-host.ts` | `packages/mars-test/src/phase3.acceptance.test.ts` | Smoke | Playground host runtime 用例要求 Vite dev/preview 输出 COOP/COEP headers，使页面进入 `crossOriginIsolated` 并启用 `SharedArrayBuffer`，同时页面加载时注册真实 ServiceWorker。 |
 | Phase 4 | 待新增 | 待新增 | `packages/mars-test/src/phase4.acceptance.test.ts` | Not Started | 需要插件、Hook trace、Agent shell/replay playground。 |
 
 ## 统一加载入口
@@ -43,6 +64,21 @@ Playground 本身是一个 Vite + TypeScript + React 项目，用于运行和展
 
 功能模块用例统一登记在 `module-cases.json`，并通过 `loadPlaygroundModuleCases()` 读取。每条用例至少包含 Phase、模块名、playground 名称、入口文件、验收测试文件、状态和说明。
 
+## 当前主流程架构
+
+当前 playground 主流程从页面启动到 worker/module 执行按以下顺序串联:
+
+1. Vite dev/preview 从 `127.0.0.1` 提供 React playground、`/@fs` 包源码和同源 `/mars-sw-scope-smoke.js`，并对页面与 SW 脚本统一输出 COOP/COEP/CORP headers。
+2. React 首屏调用 `ensurePlaygroundRuntimeStatus()`，创建 `createMarsRuntime({ serviceWorkerUrl: "/mars-sw-scope-smoke.js", serviceWorkerScope: "/" })`，触发真实 `navigator.serviceWorker.register()`。
+3. ServiceWorker 脚本创建独立 `MarsVFS`、`MarsKernel` 和 `ServiceWorkerRouter`，以 `bootPromise` hydrate 初始 VFS snapshot；`install` / `activate` / fetch event / MessageChannel RPC 都等待同一个 `bootPromise`，避免 top-level await 与初始化竞态。
+4. `installServiceWorkerBootstrap()` 在 SW 内同时安装 fetch event handler 和 `sw.connect` message handler；页面侧 registration ready 后通过 transferred `MessagePort` 建立 client->SW bridge endpoint。
+5. 页面或 playground case 通过 bridge 发送 `sw.fetch` 时，SW 调用 `ServiceWorkerRouter.fetch()`；虚拟 server 请求会经 `ServiceWorkerKernelClient` 分发到 Kernel port table，`/__mars__/module?path=...` 和 `/src/*.ts(x)` 源码请求会进入 ESM module response。
+6. `ServiceWorkerRouter` 的 module response 使用 `@swc/wasm-web` ESM 输出，重写 static/dynamic import 到稳定的 `/__mars__/module?path=...` URL，并从 SW scope 内的 `MarsVFS` 读取源码；Vite host 的 `/@vite/client` 和缺失的宿主 `/src/*.ts(x)` 请求在 `fallback: 'network'` 下回到 Vite。
+7. 页面侧 runtime 写文件已能通过 VFS watcher 自动 fanout 到 ServiceWorker bridge，并可用 `flushServiceWorkerVFS()` 等待 `sw.vfs.patch` 完成；Process Worker factory 也可绑定源 VFS，将写入/删除自动 fanout 为 `process.worker.vfs.patch`。
+8. Kernel Worker / Process Worker 主链路目前已有 MessageChannel carrier、`kernel.connect`、`process.worker.boot`、stdio stdout/stderr 回传和 `bun run <entry>` 上下文注入；`kernel.spawn({ kind: "worker" })` 已能经 Kernel Worker controller 自动创建 Process Worker，并将 worker stdout/exit 回灌到 Kernel pid。完整 stdin consumer 和 worker script bundling/loading 自动化仍是下一步。
+
+稳定主入口是 `http://127.0.0.1:<port>/` 上的 Browser Runtime 面板和 runnable cases；模块加载稳定入口是 `/__mars__/module?path=...`，且 `/src/*.ts(x)` 原生源码 URL 首跳与 VFS `node_modules` bare import 二跳已能由 ServiceWorker module response 接管。完整 npm graph、Vite special paths 和完整浏览器 import graph 接管尚未完成。
+
 ## 运行方式
 
 在 `mars-lib/playground` 目录执行:
@@ -52,7 +88,11 @@ bun install
 bun run dev
 ```
 
-Vite 会启动 React playground 页面。页面中的 `Run Phase 1 + 2` 会运行 Phase 1 的 runtime/VFS/Shell、Bun file、Bun.serve、node:http Express/Koa，以及 Phase 2 的 resolver、transpiler、loader、runtime、installer、bundler-dev-server、TSX 和 Vite React TS 用例。
+Playground 需要浏览器 secure context 才能启用 `SharedArrayBuffer` 和 `navigator.serviceWorker`。默认 `dev` / `preview` 脚本绑定 `127.0.0.1`；请从 `http://127.0.0.1:<port>/` 打开页面，不要使用 `0.0.0.0`、局域网 IP、仓库根目录 dev server 或 `file://`。
+
+Vite 会启动 React playground 页面。页面中的 `Run All` 会运行当前已接线的 runnable cases，包括 Phase 1 的 runtime/VFS/Shell、Bun file、Bun.serve、纯 node:http、Express app/router/middleware 和 Koa 洋葱中间件，Phase 2 的 resolver、transpiler、loader、runtime、installer、bundler-dev-server、TSX 和 Vite React TS 用例，以及 Phase 3 的 prework 用例；其中 bridge-chain 用例会跑通 client->SW、SW->Kernel bridge-backed server request、Kernel->Process Worker lifecycle、`process.worker.vfs.patch`、`process.worker.run` 和 `kernel.spawn(kind: "worker")` 自动 worker 创建/stdio/exit，ServiceWorker module response 用例会跑通 `/src/*.ts` 原生 URL 首跳、`/__mars__/module` ESM 入口、相对依赖二跳和 VFS `node_modules` bare import 二跳加载，Kernel Worker bootstrap 用例会跑通页面侧 `new Worker()` carrier 到 `kernel.connect` MessagePort，Process Worker runtime bootstrap 用例会验证 worker scope 内 Bun/process/require context 注入。
+
+当前 `bun install` 是浏览器 runtime 内的最小实现: 读取 MarsVFS 中的 `package.json`，使用注入的 package cache 写入 `node_modules` 与 `mars-lock.json`；cache miss 时可通过 registry fetch provider 拉取 package metadata 和 tarball bytes。它还不是完整 Bun package manager；真实 tgz 解包、lifecycle scripts、workspaces 和 Bun lockfile 完整兼容仍待补。Express/Koa runnable cases 使用的是 playground 内置的 app/middleware fixture，不需要真实 npm `express`/`koa` 包。
 
 构建 playground:
 

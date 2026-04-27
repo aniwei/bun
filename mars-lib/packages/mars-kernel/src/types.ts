@@ -28,6 +28,7 @@ export interface SpawnOptions {
 
 export interface ProcessHandle {
   readonly pid: Pid
+  readonly stdin: ReadableStream<Uint8Array>
   readonly stdout: ReadableStream<Uint8Array>
   readonly stderr: ReadableStream<Uint8Array>
   readonly exited: Promise<number>
@@ -58,6 +59,7 @@ export interface MarsKernelInterface {
   writeStdio(pid: Pid, fd: 1 | 2, chunk: string | Uint8Array): void
   waitpid(pid: Pid): Promise<number>
   ps(): ProcessDescriptor[]
+  allocatePort(preferredPort?: number): number
   registerPort(pid: Pid, port: number, server: VirtualServer): void
   unregisterPort(port: number): void
   resolvePort(port: number): Pid | null

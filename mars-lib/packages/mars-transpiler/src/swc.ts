@@ -11,7 +11,7 @@ const swcWasmLoader = createWasmLoader("@swc/wasm-web", () => initSwc())
 class BasicTranspiler implements Transpiler {
   async transform(input: TransformInput): Promise<TransformResult> {
     const diagnostics = validateSource(input.code, input.path)
-    const transformedCode = transformSourceCode(input.code, input.loader, input.define)
+    const transformedCode = transformSourceCode(input.code, input.loader, input.define, input.format)
     const imports = scanImports(transformedCode, input.loader)
 
     return {
@@ -35,18 +35,19 @@ export function transformSourceCode(
   sourceCode: string,
   loader: Loader,
   define: Record<string, string> = {},
+  format: TransformInput["format"] = "commonjs",
 ): string {
-  if (loader === "json") return sourceCode
+  if (loader === "json") return format === "esm" ? `export default ${sourceCode.trim() || "null"};` : sourceCode
 
   if (swcWasmLoader.ready) {
     try {
-      return transformSourceCodeWithSwc(sourceCode, loader, define)
+      return transformSourceCodeWithSwc(sourceCode, loader, define, undefined, false, format)
     } catch {
-      return transformSourceCodeWithBasic(sourceCode, loader, define)
+      return transformSourceCodeWithBasic(sourceCode, loader, define, format)
     }
   }
 
-  return transformSourceCodeWithBasic(sourceCode, loader, define)
+  return transformSourceCodeWithBasic(sourceCode, loader, define, format)
 }
 
 class SwcWasmTranspiler implements Transpiler {
@@ -58,7 +59,7 @@ class SwcWasmTranspiler implements Transpiler {
     try {
       await swcWasmLoader.load()
       const diagnostics = validateSource(input.code, input.path)
-      const preparedSource = prepareSourceForSwc(input.code, input.define)
+      const preparedSource = prepareSourceForSwc(input.code, input.define, input.format)
       const output = transformSync(preparedSource, createSwcOptions(input))
       const transformedCode = injectMarsJsxHelper(output.code, input.loader)
       const imports = mergeImportRecords(
@@ -88,14 +89,16 @@ function transformSourceCodeWithSwc(
   define: Record<string, string>,
   path = "mars-source.ts",
   sourcemap = false,
+  format: TransformInput["format"] = "commonjs",
 ): string {
-  const preparedSource = prepareSourceForSwc(sourceCode, define)
+  const preparedSource = prepareSourceForSwc(sourceCode, define, format)
   const output = transformSync(preparedSource, createSwcOptions({
     path,
     code: sourceCode,
     loader,
     sourcemap,
     define,
+    format,
   }))
 
   return injectMarsJsxHelper(output.code, loader)
@@ -104,8 +107,11 @@ function transformSourceCodeWithSwc(
 function prepareSourceForSwc(
   sourceCode: string,
   define: Record<string, string> = {},
+  format: TransformInput["format"] = "commonjs",
 ): string {
-  return transformDynamicImports(applyDefineReplacements(sourceCode, define))
+  const definedSource = applyDefineReplacements(sourceCode, define)
+
+  return format === "esm" ? definedSource : transformDynamicImports(definedSource)
 }
 
 function createSwcOptions(input: TransformInput): Options {
@@ -132,7 +138,7 @@ function createSwcOptions(input: TransformInput): Options {
         : undefined,
     },
     module: {
-      type: "commonjs",
+      type: input.format === "esm" ? "es6" : "commonjs",
       strict: true,
       strictMode: false,
       noInterop: true,
@@ -176,8 +182,9 @@ function transformSourceCodeWithBasic(
   sourceCode: string,
   loader: Loader,
   define: Record<string, string> = {},
+  format: TransformInput["format"] = "commonjs",
 ): string {
-  if (loader === "json") return sourceCode
+  if (loader === "json") return format === "esm" ? `export default ${sourceCode.trim() || "null"};` : sourceCode
 
   let transformedCode = applyDefineReplacements(sourceCode, define)
 
@@ -202,6 +209,8 @@ function transformSourceCodeWithBasic(
   if (loader === "tsx" || loader === "jsx") {
     transformedCode = transformJsxSyntax(transformedCode)
   }
+
+  if (format === "esm") return transformedCode
 
   transformedCode = transformDynamicImports(transformedCode)
   transformedCode = transformStaticImports(transformedCode)

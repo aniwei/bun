@@ -1,0 +1,5 @@
+export const cryptoFixtureText = "hello"
+export const cryptoHmacKey = "mars-key"
+export const expectedSha256Hex = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+export const expectedMd5Hex = "5d41402abc4b2a76b9719d911017c592"
+export const expectedHmacSha256Hex = "d1249e55d8f24838cfa2a9bb3fc5950d9002e92d08c142ffdbbd4e251e05c3fd"

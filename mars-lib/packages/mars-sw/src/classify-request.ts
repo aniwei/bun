@@ -7,9 +7,19 @@ export function classifyRequest(url: URL): RequestKind {
 
   if (url.pathname.startsWith("/__mars__/vfs/")) return "vfs-asset"
 
-  if (url.pathname.startsWith("/@vite/") || url.pathname.includes("/node_modules/")) {
+  if (url.pathname.startsWith("/__mars__/module")) return "module"
+
+  if (url.pathname.startsWith("/@vite/")) return "external"
+
+  if (url.pathname.includes("/node_modules/") || isSourceModulePath(url.pathname)) {
     return "module"
   }
 
   return "external"
+}
+
+function isSourceModulePath(pathname: string): boolean {
+  if (!/^\/(src|app|pages|components|core-modules)\//.test(pathname)) return false
+
+  return /\.(mjs|js|jsx|mts|ts|tsx)$/.test(pathname)
 }

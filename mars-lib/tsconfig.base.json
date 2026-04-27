@@ -18,6 +18,8 @@
       "@mars/bridge": ["packages/mars-bridge/src/index.ts"],
       "@mars/vfs": ["packages/mars-vfs/src/index.ts"],
       "@mars/kernel": ["packages/mars-kernel/src/index.ts"],
+      "@mars/crypto": ["packages/mars-crypto/src/index.ts"],
+      "@mars/sqlite": ["packages/mars-sqlite/src/index.ts"],
       "@mars/sw": ["packages/mars-sw/src/index.ts"],
       "@mars/shared": ["packages/mars-shared/src/index.ts"],
       "@mars/runtime": ["packages/mars-runtime/src/index.ts"],

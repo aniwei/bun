@@ -12,7 +12,8 @@ export function createFSCommands(onCd: (path: string) => void): ShellCommand[] {
       name: "cd",
       run: context => {
         const target = normalizePath(context.argv[1] ?? "/workspace", context.cwd)
-        context.vfs.chdir(target)
+        const stats = context.vfs.statSync(target)
+        if (!stats.isDirectory()) return fail(`cd: not a directory: ${target}\n`)
         onCd(target)
 
         return ok("")

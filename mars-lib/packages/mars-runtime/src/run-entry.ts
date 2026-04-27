@@ -1,6 +1,8 @@
 import { createModuleLoader } from "@mars/loader"
 import { normalizePath } from "@mars/vfs"
 
+import { installMarsRuntimeContext } from "./install-global"
+
 import type { RuntimeContext } from "./types"
 
 export interface RunEntryOptions {
@@ -18,19 +20,22 @@ export async function runEntryScript(
   const baseDirectory = options.cwd ?? context.vfs.cwd()
   const entryPath = normalizePath(entry, baseDirectory)
 
+  const runtimeContext = installMarsRuntimeContext(context)
   const restoreConsole = installConsoleBridge(context)
 
   try {
     return await moduleLoader.import(entryPath, entryPath)
   } finally {
     restoreConsole()
+    runtimeContext.dispose()
   }
 }
 
 function installConsoleBridge(context: RuntimeContext): () => void {
   if (!context.pid) return () => {}
 
-  const originalConsole = globalThis.console
+  const scope = context.scope ?? globalThis
+  const originalConsole = scope.console
   const consoleBridge = Object.assign(Object.create(originalConsole), {
     log: (...args: unknown[]) => {
       context.kernel.writeStdio(context.pid as number, 1, `${formatConsoleArgs(args)}\n`)
@@ -43,10 +48,10 @@ function installConsoleBridge(context: RuntimeContext): () => void {
     },
   }) as Console
 
-  globalThis.console = consoleBridge
+  scope.console = consoleBridge
 
   return () => {
-    globalThis.console = originalConsole
+    scope.console = originalConsole
   }
 }
 

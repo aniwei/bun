@@ -1,5 +1,6 @@
 import { ProcessTable } from "./process-table"
 import { PortTable } from "./port-table"
+import { createMarsStdioBridge } from "./stdio"
 
 import type { Disposable } from "@mars/bridge"
 import type {
@@ -11,6 +12,7 @@ import type {
   SpawnOptions,
   VirtualServer,
 } from "./types"
+import type { MarsStdioBridge } from "./stdio"
 
 type KernelEventListener = (payload: unknown) => void
 
@@ -94,6 +96,11 @@ export class MarsKernel implements MarsKernelInterface {
     this.#emit("server:listen", { pid, port, protocol: "http" })
   }
 
+  allocatePort(preferredPort = 0): number {
+    this.#assertBooted()
+    return this.#portTable.allocate(preferredPort)
+  }
+
   unregisterPort(port: number): void {
     const pid = this.#portTable.resolve(port)
     this.#portTable.unregister(port)
@@ -141,15 +148,13 @@ export class MarsKernel implements MarsKernelInterface {
 }
 
 class VirtualProcessHandle implements ProcessHandle {
+  readonly stdin: ReadableStream<Uint8Array>
   readonly stdout: ReadableStream<Uint8Array>
   readonly stderr: ReadableStream<Uint8Array>
   readonly pid: Pid
   readonly exited: Promise<number>
   readonly #kill: (signal?: string | number) => Promise<void>
-  #stdoutController: ReadableStreamDefaultController<Uint8Array> | null = null
-  #stderrController: ReadableStreamDefaultController<Uint8Array> | null = null
-  #stdoutWriter: WritableStreamDefaultWriter<Uint8Array> | null = null
-  #stderrWriter: WritableStreamDefaultWriter<Uint8Array> | null = null
+  readonly #stdio: MarsStdioBridge
   #closed = false
 
   constructor(
@@ -161,22 +166,23 @@ class VirtualProcessHandle implements ProcessHandle {
     this.pid = pid
     this.exited = exited
     this.#kill = kill
-    this.stdout = new ReadableStream<Uint8Array>({
-      start: controller => {
-        this.#stdoutController = controller
-      },
+    this.#stdio = createMarsStdioBridge({
+      stdout: options.stdout,
+      stderr: options.stderr,
     })
-    this.stderr = new ReadableStream<Uint8Array>({
-      start: controller => {
-        this.#stderrController = controller
-      },
-    })
-    this.#stdoutWriter = options.stdout?.getWriter() ?? null
-    this.#stderrWriter = options.stderr?.getWriter() ?? null
+    this.stdin = this.#stdio.stdin
+    this.stdout = this.#stdio.stdout
+    this.stderr = this.#stdio.stderr
+
+    if (typeof options.stdin === "string") {
+      void this.#stdio.writeStdin(options.stdin).finally(() => this.#stdio.closeStdin())
+    } else if (options.stdin) {
+      void this.#stdio.pipeStdin(options.stdin)
+    }
   }
 
   async write(input: string | Uint8Array): Promise<void> {
-    void input
+    await this.#stdio.writeStdin(input)
   }
 
   async kill(signal?: string | number): Promise<void> {
@@ -186,20 +192,15 @@ class VirtualProcessHandle implements ProcessHandle {
   writeStdio(fd: 1 | 2, chunk: Uint8Array): void {
     if (this.#closed) return
 
-    const controller = fd === 1 ? this.#stdoutController : this.#stderrController
-    const writer = fd === 1 ? this.#stdoutWriter : this.#stderrWriter
-    controller?.enqueue(chunk)
-    void writer?.write(chunk)
+    void (fd === 1 ? this.#stdio.writeStdout(chunk) : this.#stdio.writeStderr(chunk))
   }
 
   close(): void {
     if (this.#closed) return
 
     this.#closed = true
-    this.#stdoutController?.close()
-    this.#stderrController?.close()
-    void this.#stdoutWriter?.close()
-    void this.#stderrWriter?.close()
+    this.#stdio.closeStdin()
+    this.#stdio.closeOutput()
   }
 }
 

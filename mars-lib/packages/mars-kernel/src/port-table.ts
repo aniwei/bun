@@ -8,6 +8,20 @@ export interface PortRecord {
 
 export class PortTable {
   readonly #ports = new Map<number, PortRecord>()
+  #nextEphemeralPort = 49_152
+
+  allocate(preferredPort: number): number {
+    if (preferredPort > 0) {
+      if (this.#ports.has(preferredPort)) throw new Error(`Port already registered: ${preferredPort}`)
+      return preferredPort
+    }
+
+    while (this.#ports.has(this.#nextEphemeralPort)) {
+      this.#nextEphemeralPort += 1
+    }
+
+    return this.#nextEphemeralPort++
+  }
 
   register(pid: Pid, port: number, server: VirtualServer): void {
     if (this.#ports.has(port)) throw new Error(`Port already registered: ${port}`)
@@ -33,5 +47,6 @@ export class PortTable {
 
   clear(): void {
     this.#ports.clear()
+    this.#nextEphemeralPort = 49_152
   }
 }

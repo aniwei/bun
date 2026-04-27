@@ -26,11 +26,16 @@ export class NodeHttpServer {
     this.#options = options
   }
 
-  listen(port = 3000, hostname = this.#options.hostname ?? "mars.localhost", callback?: () => void): this {
-    const server = new NodeVirtualServer(port, hostname, this.#listener)
-    this.#options.kernel.registerPort(this.#options.pid ?? 1, port, server)
+  listen(port = 3000, hostnameOrCallback: string | (() => void) = this.#options.hostname ?? "mars.localhost", callback?: () => void): this {
+    const hostname = typeof hostnameOrCallback === "string"
+      ? hostnameOrCallback
+      : this.#options.hostname ?? "mars.localhost"
+    const onListening = typeof hostnameOrCallback === "function" ? hostnameOrCallback : callback
+    const assignedPort = this.#options.kernel.allocatePort(port)
+    const server = new NodeVirtualServer(assignedPort, hostname, this.#listener, (event, ...args) => this.#emit(event, ...args))
+    this.#options.kernel.registerPort(this.#options.pid ?? 1, assignedPort, server)
     this.#server = server
-    callback?.()
+    onListening?.()
     this.#emit("listening")
 
     return this
@@ -81,6 +86,7 @@ class NodeVirtualServer implements Server {
     readonly port: number,
     readonly hostname: string,
     readonly listener: RequestListener,
+    readonly emit: (event: "request", request: IncomingMessage, response: ServerResponse) => void,
   ) {
     this.url = new URL(`http://${hostname}:${port}/`)
   }
@@ -90,6 +96,7 @@ class NodeVirtualServer implements Server {
 
     const incomingMessage = new IncomingMessage(request)
     const serverResponse = new ServerResponse()
+    this.emit("request", incomingMessage, serverResponse)
     await this.listener(incomingMessage, serverResponse)
 
     return serverResponse.wait()

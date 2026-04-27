@@ -1,8 +1,9 @@
-import type { InstallOptions, InstallPlan, PackageCache, ResolvedPackage } from "./types"
+import type { InstallOptions, InstallPlan, PackageCache, PackageRegistryClient, ResolvedPackage } from "./types"
 
 export async function createInstallPlan(
   options: InstallOptions,
   cache: PackageCache,
+  registryClient?: PackageRegistryClient,
 ): Promise<InstallPlan> {
   const packages = new Map<string, ResolvedPackage>()
   const requestedDependencies = {
@@ -34,13 +35,30 @@ export async function createInstallPlan(
   async function addPackage(name: string, range: string): Promise<void> {
     if (packages.has(name)) return
 
-    const resolvedPackage = await resolveCachedPackage(cache, name, range)
+    const resolvedPackage = await resolvePackage(cache, name, range, options, registryClient)
     packages.set(name, resolvedPackage)
 
     for (const [dependencyName, dependencyRange] of sortedEntries(resolvedPackage.dependencies)) {
       await addPackage(dependencyName, dependencyRange)
     }
   }
+}
+
+export async function resolvePackage(
+  cache: PackageCache,
+  name: string,
+  range: string,
+  options: Pick<InstallOptions, "offline"> = {},
+  registryClient?: PackageRegistryClient,
+): Promise<ResolvedPackage> {
+  let metadata = await cache.getMetadata(name)
+  if (!metadata && !options.offline && registryClient) {
+    metadata = await registryClient.fetchMetadata(name)
+    await cache.setMetadata(name, metadata)
+  }
+  if (!metadata) throw new Error(`Package metadata not found in offline cache: ${name}`)
+
+  return resolvePackageMetadata(metadata, name, range)
 }
 
 export async function resolveCachedPackage(
@@ -51,6 +69,15 @@ export async function resolveCachedPackage(
   const metadata = await cache.getMetadata(name)
   if (!metadata) throw new Error(`Package metadata not found in offline cache: ${name}`)
 
+  return resolvePackageMetadata(metadata, name, range)
+}
+
+function resolvePackageMetadata(
+  metadata: Awaited<ReturnType<PackageCache["getMetadata"]>>,
+  name: string,
+  range: string,
+): ResolvedPackage {
+  if (!metadata) throw new Error(`Package metadata not found in offline cache: ${name}`)
   const version = pickVersion(metadata.distTags, Object.keys(metadata.versions), range)
   const versionMetadata = metadata.versions[version]
   if (!versionMetadata) throw new Error(`Package version not found in offline cache: ${name}@${range}`)

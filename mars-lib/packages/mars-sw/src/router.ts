@@ -1,7 +1,8 @@
 import { classifyRequest } from "./classify-request"
 import { createModuleResponse } from "./module-response"
+import { applyVFSPatches } from "@mars/vfs"
 
-import type { MarsStats } from "@mars/vfs"
+import type { MarsStats, MarsVFSPatch } from "@mars/vfs"
 import type { Pid } from "@mars/kernel"
 import type { ModuleResponseOptions } from "./module-response"
 import type { RequestKind } from "./classify-request"
@@ -69,6 +70,11 @@ export class ServiceWorkerRouter {
     return this.handle(context)
   }
 
+  async applyVFSPatches(patches: readonly MarsVFSPatch[]): Promise<void> {
+    if (!this.#moduleClient) throw new Error("ServiceWorker module client is not configured")
+    await applyVFSPatches(this.#moduleClient.vfs, patches)
+  }
+
   async #handleVirtualServer(context: FetchRouteContext): Promise<Response> {
     const pid = await this.#kernelClient.resolvePort(Number(context.url.port || 80))
     if (pid === null) return new Response("Port not found", { status: 404 })
@@ -97,7 +103,16 @@ export class ServiceWorkerRouter {
     const moduleClient = this.#moduleClient
     if (!moduleClient) return new Response("Module client not configured", { status: 500 })
 
-    return createModuleResponse(context.url.pathname, moduleClient)
+    const response = await createModuleResponse(context.url.href, {
+      format: "esm",
+      ...moduleClient,
+    })
+
+    if (response.status === 404 && this.#fallback === "network" && !context.url.pathname.startsWith("/__mars__/module")) {
+      return globalThis.fetch(context.request)
+    }
+
+    return response
   }
 }
 

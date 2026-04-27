@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 
 import { createMarsDevServer } from "@mars/bundler"
 import { createMarsRuntime } from "@mars/client"
-import { createMarsInstaller, createMemoryPackageCache } from "@mars/installer"
+import { createMarsInstaller, createMemoryPackageCache, createNpmRegistryClient } from "@mars/installer"
 import { createModuleLoader } from "@mars/loader"
 import { resolve } from "@mars/resolver"
 import { createWasmLoader } from "@mars/shared"
@@ -523,6 +523,138 @@ test("Phase 2 installer writes offline packages into node_modules", async () => 
   await runtime.dispose()
 })
 
+test("Phase 2 shell bun install writes offline packages from package.json", async () => {
+  const runtime = await createMarsRuntime({
+    packageCache: await loadPlaygroundPackageCache(),
+  })
+  await runtime.vfs.writeFile("/workspace/package.json", JSON.stringify({
+    dependencies: {
+      vite: "latest",
+    },
+  }))
+
+  const result = await runtime.shell.run("bun install")
+
+  expect(result.code).toBe(0)
+  expect(result.stdout).toContain("vite@0.0.0-mars")
+  expect(result.stdout).toContain("react@0.0.0-mars")
+  expect(await runtime.vfs.readFile("/workspace/node_modules/vite/index.js", "utf8")).toContain("mars-vite")
+  expect(await runtime.vfs.readFile("/workspace/mars-lock.json", "utf8")).toContain("0.0.0-mars")
+
+  await runtime.dispose()
+})
+
+test("Phase 2 installer fetches missing packages from registry", async () => {
+  const runtime = await createMarsRuntime()
+  const packageCache = createMemoryPackageCache()
+  const fetchedUrls: string[] = []
+  const registryClient = createNpmRegistryClient({
+    registry: "https://registry.mars.test",
+    fetch: async input => {
+      const url = String(input)
+      fetchedUrls.push(url)
+      if (url === "https://registry.mars.test/registry-demo") {
+        return Response.json({
+          name: "registry-demo",
+          "dist-tags": { latest: "1.2.3" },
+          versions: {
+            "1.2.3": {
+              version: "1.2.3",
+              dependencies: {},
+              files: {
+                "index.js": "module.exports = { source: 'registry' }",
+              },
+              dist: { tarball: "https://registry.mars.test/registry-demo/-/registry-demo-1.2.3.tgz" },
+            },
+          },
+        })
+      }
+      if (url === "https://registry.mars.test/registry-demo/-/registry-demo-1.2.3.tgz") {
+        return new Response("registry tarball bytes")
+      }
+
+      return new Response("not found", { status: 404 })
+    },
+  })
+  const installer = createMarsInstaller({ vfs: runtime.vfs, cache: packageCache, registryClient })
+
+  const result = await installer.install({
+    cwd: "/workspace",
+    dependencies: {
+      "registry-demo": "latest",
+    },
+  })
+
+  expect(result.packages.map(pkg => `${pkg.name}@${pkg.version}`)).toEqual([
+    "registry-demo@1.2.3",
+  ])
+  expect(fetchedUrls).toEqual([
+    "https://registry.mars.test/registry-demo",
+    "https://registry.mars.test/registry-demo/-/registry-demo-1.2.3.tgz",
+  ])
+  expect(await packageCache.getMetadata("registry-demo")).toEqual({
+    name: "registry-demo",
+    distTags: { latest: "1.2.3" },
+    versions: {
+      "1.2.3": {
+        version: "1.2.3",
+        dependencies: {},
+        files: {
+          "index.js": "module.exports = { source: 'registry' }",
+        },
+        tarballKey: "https://registry.mars.test/registry-demo/-/registry-demo-1.2.3.tgz",
+      },
+    },
+  })
+  expect(new TextDecoder().decode(await packageCache.getTarball("https://registry.mars.test/registry-demo/-/registry-demo-1.2.3.tgz") ?? new Uint8Array())).toBe("registry tarball bytes")
+  expect(await runtime.vfs.readFile("/workspace/node_modules/registry-demo/index.js", "utf8")).toBe("module.exports = { source: 'registry' }")
+
+  await runtime.dispose()
+})
+
+test("Phase 2 shell bun install can fetch package.json dependencies from registry", async () => {
+  const fetchedUrls: string[] = []
+  const runtime = await createMarsRuntime({
+    packageRegistryClient: createNpmRegistryClient({
+      registry: "https://registry.mars.test",
+      fetch: async input => {
+        const url = String(input)
+        fetchedUrls.push(url)
+        if (url === "https://registry.mars.test/shell-registry-demo") {
+          return Response.json({
+            name: "shell-registry-demo",
+            "dist-tags": { latest: "0.1.0" },
+            versions: {
+              "0.1.0": {
+                version: "0.1.0",
+                files: {
+                  "index.js": "module.exports = { shell: true }",
+                },
+              },
+            },
+          })
+        }
+
+        return new Response("not found", { status: 404 })
+      },
+    }),
+  })
+  await runtime.vfs.writeFile("/workspace/package.json", JSON.stringify({
+    dependencies: {
+      "shell-registry-demo": "latest",
+    },
+  }))
+
+  const result = await runtime.shell.run("bun install")
+
+  expect(result.code).toBe(0)
+  expect(result.stdout).toContain("shell-registry-demo@0.1.0")
+  expect(fetchedUrls).toEqual(["https://registry.mars.test/shell-registry-demo"])
+  expect(await runtime.vfs.readFile("/workspace/node_modules/shell-registry-demo/index.js", "utf8")).toBe("module.exports = { shell: true }")
+
+  await runtime.dispose()
+})
+
 test("Phase 2 installer loads offline cache from playground fixture", async () => {
   const runtime = await createMarsRuntime()
   const installer = createMarsInstaller({
@@ -722,6 +854,7 @@ test("Phase 2 playground module cases reference real files", async () => {
     "phase2-loader-core",
     "phase2-runtime-run-core",
     "phase2-installer-core",
+    "phase2-installer-registry-fetch",
     "phase2-bundler-core",
     "phase2-tsx-loader",
     "phase2-vite-dev-server",

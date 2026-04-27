@@ -11,7 +11,7 @@ export class MarsBunServer implements Server {
   constructor(context: RuntimeContext, options: ServeOptions) {
     this.#context = context
     this.#options = options
-    this.port = options.port ?? 3000
+    this.port = this.#context.kernel.allocatePort(options.port ?? 3000)
     this.hostname = options.hostname ?? "mars.localhost"
     this.url = new URL(`http://${this.hostname}:${this.port}/`)
 

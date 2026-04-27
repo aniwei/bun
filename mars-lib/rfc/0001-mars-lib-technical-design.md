@@ -1,7 +1,7 @@
 # RFC 0001: Mars-lib 技术方案与模块接口设计
 
 - 状态: Draft
-- 日期: 2026-04-27
+- 日期: 2026-04-28
 - 目标读者: Mars-lib Runtime、WASM Core、Service Worker、插件系统、AI Agent Shell、工程化验收相关开发者
 
 ## 1. 摘要
@@ -91,6 +91,54 @@ Mars-lib 借鉴 WebContainer 的核心思路: 使用 Service Worker 劫持请求
 └────────────────────────────────────────────────────────────┘
 ```
 
+### 4.1 当前实现状态
+
+Phase 3 启动时，Mars-lib 已具备一条内存态执行链路，但还不是完整 WebContainer 式跨上下文拓扑。
+
+当前主流程由四个运行时边界组成:
+
+1. 浏览器页面 host: Vite 在 `127.0.0.1` 输出 playground 页面、`/@fs` package source、COOP/COEP/CORP headers 和同源 ServiceWorker script route。React UI 负责启动 host runtime，并展示 secure context、SAB、SW ready/controller 状态。
+2. ServiceWorker scope: `/mars-sw-scope-smoke.js` 创建 SW 内部 MarsVFS、MarsKernel、ServiceWorkerRouter，并用 `bootPromise` 完成 snapshot hydrate；install/activate/fetch/RPC 都等待该 promise，避免 top-level await 和初始化竞态。真实 playground 中 Vite host 的 `/@vite/client` 与缺失宿主源码请求会通过 `fallback: 'network'` 回到 Vite。
+3. Bridge/Kernel/Process Worker: 页面与 SW、Kernel Worker 与页面、Kernel 与 Process Worker 均通过 `@mars/bridge` 的 request/response 与 MessageChannel/postMessage transport 传递 RPC；Process Worker bootstrap 在 worker scope 注入 Bun/process/require context 并回传 stdio/exit。`kernel.spawn({ kind: "worker" })` 已能在 Kernel Worker controller 内自动创建 Process Worker，并把 worker stdout/stderr/exit 映射回 Kernel pid。
+4. VFS/module graph: 当前稳定依赖入口是 `/__mars__/module?path=...`，`/src/*.ts(x)` 源码 URL 首跳和 VFS `node_modules` bare import 二跳也可由 ServiceWorkerRouter 接管。ServiceWorkerRouter 从 SW scope VFS 读取源码，SWC 输出 ESM 并重写 import URL；页面 runtime 写入已能经 VFS watcher 自动 fanout 到 `sw.vfs.patch`，Process Worker factory 绑定源 VFS 后也能将写入/删除自动 fanout 为 `process.worker.vfs.patch`。
+
+已串联:
+
+1. `createMarsRuntime()` 创建 MarsVFS、MarsKernel、MarsShell、Bun facade 和 `ServiceWorkerRouter`。
+2. `MarsRuntime.run(entry)` 通过 Kernel 创建虚拟 pid，再由 `runEntryScript()` 读取 VFS、调用 SWC WASM transpiler、进入 loader/evaluator，并把 console stdout/stderr 写回 Kernel。
+3. `MarsShell` 已接入 `bun run <entry>` 命令，命令会进入同一条虚拟 pid、stdio bridge 和 loader 执行路径。
+4. `runtime.spawn("bun", ["run", entry])` 与 `Bun.spawn({ cmd: ["bun", "run", entry] })` 已复用同一条虚拟 pid 和 stdio bridge 路径。
+5. `runtime.fetch(previewUrl)` 可手动经过 `ServiceWorkerRouter` 分发到 Kernel port table 和 VirtualServer。
+6. `ProcessHandle` 已具备 stdin readable、stdout/stderr readable、`write()` 输入和 stdout/stderr mirror，为后续 Process Worker stdio bridge 做前置。
+7. `createMarsProcessWorkerFactory()` 已覆盖受控 worker boot/message/terminate 生命周期；无 Worker URL 时走 in-memory fallback，有 Worker URL 时可通过 `new Worker()` 承载并使用 `process.worker.boot/message/stdin/stdout/stderr/exit/terminate` 协议。
+8. `Bun.spawnSync()` 当前返回明确 unsupported fallback result；`Bun.CryptoHasher`、`Bun.password` 与 `node:crypto` 子集已通过 WebCrypto 覆盖验收；`Bun.sql` 已有 MarsVFS-backed sqlite prework，覆盖基础表操作、tagged query 和 database 文件持久化。
+9. VFS snapshot 已支持 JSON-safe 序列化和跨 runtime restore；OPFS persistence adapter 已覆盖 open/get/set/delete/keys/close，并在无 OPFS 环境提供 memory fallback；浏览器 capabilities/profile 已有可测试描述。
+10. `@mars/bridge` 已提供 in-memory transport pair、postMessage/MessageChannel transport 和 async request/response listener；`@mars/sw` 与 `@mars/kernel` 已有 bridge controller 预研切片，可跑通 client->SW fetch、SW->Kernel server request、Kernel Worker RPC 和 Kernel->Process Worker lifecycle 消息流。
+11. `@mars/sw` 已提供 ServiceWorker `fetch` event handler 安装函数，验收覆盖 fetch event `respondWith()` 到 Kernel bridge 的分发路径。
+12. `createMarsRuntime({ serviceWorkerUrl })` 已接入 ServiceWorker registration 抽象，可调用 `navigator.serviceWorker.register()`、等待 `ready`、发送 client->SW MessageChannel 握手，并在 dispose 时可选 unregister；验收与 playground 通过可注入 ServiceWorkerContainer 覆盖生命周期。
+13. `installServiceWorkerBootstrap()` 已提供 SW script bootstrap 入口，可监听 `sw.connect` message、接管 transferred `MessagePort`、安装 client bridge controller，并与 fetch event handler 共用同一个 router。
+14. `installKernelWorkerBootstrap()` 已提供 Kernel Worker bootstrap 入口，可监听 `kernel.connect` message、接管 transferred `MessagePort`、安装 Kernel Worker controller，并响应该端口上的 `kernel.boot`、Process Worker lifecycle、`process.worker.vfs.patch` 与 `process.worker.run` RPC。
+15. `connectMarsKernelWorker()` 已提供页面侧 Kernel Worker native carrier，可用 `new Worker()` 创建 worker、传递 MessagePort、发送 `kernel.connect`，并通过 client endpoint 承载 `kernel.boot`、Process Worker lifecycle、VFS patch 与 run RPC。
+16. `ServiceWorkerRouter` 已能拦截 `/__mars__/module` 与 `/src/*.ts(x)` 源码 URL，通过 `createModuleResponse({ format: "esm" })` 返回浏览器 ESM，并将静态、动态和 VFS `node_modules` bare import 重写到稳定 module URL，验收覆盖原生源码 URL 首跳、入口模块、相对依赖和 package 依赖二跳加载。
+17. `installProcessWorkerRuntimeBootstrap()` 已提供 Process Worker script bootstrap，可接收 `process.worker.boot`，以 Bun 风格 argv/cwd/env context 注入 `Bun`、`process`、`require`，执行 `bun run <entry>`，并把 console stdout/stderr 与 exit code 回传到 native carrier 协议。
+18. `createProcessWorkerBootstrapScript()` / `createProcessWorkerBootstrapBlobURL()` 已提供 module Worker bootstrap source 和 Blob URL 生成能力，为真实 `workerURL` 打包加载自动化做前置。
+19. Playground 已接入首个真实浏览器 Worker smoke：通过 Blob module URL 创建原生 `Worker`，worker 内使用 Vite `/@fs` import URL 加载 runtime/vfs/kernel 包，并验证 `bun run <entry>` 的 stdout 与 exit 回传。
+20. Playground 已接入真实 ServiceWorker scope smoke 和页面级 host runtime：Vite dev/preview 同源提供 `/mars-sw-scope-smoke.js` module script，并输出 COOP/COEP/CORP headers 让页面进入 `crossOriginIsolated`、启用 `SharedArrayBuffer`；React UI 加载后会注册真实 `navigator.serviceWorker` 并显示 SAB/SW ready 状态，smoke 用例通过 MessageChannel `sw.fetch` 验证 SW scope 内 `/__mars__/module` ESM 响应。
+21. VFS snapshot 已参与跨上下文启动态同步：Process Worker bootstrap script 可内联 serialized snapshot 并在安装 runtime 前 restore，ServiceWorker scope smoke 也通过 serialized snapshot hydrate `/workspace` module graph。
+22. VFS patch 已参与 Process Worker 运行期同步：页面侧和 Kernel Worker bridge 均可发送 `process.worker.vfs.patch`，worker scope 应用增量 write/delete patch 后通过 `process.worker.run` 显式执行更新后的 entry；`MarsProcessWorkerFactory` 也可绑定源 VFS 并自动 fanout write/delete patch。
+23. VFS patch 已参与 ServiceWorker 运行期同步：页面侧可发送 `sw.vfs.patch`，SW scope 应用增量 write/delete patch 后通过 `sw.fetch` 返回更新后的 `/__mars__/module` ESM 响应。
+24. `kernel.spawn({ kind: "worker" })` 已接入 Kernel Worker controller：RPC spawn 会创建 Kernel pid、自动 boot Process Worker、返回 worker id、将 worker stdout/stderr 写入 Kernel stdio，并在 worker exit 后 resolve `waitpid`。
+25. `MarsRuntime` 已接入 ServiceWorker VFS 自动 fanout：runtime VFS 写入会生成 JSON-safe patch 并通过 client->SW bridge 发送到 `sw.vfs.patch`，`flushServiceWorkerVFS()` 可等待 SW scope VFS 与页面 VFS 同步完成。
+26. `MarsProcessWorkerFactory` 已接入 Process Worker VFS 自动 fanout：factory 绑定源 VFS 后，新 worker 会监听 sync root 并把 runtime 写入转换成 `process.worker.vfs.patch`，真实浏览器 Worker smoke 已改为 `Bun.write()` 驱动同步。
+
+未串联:
+
+1. ServiceWorker registration、SW script bootstrap、真实 scope smoke、SW scope 增量 VFS patch、源码 URL 首跳、VFS `node_modules` bare import 二跳、Vite host network fallback 和 playground host SAB/SW 状态面板已接入；完整浏览器 fetch event 接管、完整 npm graph 和 Vite special path 自动化仍待补。
+2. Kernel Worker bootstrap 与页面侧 native carrier 已有可测试抽象；Process Worker native carrier、runtime bootstrap、worker script source/Blob URL 生成、snapshot restore、增量 VFS patch、factory VFS 自动 fanout 与真实浏览器加载 smoke 已覆盖 stdio/module/context 主链路。
+3. `process` / `require` / `Bun` 已可按 boot context 注入 Process Worker scope；完整 stdin consumer 和 Process Worker script loading 自动化仍待补。
+4. 浏览器原生 `/src/*.ts(x)` 模块请求已可通过 ServiceWorker module response 完成首跳，VFS `node_modules` bare import 已可重写为 `/__mars__/module?path=...` 二跳；完整 npm graph、node_modules 子资源和 Vite special paths 的完整接管仍待补。
+5. ServiceWorker module response 已与 loader/evaluator 的 CommonJS 执行模型拆分，真实 scope smoke 和 `/src/*.ts` 首跳已覆盖；Vite special path 自动化仍待补。
+
 ## 5. Monorepo 包结构
 
 ```text
@@ -125,6 +173,7 @@ mars-lib/
 ├── playground/
 │   ├── core-modules/
 │   │   └── bun/             # Runtime/VFS/Shell、Bun.file、Bun.serve 使用实例
+│   ├── node-http/
 │   ├── express/
 │   ├── koa/
 │   ├── vite-react-ts/
@@ -618,17 +667,20 @@ export interface NodeHttpServer {
 }
 ```
 
-Express/Koa 映射:
+Node HTTP / Express / Koa 映射:
 
 ```text
-app.listen(3000)
-  -> node:http.createServer(app).listen(3000)
-  -> MarsKernel.registerPort(pid, 3000, server)
-  -> MarsServiceWorkerRuntime.resolvePort(3000)
-  -> MarsKernel.dispatchToPort(3000, request)
+http.createServer(handler).listen(0) 或 app.listen(3000)
+  -> node:http.createServer(handler).listen(port)
+  -> MarsKernel.allocatePort(port)
+  -> MarsKernel.registerPort(pid, assignedPort, server)
+  -> MarsServiceWorkerRuntime.resolvePort(assignedPort)
+  -> MarsKernel.dispatchToPort(assignedPort, request)
   -> IncomingMessage / ServerResponse adapter
   -> Response
 ```
+
+`node:http` 与 `Bun.serve()` 是并列 facade: 二者都注册到 MarsKernel 的虚拟端口表并共享请求分发路径，但 `node:http` 不通过 `Bun.serve()` 包一层实现，避免 Node adapter 语义被 Bun server 对象约束。
 
 ## 13. Mars Loader / Resolver / Transpiler
 
@@ -815,7 +867,7 @@ search:  grep, find
 process: ps, kill
 network: curl, wget
 pkg:     install, add, remove, list
-runtime: bun, node, tsx, vite
+runtime: bun, bun run, node, tsx, vite
 agent:   inspect, snapshot, restore, hooks
 ```
 
@@ -884,7 +936,7 @@ nx run vite-typescript-react:test:acceptance
 
 ## 17. Package Installer 与离线缓存
 
-MarsInstaller 负责 npm metadata、tarball cache、依赖解析和 VFS 中的 `node_modules` 写入。
+MarsInstaller 负责 npm metadata、tarball cache、依赖解析和 VFS 中的 `node_modules` 写入。当前 `bun install` shell 命令是最小实现: 从 MarsVFS `package.json` 读取 dependencies/devDependencies，使用注入的 package cache 写入 `node_modules` 与 `mars-lock.json`；cache miss 时可通过 registry fetch provider 拉取 metadata 和 tarball bytes。真实 tgz 解包、lifecycle scripts、workspaces 和 Bun lockfile 完整兼容仍待补。
 
 ```ts
 export interface PackageInstaller {
@@ -980,7 +1032,8 @@ Rust: path normalize, shell parser, routing table, fs metadata, crypto hash, sql
 ```text
 用户代码调用 Bun.serve({ port: 3000, fetch })
   -> MarsRuntime beforeApiCall("Bun.serve")
-  -> MarsKernel.registerPort(pid, 3000, virtualServer)
+  -> MarsKernel.allocatePort(port)
+  -> MarsKernel.registerPort(pid, assignedPort, virtualServer)
   -> MarsServiceWorkerRuntime 更新端口映射
   -> 返回 Server 对象
 ```
@@ -1138,7 +1191,7 @@ export interface ExampleCaseDefinition {
 ### M2: 工程化项目运行
 
 1. MarsResolver package exports/imports。
-2. MarsTranspiler TS/TSX/JSX。
+2. MarsTranspiler TS/TSX/JSX，默认通过 `@swc/wasm-web` 和 `@mars/shared` wasm loader 执行运行时转译。
 3. ModuleLoader ESM/CJS bridge。
 4. `.tsx` 直接执行。
 5. MarsInstaller 离线 cache。
@@ -1150,9 +1203,9 @@ export interface ExampleCaseDefinition {
 ### M3: API 覆盖与稳定性
 
 1. `Bun.spawn()` Worker 模拟。
-2. `Bun.build()`。
+2. `Bun.build()`，当前预研切片使用 `esbuild-wasm` transform 输出到 MarsVFS，并与 M2 的 SWC WASM 运行时转译路径保持分工。
 3. `Bun.password`、`CryptoHasher`、`node:crypto` 子集。
-4. `Bun.sql` / sqlite wasm。
+4. `Bun.sql` / sqlite wasm，当前预研切片先提供 MarsVFS-backed SQL 子集与 tagged query，后续替换为原生 sqlite WASM 引擎。
 5. WebSocket upgrade。
 6. OPFS 持久化恢复。
 7. Chrome/Firefox 全量验收。

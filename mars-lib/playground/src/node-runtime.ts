@@ -7,6 +7,7 @@ export type PlaygroundName =
   | "vfs-shell"
   | "bun-file"
   | "bun-serve"
+  | "node-http"
   | "express"
   | "koa"
   | "tsx"
@@ -14,6 +15,7 @@ export type PlaygroundName =
   | "core-transpiler"
   | "core-loader"
   | "core-runtime"
+  | "core-runtime-bun-run"
   | "core-installer"
   | "core-bundler"
 
@@ -24,7 +26,7 @@ export interface PlaygroundModuleCase {
   playground: string
   entry: string
   acceptance: string
-  status: "covered" | "partial" | "prework" | "planned"
+  status: "covered" | "partial" | "prework" | "planned" | "smoke"
   description: string
 }
 
@@ -44,6 +46,12 @@ export async function loadPlaygroundFiles(name: PlaygroundName): Promise<FileTre
   if (name === "bun-serve") {
     return {
       "bun-serve.ts": await readPlaygroundText("core-modules/bun/bun-serve.ts"),
+    }
+  }
+
+  if (name === "node-http") {
+    return {
+      "server.ts": await readPlaygroundText("node-http/server.ts"),
     }
   }
 
@@ -86,6 +94,12 @@ export async function loadPlaygroundFiles(name: PlaygroundName): Promise<FileTre
   if (name === "core-runtime") {
     return {
       "run-entry.ts": await readPlaygroundText("core-modules/runtime/run-entry.ts"),
+    }
+  }
+
+  if (name === "core-runtime-bun-run") {
+    return {
+      "index.ts": await readPlaygroundText("core-modules/runtime/bun-run-index.ts"),
     }
   }
 

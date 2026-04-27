@@ -18,7 +18,7 @@
 - 确认 MarsResolver 需要支持相对路径、绝对路径、bare package、`package.json exports/imports/main/module/browser`、扩展名补全、目录 index、`tsconfig paths`。
 - 确认 MarsTranspiler 需要覆盖 `.ts`、`.tsx`、`.jsx` 转译，并输出 imports、diagnostics、source map 可选数据。
 - 确认 ModuleLoader 需要支持 ESM/CJS bridge、JSON、TS/TSX 执行、模块缓存和 invalidation。
-- 确认 MarsInstaller 需要有离线 cache 路径，验收不依赖外部 registry。
+- 确认 MarsInstaller 需要有离线 cache 路径，验收不依赖外部 registry；`bun install` shell 命令覆盖读取 MarsVFS `package.json` 后写入 `node_modules`，并可在 cache miss 时通过注入的 registry fetch provider 拉取 metadata/tarball bytes。
 - 确认 Vite M1 范围是协议兼容层，而不是完整复刻 Node 版 Vite。
 - 确认 `.tsx` 直接执行需要通过 resolver -> transpiler -> loader -> process stdout 或 virtual server 输出完成闭环。
 
@@ -65,8 +65,8 @@
 | M2-13 | Done | 100% | Pass | `mars-lib/packages/mars-runtime/src/run-entry.ts` | 实现 `MarsRuntime.run(entry)` 和 `bun app.tsx` 执行路径。 | TS/TSX entry 已可执行，console stdout/stderr 已映射到 ProcessHandle streams。 |
 | M2-14 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/types.ts` | 定义 InstallOptions、InstallResult、ResolvedPackage、PackageMetadata、PackageCache、PackageInstaller。 | 已核对 RFC 第 17 节 Installer 接口。 |
 | M2-15 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/cache.ts` | 实现 metadata/tarball 内存离线缓存接口，支持确定性验收 fixture 注入。 | 已提供 fixture manifest -> MemoryPackageCache 入口，并由 playground npm-cache 真实加载验收。 |
-| M2-16 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/plan.ts` | 实现最小依赖安装计划，支持 root dependencies/devDependencies 递归解析并排序。 | 已核对 RFC 第 17 节 node_modules 写入路径，支持 latest、exact、基础 `^`/`~` 兼容版本选择。 |
-| M2-17 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/write-node-modules.ts` | 将解析后的包写入 MarsVFS `/workspace/node_modules` 和 `mars-lock.json`。 | 已通过 resolver 从写入后的 node_modules 解析 package。 |
+| M2-16 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/plan.ts`, `mars-lib/packages/mars-installer/src/registry.ts` | 实现最小依赖安装计划，支持 root dependencies/devDependencies 递归解析并排序，cache miss 时可通过 registry fetch provider 拉取 metadata。 | 已核对 RFC 第 17 节 node_modules 写入路径，支持 latest、exact、基础 `^`/`~` 兼容版本选择。 |
+| M2-17 | Done | 100% | Pass | `mars-lib/packages/mars-installer/src/write-node-modules.ts`, `mars-lib/packages/mars-client/src/runtime.ts` | 将解析后的包写入 MarsVFS `/workspace/node_modules` 和 `mars-lock.json`，并通过 `bun install` shell 命令从 `package.json` 触发 cache/registry 安装。 | 已通过 resolver 从写入后的 node_modules 解析 package，并覆盖 shell `bun install` 主流程和 registry fetch provider。 |
 | M2-18 | Done | 100% | Pass | `mars-lib/packages/mars-bundler/src/dev-server.ts` | 实现 Vite 协议兼容 DevServer listen/close/transformRequest/loadModule。 | `/@vite/client`、`/src/App.tsx`、vite config root、alias、define、HMR root 与 playground Vite TSX 加载已验收；完整插件 pipeline 作为后续硬化项。 |
 | M2-19 | Done | 100% | Pass | `mars-lib/packages/mars-bundler/src/module-graph.ts` | 实现 Vite dev module graph、依赖关系和 invalidate。 | HMR invalidation 已验收，基础 imports/importers 图已接入 dev server。 |
 | M2-20 | Done | 100% | Pass | `mars-lib/packages/mars-bundler/src/vite-client.ts` | 提供 `/@vite/client` 虚拟模块。 | 已通过 dev server response 验收。 |
@@ -83,7 +83,7 @@
 - MarsResolver 能解析验收项目中的相对路径、bare package、exports/imports、tsconfig paths。
 - MarsTranspiler 能转译 `.ts`、`.tsx`、`.jsx`，并输出 imports 和 diagnostics。
 - ModuleLoader 能执行 `.tsx` 文件并返回正确 stdout 或 virtual server 输出。
-- MarsInstaller 能从离线 cache 写入验收项目需要的 `node_modules`。
+- MarsInstaller 能从 cache 或 registry fetch provider 写入验收项目需要的 `node_modules`，`bun install` shell 命令已能读取 MarsVFS `package.json` 并触发该安装路径。
 - Vite React TS 项目可以通过 playground fixture 加载，并由 loader 验证 first screen render model。
 - 修改 `src/App.tsx` 后 HMR 生效，且不重启整个 runtime。
 - Playground 已接入 `playground/core-modules`、`playground/tsx`、`playground/vite-react-ts` 与 `playground/fixtures/npm-cache`，并通过 `loadPlaygroundFiles()` / `loadPlaygroundPackageCache()` 被 Phase 2 acceptance test 真实加载；功能模块用例已登记到 `playground/module-cases.json` 并校验真实入口文件。

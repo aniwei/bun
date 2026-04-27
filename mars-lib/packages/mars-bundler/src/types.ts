@@ -21,7 +21,7 @@ export interface BuildLog {
 
 export interface BuildOutputArtifact {
   path: string
-  kind: "entry-point"
+  kind: "entry-point" | "source-map"
   loader: Loader
   size: number
   text(): Promise<string>

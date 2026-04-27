@@ -1,4 +1,7 @@
 export * from "./mem-layer"
+export * from "./opfs-adapter"
+export * from "./patch"
 export * from "./path"
+export * from "./snapshot"
 export * from "./types"
 export * from "./vfs"

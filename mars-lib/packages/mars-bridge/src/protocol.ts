@@ -74,7 +74,7 @@ export interface MarsBridgeEndpoint {
 
   on<T>(
     type: string,
-    listener: (payload: T, message: MarsMessage<T>) => void,
+    listener: (payload: T, message: MarsMessage<T>) => unknown | Promise<unknown>,
   ): Disposable
 
   close(): void

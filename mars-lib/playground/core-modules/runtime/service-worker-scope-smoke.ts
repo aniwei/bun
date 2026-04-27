@@ -1,0 +1,6 @@
+export const serviceWorkerScopeSmokeScriptURL = "/mars-sw-scope-smoke.js"
+export const serviceWorkerScopeSmokeScope = "/"
+export const serviceWorkerScopeSmokeEntry = "/workspace/src/sw-scope-entry.ts"
+export const serviceWorkerScopeSmokeMessage = "real service worker scope smoke"
+export const serviceWorkerScopeSmokePatchedMessage = "real service worker scope patch smoke"
+export const serviceWorkerScopeSmokePatchMode = "incremental-vfs-patch"
