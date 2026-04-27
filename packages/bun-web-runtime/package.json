@@ -1,0 +1,27 @@
+{
+  "name": "@mars/web-runtime",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "files": [
+    "src"
+  ],
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@mars/web-kernel": "workspace:*",
+    "@mars/web-node": "workspace:*",
+    "@mars/web-shell": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "6.0.2"
+  }
+}

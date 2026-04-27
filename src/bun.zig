@@ -190,7 +190,7 @@ pub const darwin = @import("./darwin.zig");
 pub const linux = @import("./linux.zig");
 
 /// Translated from `c-headers-for-zig.h` for the current platform.
-pub const c = @import("translated-c-headers");
+pub const c = if (!Environment.isWasm) @import("translated-c-headers") else void;
 pub const tty = @import("./tty.zig");
 
 pub const sha = @import("./sha.zig");
@@ -206,13 +206,15 @@ pub const fmt = @import("./fmt.zig");
 // This file is gennerated, but cant be placed in the build/debug/codegen
 // folder because zig will complain about outside-of-module stuff
 /// All functions and interfaces provided from Bun's `bindgen` utility.
-pub const gen = @import("./bun.js/bindings/GeneratedBindings.zig");
+pub const gen = if (!Environment.isWasm) @import("./bun.js/bindings/GeneratedBindings.zig") else void;
 
 comptime {
-    // This file is gennerated, but cant be placed in the build/debug/codegen
-    // folder because zig will complain about outside-of-module stuff
-    _ = &@import("./bun.js/bindings/GeneratedJS2Native.zig");
-    _ = &gen; // reference bindings
+    if (!Environment.isWasm) {
+        // This file is gennerated, but cant be placed in the build/debug/codegen
+        // folder because zig will complain about outside-of-module stuff
+        _ = &@import("./bun.js/bindings/GeneratedJS2Native.zig");
+        _ = &gen; // reference bindings
+    }
 }
 
 /// Copied from Zig std.trait
@@ -636,8 +638,8 @@ pub fn StringEnum(comptime Type: type, comptime Map: anytype, value: []const u8)
 
 pub const Bunfig = @import("./bunfig.zig").Bunfig;
 
-pub const HTTPThread = @import("./http.zig").HTTPThread;
-pub const http = @import("./http.zig");
+pub const HTTPThread = if (!Environment.isWasm) @import("./http.zig").HTTPThread else void;
+pub const http = if (!Environment.isWasm) @import("./http.zig") else void;
 
 pub const ptr = @import("./ptr.zig");
 pub const TaggedPointer = ptr.TaggedPointer;
@@ -706,25 +708,30 @@ pub fn rangeOfSliceInBuffer(slice: []const u8, buffer: []const u8) ?[2]u32 {
 // Please prefer `bun.FD.Optional.none` over this
 pub const invalid_fd: FD = .invalid;
 
-pub const bun_js = @import("./bun.js.zig");
+pub const bun_js = if (!Environment.isWasm) @import("./bun.js.zig") else void;
 /// Bindings to JavaScriptCore and other JavaScript primatives.
 /// Web and runtime-specific APIs should go in `webcore` and `api`.
-pub const jsc = bun_js.jsc;
+pub const jsc = if (!Environment.isWasm) bun_js.jsc else void;
 /// JavaScript Web APIs
-pub const webcore = bun_js.webcore;
+pub const webcore = if (!Environment.isWasm) bun_js.webcore else void;
 /// "api" in this context means "the Bun APIs", as in "the exposed JS APIs"
-pub const api = bun_js.api;
+pub const api = if (!Environment.isWasm) bun_js.api else void;
+
+/// JSI module — only available in wasm browser_runtime builds.
+pub const jsi = if (Environment.wasm_browser_runtime) @import("jsi") else void;
+/// WASM virtual filesystem — only available in wasm browser_runtime builds.
+pub const sys_wasm = if (Environment.wasm_browser_runtime) @import("sys_wasm") else void;
 
 pub const logger = @import("./logger.zig");
 pub const default_thread_stack_size = ThreadPool.default_thread_stack_size;
-pub const picohttp = @import("./deps/picohttp.zig");
-pub const uws = @import("./deps/uws.zig");
-pub const BoringSSL = @import("./boringssl.zig");
-pub const LOLHTML = @import("./deps/lol-html.zig");
+pub const picohttp = if (!Environment.isWasm) @import("./deps/picohttp.zig") else void;
+pub const uws = if (!Environment.isWasm) @import("./deps/uws.zig") else void;
+pub const BoringSSL = if (!Environment.isWasm) @import("./boringssl.zig") else void;
+pub const LOLHTML = if (!Environment.isWasm) @import("./deps/lol-html.zig") else void;
 pub const clap = @import("./deps/zig-clap/clap.zig");
 pub const analytics = @import("./analytics.zig");
 pub const zlib = @import("./zlib.zig");
-pub const simdutf = @import("./bun.js/bindings/bun-simdutf.zig");
+pub const simdutf = if (!Environment.isWasm) @import("./bun.js/bindings/bun-simdutf.zig") else void;
 
 pub var start_time: i128 = 0;
 
@@ -1838,7 +1845,7 @@ pub const StandaloneModuleGraph = @import("./StandaloneModuleGraph.zig").Standal
 
 pub const string = @import("./string.zig");
 pub const String = string.String;
-pub const ZigString = jsc.ZigString;
+pub const ZigString = if (!Environment.isWasm) jsc.ZigString else void;
 pub const StringJoiner = string.StringJoiner;
 pub const SliceWithUnderlyingString = string.SliceWithUnderlyingString;
 pub const PathString = string.PathString;
@@ -2124,7 +2131,7 @@ pub fn initArgv() !void {
     }
 }
 
-pub const spawn = @import("./bun.js/api/bun/spawn.zig").PosixSpawn;
+pub const spawn = if (!Environment.isWasm) @import("./bun.js/api/bun/spawn.zig").PosixSpawn else void;
 
 pub fn isRegularFile(mode: anytype) bool {
     return S.ISREG(@intCast(mode));
