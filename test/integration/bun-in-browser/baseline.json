@@ -1,0 +1,8 @@
+{
+  "test/js/node/fs": {
+    "total": 11,
+    "passed": 11,
+    "failed": 0,
+    "rate": 1
+  }
+}

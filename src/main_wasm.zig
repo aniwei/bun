@@ -647,6 +647,11 @@ comptime {
     _ = scan;
     _ = bun_malloc;
     _ = getTests;
+
+    // Browser runtime exports（只在 -Dwasm_profile=browser_runtime 时启用）
+    if (bun.Environment.wasm_browser_runtime) {
+        _ = @import("./bun_browser.zig");
+    }
 }
 
 const Define = @import("./defines.zig");

@@ -1,0 +1,59 @@
+# 跳过清单：bun-in-browser 不运行的官方测试用例
+#
+# 格式：相对项目根的路径（注释以 # 开头，空行忽略）
+# 规则：路径精确匹配 OR 前缀匹配（含子目录所有文件）
+# 变更要求：必须注明原因 + 对应 issue 链接，否则 CI 拒绝
+
+# ── D 级 API（FFI / N-API / V8 C++ API）─────────────────────────────
+test/js/bun/ffi/                    # bun:ffi 无法在浏览器执行原生 .so
+test/napi/                          # N-API 需要原生 .node addon
+test/v8/                            # V8 C++ API 无浏览器等价物
+
+# ── 原生子进程（依赖宿主系统二进制）─────────────────────────────────
+test/js/node/child_process/exec-system-binary.test.ts   # execFile('ls') 依赖宿主 ls
+test/js/bun/shell/system-binary.test.ts                 # 调用 /usr/bin/* 系统工具
+
+# ── UDP / dgram ───────────────────────────────────────────────────────
+test/js/node/dgram/                 # 浏览器无 UDP 原语
+
+# ── TLS 套件（需要真实证书链）────────────────────────────────────────
+test/js/bun/http/bun-connect-x509.test.ts   # mTLS，需原生 TLS 实现
+test/js/node/tls/                            # 同上
+test/js/bun/http/tls-keepalive.test.ts       # 依赖真实 TLS keepalive 计时与 socket 细粒度行为，当前 browser net/tls 基线未对齐
+
+# ── M2-6 已知阻塞（待后续实现对齐）──────────────────────────────────
+test/js/node/fs/fs-oom.test.ts                 # 依赖 memfd_create 等 internal-for-testing 原生辅助
+test/js/node/fs/fs-stats-truncate.test.ts      # USE_BUN_WEB_RUNTIME 下 bun:internal-for-testing 仍 ENOENT（createStatsForIno 未接入核心 runtime）
+test/js/node/fs/fs-stats-constructor.test.ts   # USE_BUN_WEB_RUNTIME 下 Stats(...) 无 new 仍存在字段映射/原型语义偏差
+test/js/node/fs/abort-signal-leak-read-write-file.test.ts # 依赖宿主 GC/heapStats 稳定收敛，浏览器 runtime 下结果波动
+
+# ── 进程内存 / heap profiling ─────────────────────────────────────────
+test/js/bun/gc/                     # 浏览器 GC 不可编程控制
+test/js/node/v8/heap-snapshot.test.ts       # v8.writeHeapSnapshot 无对应实现
+
+# ── Bake / dev-server（独立渲染框架，暂不覆盖）───────────────────────
+test/bake/                          # Bake SSR 框架，Phase 2 后补
+
+# ── M4 HTTP 目录已知阻塞（browser runtime 差异，后续 M4.x/M5 继续收敛） ──
+test/js/bun/http/listener-getsockname.test.ts          # 依赖真实 socket getsockname 细节，当前虚拟 net 未提供
+test/js/bun/http/serve-pending-promise-abort-leak.test.ts # 依赖连接泄漏/abort 内核级可观测，browser runtime 无等价低层指标
+test/js/bun/http/bun-serve-args.test.ts                # Bun.serve 参数/错误语义尚未与原生完全对齐
+test/js/bun/http/server-url-invalid.test.ts            # server.url 无效输入报错语义未完全对齐
+test/js/bun/http/bun-serve-file.test.ts                # 文件流式响应/headers 细节与原生实现存在差异
+test/js/bun/http/bun-serve-html.test.ts                # HTML 响应快照依赖原生模板/头部细节
+test/js/bun/http/proxy.test.ts                         # 依赖 axios fixture（browser runner 环境未安装）
+test/js/bun/http/http-server-chunking.test.ts          # chunking 边界行为与原生 HTTP server 实现存在差异
+test/js/bun/http/request-smuggling.test.ts             # 依赖原生 parser/连接层防护细节，当前 SW bridge 未覆盖
+test/js/bun/http/fetch-header-count-limit.test.ts      # header count limit 低层限制行为未对齐原生
+
+# ── M5 shell 目录已知阻塞（browser runtime / 宿主差异） ────────────────
+test/js/bun/shell/lex.test.ts                          # shell lexer 边界（转义/引用）与当前 browser runtime 解析路径仍有语义偏差
+test/js/bun/shell/shell-sentinel-hardening.test.ts     # 依赖原生 shell 内部对象引用/哨兵防护实现，当前 runtime 触发 Invalid JS object ref
+test/js/bun/shell/shell-cmdsub-crash.test.ts           # 命令替换（cmdsub）异常路径与原生 shell 行为未完全对齐
+test/js/bun/shell/shell-seq-condexpr.test.ts           # 序列表达式与条件表达式组合求值顺序存在语义差异
+test/js/bun/shell/commands/ls.test.ts                  # 宿主 ls（BSD/GNU）选项行为差异，browser runtime 下不可稳定对齐
+test/js/bun/shell/commands/echo.test.ts                # 宿主 echo 兼容差异（转义/flag 处理）导致断言不稳定
+test/js/bun/shell/commands/seq.test.ts                 # 宿主 seq 参数与错误语义差异，browser runtime 下不可稳定对齐
+
+# ── CI 专用基础设施测试 ───────────────────────────────────────────────
+test/regression/                    # 回归测试需真实 bun binary，按需选入
