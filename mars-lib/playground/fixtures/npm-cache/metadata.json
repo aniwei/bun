@@ -19,7 +19,7 @@
       "version": "0.0.0-mars",
       "dependencies": {
         "react": "latest",
-        "typescript": "^0.0.0"
+        "typescript": "latest"
       },
       "files": {
         "index.js": "module.exports = { createServer() { return 'mars-vite' } }"

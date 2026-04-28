@@ -23,6 +23,10 @@ const esbuildWasmLoader = createWasmLoader("esbuild-wasm", () => {
   })
 })
 
+export async function preloadEsbuildWasm(): Promise<void> {
+  await esbuildWasmLoader.load()
+}
+
 export async function buildProject(options: MarsBuildOptions): Promise<BuildResult> {
   const cwd = options.cwd ?? "/workspace"
   const logs: BuildResult["logs"] = []

@@ -736,6 +736,7 @@ test("Phase 2 shell bun install writes offline packages from package.json", asyn
     packageCache: await loadPlaygroundPackageCache(),
   })
   await runtime.vfs.writeFile("/workspace/package.json", JSON.stringify({
+    name: "lockfile-golden-app",
     dependencies: {
       vite: "latest",
     },
@@ -748,6 +749,182 @@ test("Phase 2 shell bun install writes offline packages from package.json", asyn
   expect(result.stdout).toContain("react@0.0.0-mars")
   expect(await runtime.vfs.readFile("/workspace/node_modules/vite/index.js", "utf8")).toContain("mars-vite")
   expect(await runtime.vfs.readFile("/workspace/mars-lock.json", "utf8")).toContain("0.0.0-mars")
+  const bunLockText = String(await runtime.vfs.readFile("/workspace/bun.lock", "utf8"))
+  expect(bunLockText).toContain('"configVersion": 1')
+  expect(bunLockText).toContain('"vite": ["vite@0.0.0-mars", "", { "dependencies": { "react": "0.0.0-mars", "typescript": "0.0.1-mars" } }, "vite-0.0.0-mars.tgz"]')
+  expect(bunLockText).toContain('"react": ["react@0.0.0-mars", "", {}, "react-0.0.0-mars.tgz"]')
+  const bunLock = JSON.parse(bunLockText) as {
+    lockfileVersion: number
+    configVersion: number
+    workspaces: {
+      "": {
+        name?: string
+        dependencies: Record<string, string>
+      }
+    }
+    packages: Record<string, unknown[]>
+  }
+  expect(bunLock.lockfileVersion).toBe(1)
+  expect(bunLock.configVersion).toBe(1)
+  expect(bunLock.workspaces[""].name).toBe("lockfile-golden-app")
+  expect(bunLock.workspaces[""].dependencies.vite).toBe("latest")
+  expect(Array.isArray(bunLock.packages.vite)).toBe(true)
+  expect(Array.isArray(bunLock.packages.react)).toBe(true)
+  expect(bunLock.packages.vite?.[0]).toBe("vite@0.0.0-mars")
+  expect(bunLock.packages.react?.[0]).toBe("react@0.0.0-mars")
+  expect(bunLock.packages.vite?.[1]).toBe("")
+  expect(bunLock.packages.react?.[1]).toBe("")
+  expect(typeof bunLock.packages.vite?.[2]).toBe("object")
+  expect(typeof bunLock.packages.react?.[2]).toBe("object")
+  expect(Object.keys((bunLock.packages.vite?.[2] as Record<string, unknown>) ?? {})).toEqual(["dependencies"])
+  expect(Object.keys((bunLock.packages.react?.[2] as Record<string, unknown>) ?? {})).toEqual([])
+  const packageKeys = Object.keys(bunLock.packages)
+  expect(packageKeys).toEqual([...packageKeys].sort((left, right) => left.localeCompare(right)))
+
+  await runtime.dispose()
+})
+
+test("Phase 2 shell bun install replays locked versions from bun.lock", async () => {
+  const packageCache = createMemoryPackageCache({
+    metadata: [
+      {
+        name: "locked-demo",
+        distTags: { latest: "2.0.0" },
+        versions: {
+          "1.0.0": {
+            version: "1.0.0",
+            files: {
+              "index.js": "module.exports = 'locked-demo@1.0.0'",
+            },
+          },
+          "2.0.0": {
+            version: "2.0.0",
+            files: {
+              "index.js": "module.exports = 'locked-demo@2.0.0'",
+            },
+          },
+        },
+      },
+    ],
+  })
+  const runtime = await createMarsRuntime({ packageCache })
+  await runtime.vfs.writeFile("/workspace/package.json", JSON.stringify({
+    dependencies: {
+      "locked-demo": "latest",
+    },
+  }))
+
+  const firstInstall = await runtime.shell.run("bun install")
+  expect(firstInstall.code).toBe(0)
+  expect(await runtime.vfs.readFile("/workspace/node_modules/locked-demo/index.js", "utf8")).toBe(
+    "module.exports = 'locked-demo@2.0.0'",
+  )
+
+  await packageCache.setMetadata("locked-demo", {
+    name: "locked-demo",
+    distTags: { latest: "3.0.0" },
+    versions: {
+      "1.0.0": {
+        version: "1.0.0",
+        files: {
+          "index.js": "module.exports = 'locked-demo@1.0.0'",
+        },
+      },
+      "2.0.0": {
+        version: "2.0.0",
+        files: {
+          "index.js": "module.exports = 'locked-demo@2.0.0'",
+        },
+      },
+      "3.0.0": {
+        version: "3.0.0",
+        files: {
+          "index.js": "module.exports = 'locked-demo@3.0.0'",
+        },
+      },
+    },
+  })
+
+  const replayInstall = await runtime.shell.run("bun install")
+  expect(replayInstall.code).toBe(0)
+  expect(replayInstall.stdout).toContain("locked-demo@2.0.0")
+  expect(await runtime.vfs.readFile("/workspace/node_modules/locked-demo/index.js", "utf8")).toBe(
+    "module.exports = 'locked-demo@2.0.0'",
+  )
+
+  await runtime.dispose()
+})
+
+test("Phase 2 shell bun install replays locked workspace dependency versions from bun.lock", async () => {
+  const packageCache = createMemoryPackageCache({
+    metadata: [
+      {
+        name: "locked-demo",
+        distTags: { latest: "2.0.0" },
+        versions: {
+          "2.0.0": {
+            version: "2.0.0",
+            files: {
+              "index.js": "module.exports = 'locked-demo@2.0.0'",
+            },
+          },
+        },
+      },
+    ],
+  })
+  const runtime = await createMarsRuntime({ packageCache })
+  await runtime.vfs.writeFile("/workspace/package.json", JSON.stringify({
+    workspaces: ["packages/*"],
+    dependencies: {
+      "@mars/workspace-app": "workspace:*",
+    },
+  }))
+  await runtime.vfs.mkdir("/workspace/packages/app", { recursive: true })
+  await runtime.vfs.writeFile("/workspace/packages/app/package.json", JSON.stringify({
+    name: "@mars/workspace-app",
+    version: "1.0.0",
+    dependencies: {
+      "locked-demo": "latest",
+    },
+    main: "index.js",
+  }))
+  await runtime.vfs.writeFile(
+    "/workspace/packages/app/index.js",
+    "module.exports = require('locked-demo')",
+  )
+
+  const firstInstall = await runtime.shell.run("bun install")
+  expect(firstInstall.code).toBe(0)
+  expect(await runtime.vfs.readFile("/workspace/node_modules/locked-demo/index.js", "utf8")).toBe(
+    "module.exports = 'locked-demo@2.0.0'",
+  )
+
+  await packageCache.setMetadata("locked-demo", {
+    name: "locked-demo",
+    distTags: { latest: "3.0.0" },
+    versions: {
+      "2.0.0": {
+        version: "2.0.0",
+        files: {
+          "index.js": "module.exports = 'locked-demo@2.0.0'",
+        },
+      },
+      "3.0.0": {
+        version: "3.0.0",
+        files: {
+          "index.js": "module.exports = 'locked-demo@3.0.0'",
+        },
+      },
+    },
+  })
+
+  const replayInstall = await runtime.shell.run("bun install")
+  expect(replayInstall.code).toBe(0)
+  expect(replayInstall.stdout).toContain("locked-demo@2.0.0")
+  expect(await runtime.vfs.readFile("/workspace/node_modules/locked-demo/index.js", "utf8")).toBe(
+    "module.exports = 'locked-demo@2.0.0'",
+  )
+  expect(runtime.vfs.readlinkSync("/workspace/node_modules/@mars/workspace-app")).toBe("/workspace/packages/app")
 
   await runtime.dispose()
 })
@@ -807,6 +984,11 @@ test("Phase 2 installer fetches missing packages from registry", async () => {
       "1.2.3": {
         version: "1.2.3",
         dependencies: {},
+        optionalDependencies: {},
+        peerDependencies: {},
+        peerDependenciesMeta: {},
+        scripts: {},
+        bin: {},
         files: {
           "index.js": "module.exports = { source: 'registry' }",
         },
@@ -816,6 +998,10 @@ test("Phase 2 installer fetches missing packages from registry", async () => {
   })
   expect(new TextDecoder().decode(await packageCache.getTarball("https://registry.mars.test/registry-demo/-/registry-demo-1.2.3.tgz") ?? new Uint8Array())).toBe("registry tarball bytes")
   expect(await runtime.vfs.readFile("/workspace/node_modules/registry-demo/index.js", "utf8")).toBe("module.exports = { source: 'registry' }")
+  const registryBunLockText = String(await runtime.vfs.readFile("/workspace/bun.lock", "utf8"))
+  expect(registryBunLockText).toContain(
+    '"registry-demo": ["registry-demo@1.2.3", "", {}, "https://registry.mars.test/registry-demo/-/registry-demo-1.2.3.tgz"]',
+  )
 
   await runtime.dispose()
 })

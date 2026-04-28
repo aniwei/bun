@@ -12,6 +12,23 @@ import { createTranspiler } from "@mars/transpiler"
 import { createOPFSPersistenceAdapter, createWriteFilePatch, restoreVFSSnapshot, snapshotVFS } from "@mars/vfs"
 import { createHmac } from "@mars/node"
 import {
+  sqliteDatabasePath,
+  sqliteFirstNote,
+  sqliteTableName,
+  sqliteUpdatedNote,
+} from "../core-modules/runtime/sqlite"
+import {
+  sqliteTransactionCommitTitle,
+  sqliteTransactionRollbackTitle,
+  sqliteTransactionTableName,
+} from "../core-modules/runtime/sqlite-transaction"
+import {
+  sqliteWasmDatabasePath,
+  sqliteWasmHeaderPrefix,
+  sqliteWasmTableName,
+  sqliteWasmValue,
+} from "../core-modules/runtime/sqlite-wasm"
+import {
   createExpressPlaygroundApp,
   expressCreatePath,
   expressRequestBody,
@@ -59,7 +76,6 @@ import {
 } from "../core-modules/runtime/playground-host"
 import {
   serviceWorkerScopeSmokeEntry,
-  serviceWorkerScopeSmokeMessage,
   serviceWorkerScopeSmokePatchedMessage,
   serviceWorkerScopeSmokePatchMode,
   serviceWorkerScopeSmokeScope,
@@ -73,8 +89,6 @@ import phase1BunServeSource from "../core-modules/bun/bun-serve.ts?raw"
 import phase1RuntimeVfsShellSource from "../core-modules/bun/vfs-shell.ts?raw"
 import resolverManifestText from "../core-modules/resolver/browser-map.json?raw"
 import transpilerAppSource from "../core-modules/transpiler/app.tsx?raw"
-import transpilerMessageSource from "../core-modules/transpiler/message.ts?raw"
-import transpilerTitleSource from "../core-modules/transpiler/title.ts?raw"
 import loaderConfigSource from "../core-modules/loader/config.json?raw"
 import loaderEntrySource from "../core-modules/loader/entry.tsx?raw"
 import loaderFeatureSource from "../core-modules/loader/feature.cjs?raw"
@@ -97,6 +111,8 @@ import runtimeServiceWorkerBootstrapSource from "../core-modules/runtime/service
 import runtimeServiceWorkerRegistrationSource from "../core-modules/runtime/service-worker-registration.ts?raw"
 import runtimeServiceWorkerScopeSmokeSource from "../core-modules/runtime/service-worker-scope-smoke.ts?raw"
 import runtimeSqliteSource from "../core-modules/runtime/sqlite.ts?raw"
+import runtimeSqliteTransactionSource from "../core-modules/runtime/sqlite-transaction.ts?raw"
+import runtimeSqliteWasmSource from "../core-modules/runtime/sqlite-wasm.ts?raw"
 import runtimeSnapshotSource from "../core-modules/runtime/snapshot.ts?raw"
 import runtimeStdioSource from "../core-modules/runtime/stdio.ts?raw"
 import installerDependenciesSource from "../core-modules/installer/dependencies.ts?raw"
@@ -455,6 +471,8 @@ const runners: Record<string, () => Promise<PlaygroundRunResult>> = {
   "phase3-crypto-hasher": runCryptoCase,
   "phase3-password": runPasswordCase,
   "phase3-bun-sql": runSqliteCase,
+  "phase3-bun-sql-transaction": runSqliteTransactionCase,
+  "phase3-bun-sql-wasm": runSqliteWasmCase,
   "phase3-vfs-snapshot": runSnapshotCase,
   "phase3-kernel-stdio": runStdioCase,
   "phase3-opfs-persistence": runOpfsCase,
@@ -943,20 +961,91 @@ async function runPasswordCase(): Promise<PlaygroundRunResult> {
 
 async function runSqliteCase(): Promise<PlaygroundRunResult> {
   const runtime = await createMarsRuntime()
-  const db = runtime.bun.sql.db
-  const databasePath = db.path
+  const databasePath = sqliteDatabasePath
 
   try {
-    await db.exec("create table if not exists notes (id integer primary key, title text, done integer)")
-    await db.run("insert into notes (title, done) values (?, ?)", ["mars sqlite prework", 0])
-    await db.run("update notes set title = ? where id = ?", ["mars sqlite updated", 1])
-    const rows = await runtime.bun.sql`select title from notes where id = ${1}`
+    const db = runtime.bun.sql.open(databasePath)
+    await db.exec(`create table if not exists ${sqliteTableName} (id integer primary key, title text, done integer)`)
+    await db.run(`insert into ${sqliteTableName} (title, done) values (?, ?)`, [sqliteFirstNote, 0])
+    await db.run(`update ${sqliteTableName} set title = ? where id = ?`, [sqliteUpdatedNote, 1])
+    const rows = await db.all<{ title: string }>(`select title from ${sqliteTableName} where id = ?`, [1])
     await db.close()
 
-    if (rows[0]?.title !== "mars sqlite updated") return fail("phase3-bun-sql", JSON.stringify(rows))
+    if (rows[0]?.title !== sqliteUpdatedNote) return fail("phase3-bun-sql", JSON.stringify(rows))
     if (!runtime.vfs.existsSync(databasePath)) return fail("phase3-bun-sql", "database file missing")
 
     return pass("phase3-bun-sql", `rows=${rows.length} path=${databasePath} fixture=${runtimeSqliteSource.length}`)
+  } finally {
+    await runtime.dispose()
+  }
+}
+
+async function runSqliteTransactionCase(): Promise<PlaygroundRunResult> {
+  const runtime = await createMarsRuntime()
+  const databasePath = sqliteDatabasePath
+
+  try {
+    const db = runtime.bun.sql.open(databasePath)
+
+    await db.exec(`create table if not exists ${sqliteTransactionTableName} (id integer primary key, title text)`)
+    await db.exec("begin")
+    await db.run(`insert into ${sqliteTransactionTableName} (title) values (?)`, [sqliteTransactionRollbackTitle])
+    await db.exec("rollback")
+
+    const rolledBackCount = await db.get<{ total: number }>(`select count(*) as total from ${sqliteTransactionTableName}`)
+
+    await db.exec("begin transaction")
+    await db.run(`insert into ${sqliteTransactionTableName} (title) values (?)`, [sqliteTransactionCommitTitle])
+    await db.exec("commit")
+    await db.close()
+
+    const reopened = runtime.bun.sql.open(databasePath)
+    const rows = await reopened.all<{ id: number; title: string }>(
+      `select id, title from ${sqliteTransactionTableName} order by id`,
+    )
+    await reopened.close()
+
+    if (rolledBackCount?.total !== 0) return fail("phase3-bun-sql-transaction", JSON.stringify(rolledBackCount))
+    if (rows.length !== 1 || rows[0]?.title !== sqliteTransactionCommitTitle) {
+      return fail("phase3-bun-sql-transaction", JSON.stringify(rows))
+    }
+
+    return pass("phase3-bun-sql-transaction", `rows=${rows.length} fixture=${runtimeSqliteTransactionSource.length}`)
+  } finally {
+    await runtime.dispose()
+  }
+}
+
+async function runSqliteWasmCase(): Promise<PlaygroundRunResult> {
+  const runtime = await createMarsRuntime()
+
+  try {
+    const db = runtime.bun.sql.open(sqliteWasmDatabasePath)
+    await db.exec(`create table if not exists ${sqliteWasmTableName} (id integer primary key, title text)`)
+    await db.run(`insert into ${sqliteWasmTableName} (title) values (?)`, [sqliteWasmValue])
+    await db.close()
+
+    const persisted = await runtime.vfs.readFile(sqliteWasmDatabasePath)
+    if (typeof persisted === "string") {
+      return fail("phase3-bun-sql-wasm", "expected sqlite binary file")
+    }
+
+    const header = new TextDecoder().decode(persisted.subarray(0, sqliteWasmHeaderPrefix.length))
+    if (header !== sqliteWasmHeaderPrefix) {
+      return fail("phase3-bun-sql-wasm", `unexpected sqlite header: ${header}`)
+    }
+
+    const reopened = runtime.bun.sql.open(sqliteWasmDatabasePath)
+    const row = await reopened.get<{ title: string }>(
+      `select title from ${sqliteWasmTableName} order by id limit 1`,
+    )
+    await reopened.close()
+
+    if (row?.title !== sqliteWasmValue) {
+      return fail("phase3-bun-sql-wasm", JSON.stringify(row))
+    }
+
+    return pass("phase3-bun-sql-wasm", `header=${header} fixture=${runtimeSqliteWasmSource.length}`)
   } finally {
     await runtime.dispose()
   }

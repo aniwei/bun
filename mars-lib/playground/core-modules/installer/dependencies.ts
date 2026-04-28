@@ -1,3 +1,3 @@
 export const dependencies = {
-  vite: "latest",
+  vite: "^0.0.0-mars",
 }

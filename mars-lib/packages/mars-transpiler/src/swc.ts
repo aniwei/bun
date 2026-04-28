@@ -7,6 +7,16 @@ import type { ImportRecord, Loader, TransformInput, TransformResult, Transpiler 
 import type { Options } from "@swc/wasm-web"
 
 const swcWasmLoader = createWasmLoader("@swc/wasm-web", () => initSwc())
+let swcWasmEnabled = true
+
+export function setSwcWasmEnabled(enabled: boolean): void {
+  swcWasmEnabled = enabled
+}
+
+export async function preloadSwcWasm(): Promise<void> {
+  if (!swcWasmEnabled) return
+  await swcWasmLoader.load()
+}
 
 class BasicTranspiler implements Transpiler {
   async transform(input: TransformInput): Promise<TransformResult> {
@@ -37,17 +47,18 @@ export function transformSourceCode(
   define: Record<string, string> = {},
   format: TransformInput["format"] = "commonjs",
 ): string {
+  const executableSource = stripShebang(sourceCode)
   if (loader === "json") return format === "esm" ? `export default ${sourceCode.trim() || "null"};` : sourceCode
 
-  if (swcWasmLoader.ready) {
+  if (swcWasmEnabled && swcWasmLoader.ready) {
     try {
-      return transformSourceCodeWithSwc(sourceCode, loader, define, undefined, false, format)
+      return transformSourceCodeWithSwc(executableSource, loader, define, undefined, false, format)
     } catch {
-      return transformSourceCodeWithBasic(sourceCode, loader, define, format)
+      return transformSourceCodeWithBasic(executableSource, loader, define, format)
     }
   }
 
-  return transformSourceCodeWithBasic(sourceCode, loader, define, format)
+  return transformSourceCodeWithBasic(executableSource, loader, define, format)
 }
 
 class SwcWasmTranspiler implements Transpiler {
@@ -57,9 +68,11 @@ class SwcWasmTranspiler implements Transpiler {
     if (input.loader === "json") return this.#fallback.transform(input)
 
     try {
+      if (!swcWasmEnabled) return this.#fallback.transform(input)
       await swcWasmLoader.load()
+      const executableSource = stripShebang(input.code)
       const diagnostics = validateSource(input.code, input.path)
-      const preparedSource = prepareSourceForSwc(input.code, input.define, input.format)
+      const preparedSource = prepareSourceForSwc(executableSource, input.define, input.format)
       const output = transformSync(preparedSource, createSwcOptions(input))
       const transformedCode = injectMarsJsxHelper(output.code, input.loader)
       const imports = mergeImportRecords(
@@ -81,6 +94,10 @@ class SwcWasmTranspiler implements Transpiler {
   scanImports(code: string, loader: Loader) {
     return scanImports(code, loader)
   }
+}
+
+function stripShebang(sourceCode: string): string {
+  return sourceCode.startsWith("#!") ? sourceCode.replace(/^#!.*(?:\n|$)/, "") : sourceCode
 }
 
 function transformSourceCodeWithSwc(
@@ -191,15 +208,15 @@ function transformSourceCodeWithBasic(
   if (loader === "ts" || loader === "tsx") {
     transformedCode = transformedCode
       .replace(
-        /(\b(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*[A-Za-z_$][A-Za-z0-9_$<>,\[\]\s|&?]*(?=\s*=)/g,
+        /(\b(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*[A-Za-z_$][A-Za-z0-9_$<>,[\]\s|&?]*(?=\s*=)/g,
         "$1",
       )
       .replace(
-        /([,(]\s*[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*[A-Za-z_$][A-Za-z0-9_$<>,\[\]\s|&?]*(?=\s*[,)=])/g,
+        /([,(]\s*[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*[A-Za-z_$][A-Za-z0-9_$<>,[\]\s|&?]*(?=\s*[,)=])/g,
         "$1",
       )
       .replace(
-        /(\))\s*:\s*[A-Za-z_$][A-Za-z0-9_$<>,\[\]\s|&?]*(?=\s*[{=>])/g,
+        /(\))\s*:\s*[A-Za-z_$][A-Za-z0-9_$<>,[\]\s|&?]*(?=\s*[{=>])/g,
         "$1",
       )
       .replace(/interface\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\{[^}]*\}/g, "")

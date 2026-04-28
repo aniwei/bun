@@ -1,3 +1,5 @@
+import { isFileTreeSymlink } from "./types"
+
 import type { FileTree, MarsVFSInterface } from "./types"
 
 export type MarsSerializedFileTree = Record<string, MarsSerializedFileTreeEntry>
@@ -5,6 +7,7 @@ export type MarsSerializedFileTree = Record<string, MarsSerializedFileTreeEntry>
 export type MarsSerializedFileTreeEntry =
   | { kind: "file"; encoding: "base64"; data: string }
   | { kind: "directory"; children: MarsSerializedFileTree }
+  | { kind: "symlink"; target: string }
 
 export async function snapshotVFS(
   vfs: MarsVFSInterface,
@@ -34,6 +37,14 @@ export function serializeFileTree(tree: FileTree): MarsSerializedFileTree {
       continue
     }
 
+    if (isFileTreeSymlink(value)) {
+      serializedTree[path] = {
+        kind: "symlink",
+        target: value.target,
+      }
+      continue
+    }
+
     serializedTree[path] = {
       kind: "directory",
       children: serializeFileTree(value),
@@ -49,7 +60,9 @@ export function deserializeFileTree(snapshot: MarsSerializedFileTree): FileTree 
   for (const [path, value] of Object.entries(snapshot)) {
     tree[path] = value.kind === "file"
       ? fromBase64(value.data)
-      : deserializeFileTree(value.children)
+      : value.kind === "symlink"
+        ? { kind: "symlink", target: value.target }
+        : deserializeFileTree(value.children)
   }
 
   return tree

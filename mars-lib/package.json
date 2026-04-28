@@ -8,16 +8,20 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "bun test packages/mars-test/src/phase1.acceptance.test.ts packages/mars-test/src/phase2.acceptance.test.ts packages/mars-test/src/phase3.acceptance.test.ts",
+    "test": "bun test packages/mars-test/src/phase1.acceptance.test.ts packages/mars-test/src/phase2.acceptance.test.ts packages/mars-test/src/phase2.installer.acceptance.test.ts packages/mars-test/src/phase3.acceptance.test.ts",
     "typecheck": "bunx tsc -p tsconfig.json --noEmit",
-    "lint": "ox lint",
-    "format": "ox format",
-    "check": "bun run typecheck && bun run test"
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "check": "bun run typecheck && bun run lint --max-warnings 0 && bun run test"
   },
   "devDependencies": {
+    "@types/sql.js": "^1.4.9",
+    "oxfmt": "0.44.0",
+    "oxlint": "1.59.0",
     "typescript": "6.0.2"
   },
   "dependencies": {
+    "sql.js": "^1.13.0",
     "@swc/wasm-web": "^1.15.32",
     "esbuild-wasm": "^0.28.0"
   }

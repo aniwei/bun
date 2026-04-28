@@ -94,7 +94,7 @@ function digestMD5(input: Uint8Array): Uint8Array {
   let wordD = 0x10325476
 
   for (let offset = 0; offset < paddedLength; offset += 64) {
-    const chunkWords = new Array<number>(16)
+    const chunkWords = Array.from({ length: 16 }, () => 0)
     for (let index = 0; index < 16; index += 1) {
       chunkWords[index] = view.getUint32(offset + index * 4, true)
     }

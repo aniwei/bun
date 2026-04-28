@@ -48,6 +48,11 @@ function normalizeRegistryMetadata(input: unknown): PackageMetadata {
     versions[version] = {
       version: typeof value.version === "string" ? value.version : version,
       dependencies: isStringRecord(value.dependencies) ? value.dependencies : {},
+      optionalDependencies: isStringRecord(value.optionalDependencies) ? value.optionalDependencies : {},
+      peerDependencies: isStringRecord(value.peerDependencies) ? value.peerDependencies : {},
+      peerDependenciesMeta: normalizePeerDependenciesMeta(value.peerDependenciesMeta),
+      scripts: normalizeLifecycleScripts(value.scripts),
+      bin: normalizePackageBin(input.name, value.bin),
       files: isRecord(value.files) ? value.files as PackageMetadataVersion["files"] : {},
       ...(isRecord(value.dist) && typeof value.dist.tarball === "string" ? { tarballKey: value.dist.tarball } : {}),
       ...(typeof value.tarballKey === "string" ? { tarballKey: value.tarballKey } : {}),
@@ -68,4 +73,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every(item => typeof item === "string")
+}
+
+function normalizePeerDependenciesMeta(value: unknown): PackageMetadataVersion["peerDependenciesMeta"] {
+  if (!isRecord(value)) return {}
+
+  const normalized: NonNullable<PackageMetadataVersion["peerDependenciesMeta"]> = {}
+  for (const [name, metadata] of Object.entries(value)) {
+    if (!isRecord(metadata)) continue
+    normalized[name] = { optional: metadata.optional === true }
+  }
+
+  return normalized
+}
+
+function normalizeLifecycleScripts(value: unknown): PackageMetadataVersion["scripts"] {
+  if (!isRecord(value)) return {}
+
+  return {
+    ...(typeof value.preinstall === "string" ? { preinstall: value.preinstall } : {}),
+    ...(typeof value.install === "string" ? { install: value.install } : {}),
+    ...(typeof value.postinstall === "string" ? { postinstall: value.postinstall } : {}),
+  }
+}
+
+function normalizePackageBin(packageName: string, value: unknown): PackageMetadataVersion["bin"] {
+  if (typeof value === "string") return { [packageName.split("/").at(-1) ?? packageName]: value }
+  if (!isStringRecord(value)) return {}
+
+  return value
 }

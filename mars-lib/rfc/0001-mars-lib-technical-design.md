@@ -750,6 +750,8 @@ M2 验收口径:
 
 插件系统是 Mars-lib 的横切能力，所有关键路径都应通过 Hook 调度。
 
+> **详见**: [RFC 0002: Mars Hook System Design](./0002-hook-system-design.md) - 包含完整的 Hook 时序定义、设计决策和新功能 Hook 添加清单。
+
 ```ts
 export interface MarsPlugin {
   name: string;
@@ -936,7 +938,7 @@ nx run vite-typescript-react:test:acceptance
 
 ## 17. Package Installer 与离线缓存
 
-MarsInstaller 负责 npm metadata、tarball cache、依赖解析和 VFS 中的 `node_modules` 写入。当前 `bun install` shell 命令是最小实现: 从 MarsVFS `package.json` 读取 dependencies/devDependencies，使用注入的 package cache 写入 `node_modules` 与 `mars-lock.json`；cache miss 时可通过 registry fetch provider 拉取 metadata 和 tgz tarball，并支持基础 npm `.tgz` 解包。lifecycle scripts、workspaces、完整 semver 和 Bun lockfile 完整兼容仍待补。
+MarsInstaller 负责 npm metadata、tarball cache、依赖解析和 VFS 中的 `node_modules` 写入。当前 `bun install` shell 命令是最小实现: 从 MarsVFS `package.json` 读取 dependencies/devDependencies/optionalDependencies/peerDependencies/workspaces，使用注入的 package cache 写入 `node_modules` 与 `mars-lock.json`；cache miss 时可通过 registry fetch provider 拉取 metadata 和 tgz tarball，并支持 optionalDependencies 跳过语义、peerDependencies 自动安装与 range 冲突检测、optional peer 跳过、本地 workspace package 发现、`workspace:` 协议、`node_modules` workspace symlink、package/root `preinstall`/`install`/`postinstall` lifecycle scripts、`npm_lifecycle_*` / `npm_command` / `npm_package_json` / 扁平化 `npm_package_*` env、package `bin` 元数据、`node_modules/.bin` shim、lifecycle `PATH` 注入和 shebang JS binary 执行、基础 npm `.tgz`/PAX 解包、PAX path/linkpath、tar symlink、路径逃逸过滤、常见 semver range 最高满足版本选择、hyphen ranges、partial comparators、prerelease opt-in 语义与 build metadata 解析。Bun lockfile、npm 的更多边缘 script env 和更高级 npm semver range 语法仍待补。
 
 ```ts
 export interface PackageInstaller {
@@ -950,6 +952,9 @@ export interface InstallOptions {
   cwd: string;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  workspaces?: WorkspacePackage[];
   lockfile?: boolean;
   registry?: string;
   offline?: boolean;
@@ -975,7 +980,7 @@ playground/fixtures/npm-cache/
 └── typescript-*.tgz
 ```
 
-M2 验收要求 `metadata.json` 可被测试工具加载为离线 `PackageCache`，并能安装 Vite playground 所需的递归依赖。registry fetch provider 与基础 npm `.tgz` 解包已纳入验收；fixture 不得只是未被测试读取的静态占位。
+M2 验收要求 `metadata.json` 可被测试工具加载为离线 `PackageCache`，并能安装 Vite playground 所需的递归依赖。registry fetch provider、semver hyphen ranges/partial comparators/prerelease opt-in/build metadata、optionalDependencies、peerDependencies、workspace symlink、lifecycle env、package JS bins、基础 npm `.tgz`/PAX path/linkpath、tar symlink 与路径逃逸过滤已纳入验收；fixture 不得只是未被测试读取的静态占位。
 
 ## 18. MarsCore Rust/WASM 边界
 

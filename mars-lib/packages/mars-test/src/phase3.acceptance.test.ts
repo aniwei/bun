@@ -7,8 +7,9 @@ import { MarsCryptoHasher, createHashDigest, marsPassword } from "@mars/crypto"
 import { connectMarsKernelWorker, createKernelWorkerController, createMarsKernel, createMarsProcessWorkerFactory, detectMarsCapabilities, installKernelWorkerBootstrap, supportsKernelWorkerClient } from "@mars/kernel"
 import type { KernelWorkerMessageEvent, WorkerLike } from "@mars/kernel"
 import { createHash, createHmac, randomBytes, randomUUID } from "@mars/node"
-import { createProcessWorkerBootstrapBlobURL, createProcessWorkerBootstrapScript, getBunApiCompat, installProcessWorkerRuntimeBootstrap } from "@mars/runtime"
-import { classifyRequest, createBridgeServiceWorkerKernelClient, createServiceWorkerBridgeController, createServiceWorkerRouter, installServiceWorkerBootstrap, installServiceWorkerFetchHandler, moduleUrlFromPath } from "@mars/sw"
+import { createMarsBun, createProcessWorkerBootstrapBlobURL, createProcessWorkerBootstrapScript, getBunApiCompat, installProcessWorkerRuntimeBootstrap } from "@mars/runtime"
+import { createWebSocketPair, upgradeToWebSocket } from "@mars/runtime"
+import { classifyRequest, createBridgeServiceWorkerKernelClient, createServiceWorkerBridgeController, createServiceWorkerRouter, handleWebSocketRoute, installServiceWorkerBootstrap, installServiceWorkerFetchHandler, moduleUrlFromPath } from "@mars/sw"
 import type { MarsServiceWorkerContainer, MarsServiceWorkerController, MarsServiceWorkerMessageEvent, MarsServiceWorkerRegistration, MarsServiceWorkerRegistrationOptions } from "@mars/sw"
 import { createBrowserTestProfiles } from "@mars/test"
 import { createMarsVFS, createOPFSPersistenceAdapter, createWriteFilePatch, restoreVFSSnapshot, snapshotVFS } from "@mars/vfs"
@@ -378,8 +379,12 @@ test("Phase 3 compatibility matrix tracks Bun.spawn", () => {
     api: "Bun.spawn",
     status: "partial",
     phase: "M3",
-    notes: "Bun.spawn({ cmd }) and runtime.spawn() can execute bun run <entry> through the current in-memory Kernel pid path; general command execution, Process Worker isolation and streaming stdin are pending.",
-    tests: ["Phase 3 Bun.spawn executes bun run index.ts through kernel stdio"],
+    notes: "Bun.spawn({ cmd }) and runtime.spawn() can execute both bun run <entry> and generic shell commands through the current in-memory Kernel pid + shell dispatch path; Process Worker isolation and streaming stdin backpressure parity are pending.",
+    tests: [
+      "Phase 3 Bun.spawn executes bun run index.ts through kernel stdio",
+      "Phase 3 Bun.spawn executes general shell command through kernel stdio",
+      "Phase 3 runtime.spawn executes general shell command through kernel stdio",
+    ],
   })
 })
 
@@ -1652,13 +1657,63 @@ test("Phase 3 Bun.spawn executes bun run index.ts through kernel stdio", async (
   await runtime.dispose()
 })
 
+test("Phase 3 runtime.spawn executes general shell command through kernel stdio", async () => {
+  const runtime = await createMarsRuntime()
+
+  const processHandle = await runtime.spawn("echo", ["runtime-general"])
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(stdout).toBe("runtime-general\n")
+  expect(stderr).toBe("")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
+test("Phase 3 Bun.spawn executes general shell command through kernel stdio", async () => {
+  const runtime = await createMarsRuntime()
+
+  const processHandle = await runtime.bun.spawn({ cmd: ["echo", "bun-general"] })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(stdout).toBe("bun-general\n")
+  expect(stderr).toBe("")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
 test("Phase 3 Bun.spawnSync returns explicit fallback result", async () => {
   const runtime = await createMarsRuntime()
   const result = runtime.bun.spawnSync({ cmd: ["bun", "run", "index.ts"] })
 
   expect(result.success).toBe(false)
   expect(result.exitCode).toBe(1)
-  expect(new TextDecoder().decode(result.stderr)).toContain("Bun.spawnSync is not available")
+  expect(new TextDecoder().decode(result.stderr)).toContain("Bun.spawnSync")
+
+  await runtime.dispose()
+})
+
+test("Phase 3 Bun.spawnSync reports no-SAB fallback explicitly", async () => {
+  const runtime = await createMarsRuntime()
+  const bun = createMarsBun({
+    vfs: runtime.vfs,
+    kernel: runtime.kernel,
+    scope: {} as typeof globalThis,
+  })
+  const result = bun.spawnSync({ cmd: ["echo", "fallback"] })
+
+  expect(result.success).toBe(false)
+  expect(result.exitCode).toBe(1)
+  expect(new TextDecoder().decode(result.stderr)).toContain("SharedArrayBuffer + Atomics.wait")
 
   await runtime.dispose()
 })
@@ -1707,7 +1762,7 @@ test("Phase 3 Bun.password hashes and verifies through WebCrypto", async () => {
 })
 
 test("Phase 3 Bun.sql stores and queries rows through MarsVFS", async () => {
-  const runtime = await createMarsRuntime()
+  const runtime = await createMarsRuntime({ runtimeFeatures: { sql: true } })
   const db = runtime.bun.sql.db
   const databasePath = db.path
 
@@ -1717,20 +1772,48 @@ test("Phase 3 Bun.sql stores and queries rows through MarsVFS", async () => {
   await db.run("update notes set title = ? where id = ?", ["first-updated", 1])
   const activeRows = await db.all("select id, title, done from notes where done = ? order by id", [0])
   const countRow = await db.get("select count(*) as total from notes")
+  const taggedRows = await runtime.bun.sql`select title from notes where id = ${1}`
   await db.run("delete from notes where id = ?", [2])
   await db.close()
 
-  const persistedText = String(await runtime.vfs.readFile(databasePath, "utf8"))
+  const persistedBytes = await runtime.vfs.readFile(databasePath)
   const reopened = runtime.bun.sql.open(databasePath)
   const reopenedRows = await reopened.all("select id, title from notes order by id")
-  const taggedRows = await runtime.bun.sql`select title from notes where id = ${1}`
 
   expect(activeRows).toEqual([{ id: 1, title: "first-updated", done: 0 }])
   expect(countRow).toEqual({ total: 2 })
-  expect(persistedText).toContain("first-updated")
+  expect((persistedBytes as Uint8Array).byteLength > 0).toBe(true)
   expect(reopenedRows).toEqual([{ id: 1, title: "first-updated" }])
   expect(taggedRows).toEqual([{ title: "first-updated" }])
 
+  await runtime.dispose()
+})
+
+test("Phase 3 Bun.sql supports BEGIN/COMMIT/ROLLBACK transaction semantics", async () => {
+  const runtime = await createMarsRuntime({ runtimeFeatures: { sql: true } })
+  const db = runtime.bun.sql.db
+  const databasePath = db.path
+
+  await db.exec("create table if not exists tx_notes (id integer primary key, title text)")
+
+  await db.exec("begin")
+  await db.run("insert into tx_notes (title) values (?)", ["rollback-row"])
+  await db.exec("rollback")
+
+  const rolledBackCount = await db.get<{ total: number }>("select count(*) as total from tx_notes")
+
+  await db.exec("begin transaction")
+  await db.run("insert into tx_notes (title) values (?)", ["commit-row"])
+  await db.exec("commit")
+  await db.close()
+
+  const reopened = runtime.bun.sql.open(databasePath)
+  const rows = await reopened.all<{ id: number; title: string }>("select id, title from tx_notes order by id")
+
+  expect(rolledBackCount).toEqual({ total: 0 })
+  expect(rows).toEqual([{ id: 1, title: "commit-row" }])
+
+  await reopened.close()
   await runtime.dispose()
 })
 
@@ -1835,6 +1918,8 @@ test("Phase 3 playground module cases include bun run prework", async () => {
   const cryptoCase = cases.find(playgroundCase => playgroundCase.id === "phase3-crypto-hasher")
   const passwordCase = cases.find(playgroundCase => playgroundCase.id === "phase3-password")
   const sqliteCase = cases.find(playgroundCase => playgroundCase.id === "phase3-bun-sql")
+  const sqliteTransactionCase = cases.find(playgroundCase => playgroundCase.id === "phase3-bun-sql-transaction")
+  const sqliteWasmCase = cases.find(playgroundCase => playgroundCase.id === "phase3-bun-sql-wasm")
   const snapshotCase = cases.find(playgroundCase => playgroundCase.id === "phase3-vfs-snapshot")
   const stdioCase = cases.find(playgroundCase => playgroundCase.id === "phase3-kernel-stdio")
   const opfsCase = cases.find(playgroundCase => playgroundCase.id === "phase3-opfs-persistence")
@@ -1865,6 +1950,12 @@ test("Phase 3 playground module cases include bun run prework", async () => {
   expect(sqliteCase?.status).toBe("prework")
   expect(sqliteCase?.module).toBe("sqlite")
   expect(await readPlaygroundCaseEntry(sqliteCase?.entry ?? "")).toContain("sqliteDatabasePath")
+  expect(sqliteTransactionCase?.status).toBe("prework")
+  expect(sqliteTransactionCase?.module).toBe("sqlite-transaction")
+  expect(await readPlaygroundCaseEntry(sqliteTransactionCase?.entry ?? "")).toContain("sqliteTransactionTableName")
+  expect(sqliteWasmCase?.status).toBe("prework")
+  expect(sqliteWasmCase?.module).toBe("sqlite-wasm")
+  expect(await readPlaygroundCaseEntry(sqliteWasmCase?.entry ?? "")).toContain("sqliteWasmHeaderPrefix")
   expect(snapshotCase?.status).toBe("prework")
   expect(snapshotCase?.module).toBe("vfs-snapshot")
   expect(await readPlaygroundCaseEntry(snapshotCase?.entry ?? "")).toContain("snapshotSourceText")
@@ -1907,4 +1998,119 @@ test("Phase 3 playground module cases include bun run prework", async () => {
   expect(playgroundHostRuntimeCase?.status).toBe("smoke")
   expect(playgroundHostRuntimeCase?.module).toBe("playground-host-runtime")
   expect(await readPlaygroundCaseEntry(playgroundHostRuntimeCase?.entry ?? "")).toContain("playgroundHostRequiresSharedArrayBuffer")
+})
+
+test("Phase 3 Bun.serve WebSocket upgrade creates bidirectional WebSocket connection", async () => {
+  const received: (string | Uint8Array)[] = []
+  const closeCodes: number[] = []
+
+  const { serverWs, clientWs } = createWebSocketPair<{ id: string }>(
+    { id: "test-conn" },
+  )
+
+  expect(serverWs.readyState).toBe(1)
+  expect(serverWs.data.id).toBe("test-conn")
+  expect(clientWs.readyState).toBe(1)
+
+  clientWs.onmessage = event => received.push(event.data as string)
+  clientWs.onclose = event => closeCodes.push(event.code)
+
+  // Server sends a message to client
+  serverWs.send("hello from server")
+  expect(received).toEqual(["hello from server"])
+
+  // Client sends a message to server
+  clientWs.send("hello from client")
+
+  // Server closes the connection
+  serverWs.close(1000, "done")
+  expect(serverWs.readyState).toBe(3)
+  expect(clientWs.readyState).toBe(3)
+  expect(closeCodes).toEqual([1000])
+})
+
+test("Phase 3 upgradeToWebSocket triggers websocket handler open/message/close lifecycle", async () => {
+  const openArgs: string[] = []
+  const messages: (string | Uint8Array)[] = []
+  const closeArgs: number[] = []
+
+  const clientWs = upgradeToWebSocket<{ user: string }>(
+    {
+      open: ws => openArgs.push(ws.data.user),
+      message: (_ws, msg) => messages.push(msg),
+      close: (_ws, code) => closeArgs.push(code),
+    },
+    { user: "alice" },
+  )
+
+  expect(clientWs).not.toBeNull()
+  expect(openArgs).toEqual(["alice"])
+
+  // Client sends to server
+  clientWs!.send("ping")
+  expect(messages).toEqual(["ping"])
+
+  // Client close triggers server close callback
+  clientWs!.close(1001, "going away")
+  expect(closeArgs).toEqual([1001])
+  expect(clientWs!.readyState).toBe(3)
+})
+
+test("Phase 3 ServiceWorker classifies ws://mars.localhost URL as websocket", () => {
+  expect(classifyRequest(new URL("ws://mars.localhost:3000/chat"))).toBe("websocket")
+  expect(classifyRequest(new URL("wss://mars.localhost:3000/chat"))).toBe("websocket")
+  expect(classifyRequest(new URL("ws://example.com/chat"))).toBe("external")
+  expect(classifyRequest(new URL("http://mars.localhost:3000/api"))).toBe("virtual-server")
+})
+
+test("Phase 3 ServiceWorkerRouter returns 426 for ws://mars.localhost WebSocket request", async () => {
+  const kernel = createMarsKernel()
+  await kernel.boot()
+
+  const router = createServiceWorkerRouter({
+    fallback: "network",
+    kernelClient: {
+      resolvePort: async () => null,
+      dispatchToKernel: async () => new Response("not reached"),
+    },
+    vfsClient: {
+      readFile: async () => null,
+      stat: async () => null,
+      contentType: () => "application/octet-stream",
+    },
+  })
+
+  const wsRequest = new Request("ws://mars.localhost:3000/chat", {
+    headers: { upgrade: "websocket" },
+  })
+
+  const context = await router.match(wsRequest)
+  expect(context).not.toBeNull()
+  expect(context!.kind).toBe("websocket")
+
+  const response = await router.handle(context!)
+  expect(response.status).toBe(426)
+  expect(response.headers.get("x-mars-ws-port")).toBe("3000")
+  expect(response.headers.get("x-mars-ws-pathname")).toBe("/chat")
+
+  await kernel.shutdown()
+})
+
+test("Phase 3 handleWebSocketRoute returns diagnostic 426 response", () => {
+  const response = handleWebSocketRoute({
+    url: new URL("ws://mars.localhost:8080/ws"),
+    request: new Request("ws://mars.localhost:8080/ws"),
+  })
+
+  expect(response.status).toBe(426)
+  expect(response.headers.get("upgrade")).toBe("websocket")
+  expect(response.headers.get("x-mars-ws-port")).toBe("8080")
+  expect(response.headers.get("x-mars-ws-pathname")).toBe("/ws")
+})
+
+test("Phase 3 compat matrix includes WebSocket upgrade entry for Bun.serve", () => {
+  const entry = getBunApiCompat("Bun.serve")
+  expect(entry).not.toBeNull()
+  expect(entry!.tests).toContain("Phase 3 Bun.serve WebSocket upgrade creates bidirectional WebSocket connection")
+  expect(entry!.notes).toContain("MarsServerWebSocket")
 })

@@ -1,5 +1,6 @@
 import { createFSCommands } from "./commands/fs"
 import { parseCommandLine } from "./parser"
+import { normalizePath } from "@mars/vfs"
 
 import type { Disposable } from "@mars/bridge"
 import type { MarsKernel } from "@mars/kernel"
@@ -65,9 +66,20 @@ export class MarsShell implements MarsShellInterface {
     for (const command of parsed.commands) {
       const shellCommand = this.#commands.get(command.argv[0])
       if (!shellCommand) {
-        code = 127
-        stderr += `${command.argv[0]}: command not found\n`
-        break
+        const pathResult = await this.#runPathCommand(command.argv, options)
+        if (!pathResult) {
+          code = 127
+          stderr += `${command.argv[0]}: command not found\n`
+          break
+        }
+
+        stdout += pathResult.stdout
+        stderr += pathResult.stderr
+        json = pathResult.json ?? json
+        code = pathResult.code
+        if (pathResult.code !== 0) break
+
+        continue
       }
 
       const result = await shellCommand.run(this.#createContext(command.argv, options))
@@ -120,6 +132,45 @@ export class MarsShell implements MarsShellInterface {
     return [...this.#history]
   }
 
+  async #runPathCommand(argv: string[], options: ShellRunOptions): Promise<CommandResult | null> {
+    const executablePath = this.#resolvePathCommand(argv[0], options)
+    if (!executablePath) return null
+
+    const script = String(this.#vfs.readFileSync(executablePath, "utf8"))
+      .replace(/^#!.*(?:\n|$)/, "")
+      .trim()
+    if (!script) return { code: 0, stdout: "", stderr: "" }
+
+    const forwardedArgs = argv.slice(1).map(quoteShellArg).join(" ")
+    return this.run(forwardedArgs ? `${script} ${forwardedArgs}` : script, options)
+  }
+
+  #resolvePathCommand(command: string, options: ShellRunOptions): string | null {
+    if (command.includes("/")) {
+      const commandPath = normalizePath(command, options.cwd ?? this.#cwd)
+      return this.#isExecutableFile(commandPath) ? commandPath : null
+    }
+
+    for (const pathEntry of (options.env?.PATH ?? this.#env.PATH ?? "").split(":")) {
+      if (!pathEntry) continue
+
+      const commandPath = normalizePath(command, pathEntry)
+      if (this.#isExecutableFile(commandPath)) return commandPath
+    }
+
+    return null
+  }
+
+  #isExecutableFile(path: string): boolean {
+    if (!this.#vfs.existsSync(path)) return false
+
+    try {
+      return this.#vfs.statSync(path).isFile()
+    } catch {
+      return false
+    }
+  }
+
   #createContext(argv: string[], options: ShellRunOptions): CommandContext {
     return {
       argv,
@@ -132,6 +183,12 @@ export class MarsShell implements MarsShellInterface {
       kernel: this.#kernel,
     }
   }
+}
+
+function quoteShellArg(value: string): string {
+  if (/^[A-Za-z0-9_./:@+-]+$/.test(value)) return value
+
+  return `"${value.replace(/"/g, "")}"`
 }
 
 export function createMarsShell(options: MarsShellOptions): MarsShell {

@@ -38,11 +38,9 @@ export class VFSBunFile implements MarsBunFile {
   }
 
   stream(): ReadableStream<Uint8Array> {
-    const file = this
-
     return new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const buffer = await file.arrayBuffer()
+      start: async controller => {
+        const buffer = await this.arrayBuffer()
         controller.enqueue(new Uint8Array(buffer))
         controller.close()
       },

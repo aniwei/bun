@@ -20,7 +20,7 @@ export async function runEntryScript(
   const baseDirectory = options.cwd ?? context.vfs.cwd()
   const entryPath = normalizePath(entry, baseDirectory)
 
-  const runtimeContext = installMarsRuntimeContext(context)
+  const runtimeContext = installMarsRuntimeContext({ ...context, forceGlobals: true })
   const restoreConsole = installConsoleBridge(context)
 
   try {

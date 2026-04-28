@@ -1,4 +1,4 @@
-import { dirname, normalizePath } from "@mars/vfs"
+import { normalizePath } from "@mars/vfs"
 
 import type { CommandContext, CommandResult, ShellCommand } from "../types"
 

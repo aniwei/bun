@@ -20,18 +20,18 @@
 | --- | --- | --- | --- | --- |
 | `Bun.file` | partial | M1 | 基于 MarsVFS 支持 text/json/arrayBuffer/stream；native 文件元数据完整兼容待补。 | Phase 1 Bun.file/Bun.write 验收 |
 | `Bun.write` | partial | M1 | 支持将 string、Blob、Response、Request、Uint8Array 兼容输入写入 MarsVFS。 | Phase 1 Bun.file/Bun.write 验收 |
-| `Bun.serve` | partial | M1 | 支持虚拟 HTTP server 注册、`listen(0)` 风格动态端口与 fetch 分发；WebSocket upgrade 待补。 | Phase 1 Bun.serve 验收 |
+| `Bun.serve` | partial | M1 | 支持虚拟 HTTP server 注册、`listen(0)` 风格动态端口与 fetch 分发；WebSocket upgrade 通过 in-process MarsServerWebSocket/MarsClientWebSocket MessageChannel 对实现：`server.upgrade(request)` 检测 Upgrade 头返回 true 并触发 `websocket.open/message/close` 回调，客户端使用 MarsClientWebSocket 替代原生 ws:// 连接（Service Worker 无法拦截原生 WebSocket 升级）；sw.classifyRequest 已将 ws://mars.localhost URL 识别为 websocket kind 并返回 426 诊断响应。 | Phase 1 Bun.serve 验收、Phase 3 WebSocket upgrade 验收 |
 | `node:http` | partial | M1 | 覆盖 `createServer()`、`listen()`、`listen(0)`、`address()`、`close()`、IncomingMessage 请求元数据/body 访问和 ServerResponse `writeHead()`/`write()`/`end()`；Express app/router/middleware 与 Koa async middleware playground 已接入。`node:http` 直接注册 MarsKernel 虚拟端口，不基于 `Bun.serve()` 包装；二者共享 port table 与 dispatch 路径。streaming 与 upgrade 完整兼容待补。 | Phase 1 node:http 验收 |
 | `MarsRuntime.run` | partial | M2 | 支持 TS/TSX entry 经 resolver、`@swc/wasm-web` transpiler 和 loader 执行，并将 console stdout/stderr 映射到 ProcessHandle streams；完整 worker 进程隔离待补。 | Phase 2 runtime.run 验收 |
-| `bun install` | partial | M2 | Shell 命令 `bun install` 已能从 MarsVFS `package.json` 读取 dependencies/devDependencies，并通过 MarsInstaller 写入 `node_modules` 和 `mars-lock.json`。cache miss 时可通过注入的 registry client 拉取 package metadata 与 tarball bytes，并支持基础 npm `.tgz` 解包到 package files；lifecycle scripts、workspaces、完整 semver 和 Bun lockfile 完整兼容待补。当前 Express/Koa playground 使用内置 app 形态 fixture，不依赖真实 npm `express`/`koa` 包。 | Phase 2 shell bun install / registry fetch / tgz extract 验收 |
+| `bun install` | partial | M2 | Shell 命令 `bun install` 已能从 MarsVFS `package.json` 读取 dependencies/devDependencies/optionalDependencies/peerDependencies/workspaces，并通过 MarsInstaller 写入 `node_modules`、`mars-lock.json` 和结构化 `bun.lock`（`lockfileVersion/configVersion/workspaces/packages`，含 root workspace name，`packages` 为 tuple-style entries，固定包含 specifier/source/metadata object 段位，并可带 resolved/workspace metadata；package metadata 中的依赖字段写入最终解析版本，且保持 deterministic ordering）；当 root 依赖声明匹配时，可优先从 `bun.lock`/`mars-lock.json` 回放锁定版本安装。cache miss 时可通过注入的 registry client 拉取 package metadata 与 tarball bytes，并支持 optionalDependencies 跳过语义、peerDependencies 自动安装与 range 冲突检测、optional peer 跳过、本地 workspace package 发现、`workspace:` 协议、`node_modules` workspace symlink、package/root `preinstall`/`install`/`postinstall` lifecycle scripts、`npm_lifecycle_*` / `npm_command` / `npm_package_json` / `npm_config_{global,local_prefix,prefix,user_agent}` / 扁平化 `npm_package_*` env、package `bin` 元数据、`node_modules/.bin` shim、lifecycle `PATH` 注入和 shebang JS binary 执行、基础 npm `.tgz`/PAX 解包到 package files、PAX path/linkpath、tar symlink、路径逃逸过滤、常见 semver range 最高满足版本选择、hyphen ranges、partial comparators、partial caret/tilde、comma comparator sets、spaced comparator tokens、OR-combined prerelease gating、v-prefixed exact/partial versions、prerelease opt-in 语义与 build metadata 解析；完整 Bun lockfile parity（文本格式细节）和剩余高级 npm semver 边缘语法待补。当前 Express/Koa playground 使用内置 app 形态 fixture，不依赖真实 npm `express`/`koa` 包。 | Phase 2 shell bun install / registry fetch / optionalDependencies / peerDependencies / workspace symlink / lifecycle env / package JS bins / tgz extract / PAX / tar symlink / semver range 验收 |
 | `Bun.build` | partial | M3 | 支持单/多 entry 经 `esbuild-wasm` transform 后输出到 MarsVFS，并可在 `sourcemap: true` 时写出 `.js.map` artifact；完整依赖 bundling、splitting、plugin pipeline 待补。 | Phase 3 Bun.build 验收 |
 | `bun run` | partial | M3 | `MarsShell` 已能将 `bun run <entry>` 分发到当前内存态 Kernel pid 与 `runEntryScript` 路径；Process Worker 隔离和真实 ServiceWorker 模块拦截待补。 | Phase 3 bun run 验收 |
-| `Bun.spawn` | partial | M3 | `Bun.spawn({ cmd })` 与 `runtime.spawn()` 已能执行 `bun run <entry>` 并进入当前内存态 Kernel pid；通用命令执行、Process Worker 隔离和 streaming stdin 待补。 | Phase 3 Bun.spawn 验收 |
-| `Bun.spawnSync` | partial | M3 | 当前 async 浏览器 profile 返回明确 unsupported fallback result；SAB 同步执行路径待补。 | Phase 3 spawnSync fallback 验收 |
+| `Bun.spawn` | partial | M3 | `Bun.spawn({ cmd })` 与 `runtime.spawn()` 已能执行 `bun run <entry>`，并可执行通用 shell 命令（如 `echo`）；命令输出和退出码会回灌到当前内存态 Kernel ProcessHandle。Process Worker 隔离与 streaming stdin backpressure 语义待补。 | Phase 3 Bun.spawn 验收 |
+| `Bun.spawnSync` | partial | M3 | 已提供 capability-aware fallback：无 SharedArrayBuffer/Atomics.wait 时返回明确 requirement 错误；SAB 可用但未接入同步执行器时返回明确 not-wired 错误。SAB 真同步执行路径待补。 | Phase 3 spawnSync fallback 验收 |
 | `Bun.CryptoHasher` | partial | M3 | 基于 WebCrypto 覆盖 sha1/sha256/sha512 async digest，并提供 Mars md5 fallback；Bun 同步 digest 兼容待补。 | Phase 3 CryptoHasher 验收 |
 | `Bun.password` | partial | M3 | 基于 WebCrypto PBKDF2-SHA256 覆盖 hash/verify fallback；Bun bcrypt/argon2 兼容待补。 | Phase 3 Bun.password 验收 |
 | `node:crypto` | partial | M3 | 覆盖 randomUUID、randomBytes、sha/md5 async createHash digest 与 async createHmac digest；完整 Node 同步 Hash/Hmac 语义待补。 | Phase 3 node:crypto 验收 |
-| `Bun.sql` | partial | M3 | MarsVFS-backed sqlite prework 覆盖 create/insert/select/count/update/delete 和 tagged query；原生 sqlite WASM 兼容待补。 | Phase 3 Bun.sql 验收 |
+| `Bun.sql` | partial | M3 | 基于 `sql.js`（sqlite WASM）覆盖 create/insert/select/count/update/delete、tagged query 与 BEGIN/COMMIT/ROLLBACK 事务语义，并将数据库二进制持久化到 MarsVFS。 | Phase 3 Bun.sql 验收 |
 
 ## 当前执行拓扑
 
@@ -149,17 +149,19 @@
 
 已支持:
 
-1. `Bun.sql` facade 暴露默认 MarsVFS-backed sqlite prework database
+1. `Bun.sql` facade 暴露默认 MarsVFS-backed sqlite database（`sql.js` WASM 主路径）
 2. `Bun.sql.db.exec()` / `run()` / `all()` / `get()`
-3. `Bun.sql.open(path)` 可在 MarsVFS 指定 JSON-backed database 文件
+3. `Bun.sql.open(path)` 可在 MarsVFS 指定 sqlite database 文件（binary）
 4. tagged query `Bun.sql\`select ... where id = ${value}\`` 会把插值转换为 `?` 参数
 5. 当前 SQL 子集覆盖 `create table if not exists`、`insert into`、`select`、`count(*) as`、单条件 `where`、`order by`、`update`、`delete`
 6. database state 会持久化到 MarsVFS，可通过 reopen 读取
+7. 支持 `begin` / `begin transaction`、`commit`、`rollback` 事务语义（事务内延迟落盘，commit 才持久化）
+8. playground sqlite wasm 用例会校验数据库文件 header 为 `SQLite format 3`，并验证 reopen 后可读取记录
 
 暂未支持:
 
-1. 原生 sqlite WASM 引擎
-2. SQL parser 完整语法、事务、索引、约束、join、聚合函数
+1. sqlite query planner/index/constraint/join/aggregation 的完整 Bun 兼容覆盖
+2. SQL parser 完整语法、索引、约束、join、聚合函数
 3. Bun sqlite 参数类型与同步 API 完整兼容
 4. OPFS-backed sqlite 文件锁和多 worker 并发写入
 

@@ -1,14 +1,16 @@
-import type { RuntimeContext, ServeOptions, Server } from "./types"
+import { upgradeToWebSocket } from "./websocket-pair"
 
-export class MarsBunServer implements Server {
+import type { RuntimeContext, ServeOptions, Server, WebSocketHandlerOptions } from "./types"
+
+export class MarsBunServer<T = undefined> implements Server {
   readonly port: number
   readonly hostname: string
   readonly url: URL
   readonly #context: RuntimeContext
-  #options: ServeOptions
+  #options: ServeOptions<T>
   #stopped = false
 
-  constructor(context: RuntimeContext, options: ServeOptions) {
+  constructor(context: RuntimeContext, options: ServeOptions<T>) {
     this.#context = context
     this.#options = options
     this.port = this.#context.kernel.allocatePort(options.port ?? 3000)
@@ -38,17 +40,24 @@ export class MarsBunServer implements Server {
     this.#stopped = true
   }
 
-  reload(options: Partial<ServeOptions>): void {
+  reload(options: Partial<ServeOptions<T>>): void {
     this.#options = { ...this.#options, ...options }
   }
 
-  upgrade(request: Request, options?: unknown): boolean {
-    void request
-    void options
-    return false
+  upgrade(request: Request, options?: { data?: T }): boolean {
+    const wsHandler = this.#options.websocket as WebSocketHandlerOptions<T> | undefined
+    if (!wsHandler) return false
+
+    const upgradeHeader = request.headers.get("upgrade")
+    const isWsUpgrade = upgradeHeader?.toLowerCase() === "websocket"
+    if (!isWsUpgrade) return false
+
+    const data = options?.data ?? (undefined as unknown as T)
+    upgradeToWebSocket<T>(wsHandler, data)
+    return true
   }
 }
 
-export function bunServe(context: RuntimeContext, options: ServeOptions): Server {
-  return new MarsBunServer(context, options)
+export function bunServe<T = undefined>(context: RuntimeContext, options: ServeOptions<T>): Server {
+  return new MarsBunServer<T>(context, options)
 }

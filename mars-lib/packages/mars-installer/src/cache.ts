@@ -10,6 +10,11 @@ export interface PackageCacheFixturePackage {
   name: string
   version?: string
   dependencies?: Record<string, string>
+  optionalDependencies?: Record<string, string>
+  peerDependencies?: Record<string, string>
+  peerDependenciesMeta?: PackageMetadata["versions"][string]["peerDependenciesMeta"]
+  scripts?: PackageMetadata["versions"][string]["scripts"]
+  bin?: string | PackageMetadata["versions"][string]["bin"]
   files?: FileTree
   tarballKey?: string
   distTags?: Record<string, string>
@@ -85,9 +90,21 @@ function packageMetadataFromFixture(fixture: string | PackageCacheFixturePackage
       [version]: {
         version,
         dependencies: typeof fixture === "string" ? {} : fixture.dependencies ?? {},
+        optionalDependencies: typeof fixture === "string" ? {} : fixture.optionalDependencies ?? {},
+        peerDependencies: typeof fixture === "string" ? {} : fixture.peerDependencies ?? {},
+        peerDependenciesMeta: typeof fixture === "string" ? {} : fixture.peerDependenciesMeta ?? {},
+        scripts: typeof fixture === "string" ? {} : fixture.scripts ?? {},
+        bin: typeof fixture === "string" ? {} : normalizePackageBin(packageName, fixture.bin),
         files,
         tarballKey,
       },
     },
   }
+}
+
+function normalizePackageBin(packageName: string, bin: string | PackageMetadata["versions"][string]["bin"] | undefined): NonNullable<PackageMetadata["versions"][string]["bin"]> {
+  if (!bin) return {}
+  if (typeof bin === "string") return { [packageName.split("/").at(-1) ?? packageName]: bin }
+
+  return bin
 }

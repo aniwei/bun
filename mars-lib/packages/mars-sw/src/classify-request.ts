@@ -1,6 +1,13 @@
-export type RequestKind = "virtual-server" | "vfs-asset" | "module" | "external"
+export type RequestKind = "virtual-server" | "vfs-asset" | "module" | "websocket" | "external"
 
 export function classifyRequest(url: URL): RequestKind {
+  if (url.protocol === "ws:" || url.protocol === "wss:") {
+    if (url.hostname.endsWith(".mars.localhost") || url.hostname === "mars.localhost") {
+      return "websocket"
+    }
+    return "external"
+  }
+
   if (url.hostname.endsWith(".mars.localhost") || url.hostname === "mars.localhost") {
     return "virtual-server"
   }

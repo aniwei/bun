@@ -2,6 +2,20 @@ import { dirname } from "@mars/vfs"
 
 import type { MarsVFS } from "@mars/vfs"
 
+type SqlJsModule = {
+  Database: new (data?: Uint8Array) => SqlJsDatabase
+}
+
+type SqlJsInit = () => Promise<SqlJsModule>
+
+type SqlJsDatabase = {
+  run(sql: string, params?: unknown[]): void
+  exec(sql: string, params?: unknown[]): Array<{ columns: string[]; values: unknown[][] }>
+  export(): Uint8Array
+  close(): void
+  getRowsModified(): number
+}
+
 export type MarsSQLValue = string | number | boolean | null
 export type MarsSQLRow = Record<string, MarsSQLValue>
 
@@ -30,18 +44,8 @@ export interface MarsSQLFacade {
   open(path: string): MarsSQLDatabase
 }
 
-interface StoredDatabase {
-  tables: Record<string, StoredTable>
-}
-
-interface StoredTable {
-  columns: string[]
-  rows: MarsSQLRow[]
-  nextRowId: number
-}
-
 export function createMarsSQLiteDatabase(options: MarsSQLiteOptions): MarsSQLDatabase {
-  return new DefaultMarsSQLiteDatabase(options.vfs, options.path ?? "/workspace/mars.sqlite.json")
+  return new LazyWasmMarsSQLiteDatabase(options.vfs, options.path ?? "/workspace/mars.sqlite")
 }
 
 export function createMarsSQL(options: MarsSQLiteOptions): MarsSQLFacade {
@@ -62,10 +66,12 @@ export function createMarsSQL(options: MarsSQLiteOptions): MarsSQLFacade {
   return sql
 }
 
-class DefaultMarsSQLiteDatabase implements MarsSQLDatabase {
+class LazyWasmMarsSQLiteDatabase implements MarsSQLDatabase {
   readonly path: string
   readonly #vfs: MarsVFS
-  #state: StoredDatabase | null = null
+  #backendPromise: Promise<WasmMarsSQLiteDatabase> | null = null
+  #backend: WasmMarsSQLiteDatabase | null = null
+  #closed = false
 
   constructor(vfs: MarsVFS, path: string) {
     this.#vfs = vfs
@@ -73,14 +79,74 @@ class DefaultMarsSQLiteDatabase implements MarsSQLDatabase {
   }
 
   async exec(sql: string, params: readonly MarsSQLValue[] = []): Promise<MarsSQLRunResult> {
+    return (await this.#resolveBackend()).exec(sql, params)
+  }
+
+  run(sql: string, params: readonly MarsSQLValue[] = []): Promise<MarsSQLRunResult> {
+    return this.exec(sql, params)
+  }
+
+  async all<T extends MarsSQLRow = MarsSQLRow>(sql: string, params: readonly MarsSQLValue[] = []): Promise<T[]> {
+    return (await this.#resolveBackend()).all<T>(sql, params)
+  }
+
+  async get<T extends MarsSQLRow = MarsSQLRow>(sql: string, params: readonly MarsSQLValue[] = []): Promise<T | null> {
+    return (await this.#resolveBackend()).get<T>(sql, params)
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return
+
+    this.#closed = true
+    if (this.#backend) await this.#backend.close()
+  }
+
+  async #resolveBackend(): Promise<WasmMarsSQLiteDatabase> {
+    if (this.#closed) throw new Error("Mars sqlite database is closed")
+    if (this.#backend) return this.#backend
+
+    this.#backendPromise ??= WasmMarsSQLiteDatabase.create(this.#vfs, this.path)
+    this.#backend = await this.#backendPromise
+    return this.#backend
+  }
+}
+
+class WasmMarsSQLiteDatabase implements MarsSQLDatabase {
+  readonly path: string
+  readonly #vfs: MarsVFS
+  readonly #db: SqlJsDatabase
+  #transactionOpen = false
+  #closed = false
+
+  private constructor(vfs: MarsVFS, path: string, db: SqlJsDatabase) {
+    this.#vfs = vfs
+    this.path = path
+    this.#db = db
+  }
+
+  static async create(vfs: MarsVFS, path: string): Promise<WasmMarsSQLiteDatabase> {
+    const sqlJs = await loadSqlJsModule()
+    const bytes = await readDatabaseBytes(vfs, path)
+    const db = bytes ? new sqlJs.Database(bytes) : new sqlJs.Database()
+
+    return new WasmMarsSQLiteDatabase(vfs, path, db)
+  }
+
+  async exec(sql: string, params: readonly MarsSQLValue[] = []): Promise<MarsSQLRunResult> {
+    if (this.#closed) throw new Error("Mars sqlite database is closed")
+
     const statements = splitStatements(sql)
-    let changes = 0
     let rows: MarsSQLRow[] = []
+    let changes = 0
 
     for (const statement of statements) {
-      const result = await this.#executeStatement(statement, params)
-      changes += result.changes
+      const normalizedSQL = statement.trim()
+      if (!normalizedSQL) continue
+
+      const result = await this.#executeStatement(normalizedSQL, params)
       rows = result.rows
+      changes += result.changes
+      if (result.shouldPersist) await this.#persist()
     }
 
     return { rows, changes }
@@ -99,122 +165,105 @@ class DefaultMarsSQLiteDatabase implements MarsSQLDatabase {
   }
 
   async close(): Promise<void> {
-    if (this.#state) await this.#persist()
-  }
+    if (this.#closed) return
 
-  async #executeStatement(sql: string, params: readonly MarsSQLValue[]): Promise<MarsSQLRunResult> {
-    const normalizedSQL = sql.trim()
-    if (!normalizedSQL) return { rows: [], changes: 0 }
-    if (/^create\s+table\s+/i.test(normalizedSQL)) return this.#createTable(normalizedSQL)
-    if (/^insert\s+into\s+/i.test(normalizedSQL)) return this.#insert(normalizedSQL, params)
-    if (/^select\s+/i.test(normalizedSQL)) return this.#select(normalizedSQL, params)
-    if (/^update\s+/i.test(normalizedSQL)) return this.#update(normalizedSQL, params)
-    if (/^delete\s+from\s+/i.test(normalizedSQL)) return this.#delete(normalizedSQL, params)
-
-    throw new Error(`Unsupported Mars sqlite statement: ${normalizedSQL}`)
-  }
-
-  async #createTable(sql: string): Promise<MarsSQLRunResult> {
-    const match = sql.match(/^create\s+table\s+(?:if\s+not\s+exists\s+)?([a-zA-Z_][\w]*)\s*\((.+)\)$/i)
-    if (!match) throw new Error(`Unsupported CREATE TABLE statement: ${sql}`)
-
-    const state = await this.#load()
-    const tableName = match[1]
-    const columns = splitCommaList(match[2]).map(column => column.trim().split(/\s+/)[0]).filter(Boolean)
-    if (!state.tables[tableName]) state.tables[tableName] = { columns, rows: [], nextRowId: 1 }
-    await this.#persist()
-
-    return { rows: [], changes: 0 }
-  }
-
-  async #insert(sql: string, params: readonly MarsSQLValue[]): Promise<MarsSQLRunResult> {
-    const match = sql.match(/^insert\s+into\s+([a-zA-Z_][\w]*)\s*\(([^)]+)\)\s*values\s*\(([^)]+)\)$/i)
-    if (!match) throw new Error(`Unsupported INSERT statement: ${sql}`)
-
-    const table = await this.#requireTable(match[1])
-    const columns = splitCommaList(match[2]).map(column => column.trim())
-    const values = splitCommaList(match[3]).map((value, index) => readSQLValue(value, params, index))
-    const row: MarsSQLRow = {}
-
-    for (let index = 0; index < columns.length; index += 1) row[columns[index]] = values[index] ?? null
-    if (table.columns.includes("id") && row.id === undefined) {
-      row.id = table.nextRowId
-      table.nextRowId += 1
+    if (this.#transactionOpen) {
+      this.#db.run("rollback")
+      this.#transactionOpen = false
+    } else {
+      await this.#persist()
     }
 
-    table.rows.push(row)
-    await this.#persist()
-
-    return { rows: [], changes: 1 }
+    this.#db.close()
+    this.#closed = true
   }
 
-  async #select(sql: string, params: readonly MarsSQLValue[]): Promise<MarsSQLRunResult> {
-    const match = sql.match(/^select\s+(.+)\s+from\s+([a-zA-Z_][\w]*)(?:\s+where\s+(.+?))?(?:\s+order\s+by\s+([a-zA-Z_][\w]*)(?:\s+(asc|desc))?)?$/i)
-    if (!match) throw new Error(`Unsupported SELECT statement: ${sql}`)
-
-    const table = await this.#requireTable(match[2])
-    const rows = filterRows(table.rows, match[3], params)
-    return { rows: selectFields(sortRows(rows, match[4], match[5]), match[1].trim()), changes: 0 }
-  }
-
-  async #update(sql: string, params: readonly MarsSQLValue[]): Promise<MarsSQLRunResult> {
-    const match = sql.match(/^update\s+([a-zA-Z_][\w]*)\s+set\s+(.+?)(?:\s+where\s+(.+))?$/i)
-    if (!match) throw new Error(`Unsupported UPDATE statement: ${sql}`)
-
-    const table = await this.#requireTable(match[1])
-    const assignments = splitCommaList(match[2]).map(item => item.match(/^([a-zA-Z_][\w]*)\s*=\s*(.+)$/))
-    if (assignments.some(assignment => !assignment)) throw new Error(`Unsupported UPDATE assignment: ${sql}`)
-
-    let changes = 0
-    for (const row of filterRows(table.rows, match[3], params, assignments.length)) {
-      assignments.forEach((assignment, index) => {
-        if (assignment) row[assignment[1]] = readSQLValue(assignment[2], params, index)
-      })
-      changes += 1
+  async #executeStatement(
+    statement: string,
+    params: readonly MarsSQLValue[],
+  ): Promise<{ rows: MarsSQLRow[]; changes: number; shouldPersist: boolean }> {
+    if (/^begin(?:\s+transaction)?$/i.test(statement)) {
+      if (this.#transactionOpen) throw new Error("Mars sqlite transaction already started")
+      this.#db.run("begin transaction")
+      this.#transactionOpen = true
+      return { rows: [], changes: 0, shouldPersist: false }
     }
 
-    if (changes) await this.#persist()
-    return { rows: [], changes }
-  }
-
-  async #delete(sql: string, params: readonly MarsSQLValue[]): Promise<MarsSQLRunResult> {
-    const match = sql.match(/^delete\s+from\s+([a-zA-Z_][\w]*)(?:\s+where\s+(.+))?$/i)
-    if (!match) throw new Error(`Unsupported DELETE statement: ${sql}`)
-
-    const table = await this.#requireTable(match[1])
-    const before = table.rows.length
-    const rowsToDelete = new Set(filterRows(table.rows, match[2], params))
-    table.rows = table.rows.filter(row => !rowsToDelete.has(row))
-    const changes = before - table.rows.length
-
-    if (changes) await this.#persist()
-    return { rows: [], changes }
-  }
-
-  async #requireTable(name: string): Promise<StoredTable> {
-    const table = (await this.#load()).tables[name]
-    if (!table) throw new Error(`Mars sqlite table does not exist: ${name}`)
-
-    return table
-  }
-
-  async #load(): Promise<StoredDatabase> {
-    if (this.#state) return this.#state
-    if (!this.#vfs.existsSync(this.path)) {
-      this.#state = { tables: {} }
-      return this.#state
+    if (/^commit(?:\s+transaction)?$/i.test(statement)) {
+      if (!this.#transactionOpen) throw new Error("Mars sqlite transaction is not active")
+      this.#db.run("commit")
+      this.#transactionOpen = false
+      return { rows: [], changes: 0, shouldPersist: true }
     }
 
-    this.#state = JSON.parse(String(await this.#vfs.readFile(this.path, "utf8"))) as StoredDatabase
-    return this.#state
+    if (/^(?:rollback|end)(?:\s+transaction)?$/i.test(statement)) {
+      if (!this.#transactionOpen) throw new Error("Mars sqlite transaction is not active")
+      this.#db.run("rollback")
+      this.#transactionOpen = false
+      return { rows: [], changes: 0, shouldPersist: false }
+    }
+
+    if (/^select\s+/i.test(statement)) {
+      const results = this.#db.exec(statement, params as unknown[])
+      return { rows: sqlJsResultsToRows(results), changes: 0, shouldPersist: false }
+    }
+
+    this.#db.run(statement, params as unknown[])
+    return {
+      rows: [],
+      changes: this.#db.getRowsModified(),
+      shouldPersist: !this.#transactionOpen,
+    }
   }
 
   async #persist(): Promise<void> {
-    const state = await this.#load()
     const parentDirectory = dirname(this.path)
     if (!this.#vfs.existsSync(parentDirectory)) await this.#vfs.mkdir(parentDirectory, { recursive: true })
-    await this.#vfs.writeFile(this.path, JSON.stringify(state, null, 2))
+    await this.#vfs.writeFile(this.path, this.#db.export())
   }
+}
+
+let sqlJsModulePromise: Promise<SqlJsModule> | null = null
+
+export async function preloadSQLiteWasm(): Promise<void> {
+  await loadSqlJsModule()
+}
+
+function loadSqlJsModule(): Promise<SqlJsModule> {
+  sqlJsModulePromise ??= (async () => {
+    const module = await import("sql.js") as { default?: SqlJsInit }
+    const init = module.default
+    if (!init) throw new Error("sql.js init function is unavailable")
+
+    return init()
+  })()
+
+  return sqlJsModulePromise
+}
+
+async function readDatabaseBytes(vfs: MarsVFS, path: string): Promise<Uint8Array | null> {
+  if (!vfs.existsSync(path)) return null
+
+  const value = await vfs.readFile(path)
+  return typeof value === "string" ? new TextEncoder().encode(value) : value
+}
+
+function sqlJsResultsToRows(results: Array<{ columns: string[]; values: unknown[][] }>): MarsSQLRow[] {
+  const result = results.at(-1)
+  if (!result) return []
+
+  return result.values.map(record => {
+    const entries = result.columns.map((column, index) => [column, normalizeSqlValue(record[index])])
+    return Object.fromEntries(entries) as MarsSQLRow
+  })
+}
+
+function normalizeSqlValue(value: unknown): MarsSQLValue {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value
+  }
+
+  return value === undefined ? null : String(value)
 }
 
 function templateToSQL(strings: TemplateStringsArray): string {
@@ -223,46 +272,4 @@ function templateToSQL(strings: TemplateStringsArray): string {
 
 function splitStatements(sql: string): string[] {
   return sql.split(";").map(statement => statement.trim()).filter(Boolean)
-}
-
-function splitCommaList(input: string): string[] {
-  return input.split(",").map(item => item.trim()).filter(Boolean)
-}
-
-function readSQLValue(input: string, params: readonly MarsSQLValue[], index: number): MarsSQLValue {
-  const value = input.trim()
-  if (value === "?") return params[index] ?? null
-  if (/^null$/i.test(value)) return null
-  if (/^true$/i.test(value)) return true
-  if (/^false$/i.test(value)) return false
-  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value)
-  if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) return value.slice(1, -1)
-
-  return value
-}
-
-function filterRows(rows: MarsSQLRow[], whereClause: string | undefined, params: readonly MarsSQLValue[], paramOffset = 0): MarsSQLRow[] {
-  if (!whereClause) return [...rows]
-
-  const match = whereClause.trim().match(/^([a-zA-Z_][\w]*)\s*=\s*(.+)$/)
-  if (!match) throw new Error(`Unsupported WHERE clause: ${whereClause}`)
-
-  const value = readSQLValue(match[2], params, paramOffset)
-  return rows.filter(row => row[match[1]] === value)
-}
-
-function sortRows(rows: MarsSQLRow[], column: string | undefined, direction: string | undefined): MarsSQLRow[] {
-  if (!column) return rows
-
-  const multiplier = direction?.toLowerCase() === "desc" ? -1 : 1
-  return [...rows].sort((left, right) => String(left[column] ?? "").localeCompare(String(right[column] ?? "")) * multiplier)
-}
-
-function selectFields(rows: MarsSQLRow[], fields: string): MarsSQLRow[] {
-  const countMatch = fields.match(/^count\(\*\)(?:\s+as\s+([a-zA-Z_][\w]*))?$/i)
-  if (countMatch) return [{ [countMatch[1] ?? "count(*)"]: rows.length }]
-  if (fields === "*") return rows.map(row => ({ ...row }))
-
-  const columns = splitCommaList(fields).map(field => field.replace(/\s+as\s+.+$/i, "").trim())
-  return rows.map(row => Object.fromEntries(columns.map(column => [column, row[column] ?? null])))
 }

@@ -4,7 +4,9 @@
 - 总完成百分比: 0%
 - 测试状态: Not Run
 - 依赖 Phase: Phase 1、Phase 2、Phase 3 必须通过
-- 对应技术设计文档: `mars-lib/rfc/0001-mars-lib-technical-design.md`
+- 对应技术设计文档: 
+  - `mars-lib/rfc/0001-mars-lib-technical-design.md` - 系统设计和 API 规范
+  - `mars-lib/rfc/0002-hook-system-design.md` - Hook 系统时序、设计决策和新功能清单
 - Playground 接入矩阵: `mars-lib/playground/README.md`
 - 相关章节: 6 用户侧 API, 7 MarsBridge 通信协议, 14 Mars Hooks 插件系统, 15 MarsShell 与 AI Agent 接口, 20.5 AI Agent Shell, 21 验收测试接口, 22 M4
 

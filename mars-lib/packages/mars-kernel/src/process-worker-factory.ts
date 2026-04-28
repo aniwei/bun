@@ -218,7 +218,7 @@ class AutoSyncProcessWorkerController implements MarsProcessWorkerController {
 
   async #flushVFS(): Promise<void> {
     while (this.#tasks.size) {
-      await Promise.all([...this.#tasks])
+      await Promise.all(this.#tasks)
     }
   }
 }

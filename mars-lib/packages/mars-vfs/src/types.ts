@@ -1,7 +1,18 @@
 export type BufferEncoding = "utf8" | "utf-8"
 
+export type FileTreeEntry = string | Uint8Array | FileTree | FileTreeSymlink
+
 export interface FileTree {
-  [path: string]: string | Uint8Array | FileTree
+  [path: string]: FileTreeEntry
+}
+
+export interface FileTreeSymlink {
+  kind: "symlink"
+  target: string
+}
+
+export function isFileTreeSymlink(value: FileTreeEntry): value is FileTreeSymlink {
+  return typeof value === "object" && !(value instanceof Uint8Array) && value !== null && "kind" in value && value.kind === "symlink"
 }
 
 export interface Disposable {
@@ -41,7 +52,7 @@ export interface MarsDirent {
 export interface VFSEntry {
   path: string
   name: string
-  kind: "file" | "directory"
+  kind: "file" | "directory" | "symlink"
   size: number
 }
 
@@ -66,17 +77,23 @@ export interface MarsVFSInterface {
   readFileSync(path: string, encoding?: BufferEncoding): Uint8Array | string
   writeFileSync(path: string, data: string | Uint8Array, options?: WriteFileOptions): void
   statSync(path: string): MarsStats
+  lstatSync(path: string): MarsStats
   readdirSync(path: string, options?: ReaddirOptions): string[] | MarsDirent[]
   mkdirSync(path: string, options?: MkdirOptions): void
   unlinkSync(path: string): void
   renameSync(from: string, to: string): void
+  symlinkSync(target: string, path: string): void
+  readlinkSync(path: string): string
   readFile(path: string, encoding?: BufferEncoding): Promise<Uint8Array | string>
   writeFile(path: string, data: string | Uint8Array, options?: WriteFileOptions): Promise<void>
   stat(path: string): Promise<MarsStats>
+  lstat(path: string): Promise<MarsStats>
   readdir(path: string, options?: ReaddirOptions): Promise<string[] | MarsDirent[]>
   mkdir(path: string, options?: MkdirOptions): Promise<void>
   unlink(path: string): Promise<void>
   rename(from: string, to: string): Promise<void>
+  symlink(target: string, path: string): Promise<void>
+  readlink(path: string): Promise<string>
   watch(path: string, listener: VFSWatchListener): Disposable
   mount(path: string, layer: VFSLayer): void
   snapshot(path?: string): Promise<FileTree>

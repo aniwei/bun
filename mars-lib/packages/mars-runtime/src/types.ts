@@ -4,6 +4,12 @@ import type { BuildOptions, BuildResult } from "@mars/bundler"
 import type { MarsCryptoHasher, MarsPasswordFacade } from "@mars/crypto"
 import type { MarsSQLFacade } from "@mars/sqlite"
 
+export interface RuntimeFeatures {
+  esbuild: boolean
+  swc: boolean
+  sql: boolean
+}
+
 export interface RuntimeContext {
   vfs: MarsVFS
   kernel: MarsKernel
@@ -12,7 +18,10 @@ export interface RuntimeContext {
   argv?: string[]
   env?: Record<string, string>
   scope?: typeof globalThis
+  forceGlobals?: boolean
+  runtimeFeatures?: RuntimeFeatures
   spawn?(options: MarsBunSpawnOptions): Promise<ProcessHandle>
+  spawnSync?(options: MarsBunSpawnOptions): MarsBunSpawnSyncResult
 }
 
 export interface MarsBunSpawnOptions {
@@ -42,11 +51,20 @@ export interface MarsBunFile {
   stream(): ReadableStream<Uint8Array>
 }
 
-export interface ServeOptions {
+export interface WebSocketHandlerOptions<T = undefined> {
+  open?(ws: import("./websocket-pair").MarsServerWebSocket<T>): void
+  message?(ws: import("./websocket-pair").MarsServerWebSocket<T>, message: string | Uint8Array): void
+  close?(ws: import("./websocket-pair").MarsServerWebSocket<T>, code: number, reason: string): void
+  drain?(ws: import("./websocket-pair").MarsServerWebSocket<T>): void
+  error?(ws: import("./websocket-pair").MarsServerWebSocket<T>, error: Error): void
+}
+
+export interface ServeOptions<T = undefined> {
   port?: number
   hostname?: string
   fetch(request: Request, server: Server): Response | Promise<Response>
   error?(error: unknown): Response | Promise<Response>
+  websocket?: WebSocketHandlerOptions<T>
 }
 
 export interface Server {
@@ -55,8 +73,9 @@ export interface Server {
   readonly url: URL
   fetch(request: Request): Promise<Response>
   stop(closeActiveConnections?: boolean): void
-  reload(options: Partial<ServeOptions>): void
-  upgrade(request: Request, options?: unknown): boolean
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  reload(options: Partial<ServeOptions<any>>): void
+  upgrade(request: Request, options?: { data?: unknown }): boolean
 }
 
 export interface MarsBun {

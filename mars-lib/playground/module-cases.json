@@ -107,7 +107,7 @@
     "entry": "core-modules/installer/dependencies.ts",
     "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
     "status": "covered",
-    "description": "Installer playground 用例声明离线安装入口依赖，写入 package.json 后通过 `bun install` shell 命令配合 npm-cache fixture 真实安装递归依赖。"
+    "description": "Installer playground 用例声明 semver range 入口依赖，写入 package.json 后通过 `bun install` shell 命令配合 npm-cache fixture 真实安装递归依赖；独立验收覆盖 hyphen ranges、partial comparators、prerelease opt-in、build metadata、optionalDependencies 跳过语义、peerDependencies 自动安装/冲突检测、workspace symlink、lifecycle env 与 package JS bins。"
   },
   {
     "id": "phase2-installer-registry-fetch",
@@ -117,7 +117,7 @@
     "entry": "core-modules/installer/dependencies.ts",
     "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
     "status": "covered",
-    "description": "Installer playground 用例通过注入 registry fetch provider，在 cache miss 时拉取 package metadata 与 tgz tarball，并由 `bun install` 解包写入 node_modules。"
+    "description": "Installer playground 用例通过注入 registry fetch provider，在 cache miss 时拉取 package metadata 与 tgz tarball，并由 `bun install` 解包写入 node_modules；独立验收覆盖 PAX path/linkpath、tar symlink 与路径逃逸过滤。"
   },
   {
     "id": "phase2-bundler-core",
@@ -217,7 +217,27 @@
     "entry": "core-modules/runtime/sqlite.ts",
     "acceptance": "packages/mars-test/src/phase3.acceptance.test.ts",
     "status": "prework",
-    "description": "Bun.sql playground 用例覆盖 MarsVFS-backed sqlite prework 的 create/insert/select/update/delete 和 tagged query；原生 sqlite WASM 待补。"
+    "description": "Bun.sql playground 用例覆盖 sql.js sqlite WASM 主路径在 MarsVFS 上的 create/insert/select/update/delete、tagged query 与数据库持久化（WASM 初始化失败时保留 prework fallback）。"
+  },
+  {
+    "id": "phase3-bun-sql-transaction",
+    "phase": "Phase 3",
+    "module": "sqlite-transaction",
+    "playground": "core-modules/runtime",
+    "entry": "core-modules/runtime/sqlite-transaction.ts",
+    "acceptance": "packages/mars-test/src/phase3.acceptance.test.ts",
+    "status": "prework",
+    "description": "Bun.sql transaction playground 用例覆盖 begin/commit/rollback 语义：rollback 不落盘、commit 后 reopen 可见持久化记录。"
+  },
+  {
+    "id": "phase3-bun-sql-wasm",
+    "phase": "Phase 3",
+    "module": "sqlite-wasm",
+    "playground": "core-modules/runtime",
+    "entry": "core-modules/runtime/sqlite-wasm.ts",
+    "acceptance": "packages/mars-test/src/phase3.acceptance.test.ts",
+    "status": "prework",
+    "description": "Bun.sql playground wasm 用例验证 sqlite 数据库以二进制格式持久化（SQLite file header）并可 reopen 读取记录。"
   },
   {
     "id": "phase3-vfs-snapshot",

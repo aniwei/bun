@@ -3,10 +3,10 @@
 - 状态: Audited
 - 日期: 2026-04-27
 - 对应技术设计文档: `mars-lib/rfc/0001-mars-lib-technical-design.md`
-- 审计范围: M2-01 到 M2-27 当前实现，以及 `phase2.acceptance.test.ts` 覆盖情况
-- 验证命令: `bun run check`
+- 审计范围: M2-01 到 M2-27 当前实现，以及 `phase2.acceptance.test.ts` / `phase2.installer.acceptance.test.ts` 覆盖情况
+- 验证命令: `bun run check`（typecheck + `oxlint --max-warnings 0` + tests）
 - 验证结果: Pass
-- 追加复核: package exports pattern、exports/imports array fallback、exports subpath 封装、exports/imports null target、imports 外部 package target、package self-reference、`.mjs`/`.cjs` 扩展名补全、条件 exports object、tsconfig paths、package browser map、cyclic ESM/CJS namespace cache、递归 importer invalidation、installer fixture cache、dev server、module response、HMR、static/dynamic import 执行、基础 JSX 转换、runtime stdout/stderr、vite config root、alias、define、HMR root、first screen render model 与统一 playground fixture 加载已补验收
+- 追加复核: package exports pattern、exports/imports array fallback、exports subpath 封装、exports/imports null target、imports 外部 package target、package self-reference、`.mjs`/`.cjs` 扩展名补全、条件 exports object、tsconfig paths、package browser map、cyclic ESM/CJS namespace cache、递归 importer invalidation、installer semver hyphen/partial/prerelease/build metadata、installer optionalDependencies、installer peerDependencies、installer workspace symlink、installer lifecycle env/scripts、installer package JS bins、installer tgz/PAX path/linkpath、installer tar symlink、installer fixture cache、dev server、module response、HMR、static/dynamic import 执行、基础 JSX 转换、runtime stdout/stderr、vite config root、alias、define、HMR root、first screen render model 与统一 playground fixture 加载已补验收
 
 ## 1. 技术设计核对结论
 
@@ -164,20 +164,29 @@ SWC 取舍:
 22. TSX/Vite playground first screen render model 验收。
 23. `playground/core-modules` 覆盖 resolver、transpiler、loader、runtime、installer、bundler-dev-server 核心模块用例，并由 acceptance test 真实执行。
 24. resolver 阻止 package exports 未导出 subpath 回退，并覆盖 root conditional exports object、exports/imports array fallback、`.mjs`/`.cjs` 扩展名补全、exports/imports direct null target、条件 null target、imports 外部 package target 与 package self-reference。
+25. installer 覆盖 dist-tag、exact、`^`、`~`、wildcard、hyphen ranges、partial comparators、partial `^`/`~`、comma comparator sets、spaced comparator tokens、OR-combined prerelease gating、v-prefixed exact/partial versions、比较运算符组合、prerelease opt-in 语义和 build metadata，并在 range 不满足时拒绝安装而不是 fallback 到 latest。
+26. installer tgz 解包覆盖 PAX extended path，且忽略 `../` 与绝对路径等 tar 路径逃逸条目。
+27. installer 覆盖 root 与 transitive optionalDependencies: 可解析时安装，缺失或 range 不满足时跳过且不阻断安装；`bun install` shell 入口会读取 package.json optionalDependencies。
+28. installer 覆盖 peerDependencies: required peer 自动安装，已存在 peer 必须满足 range，optional peer 缺失时跳过；`bun install` shell 入口会读取 package.json peerDependencies。
+29. installer 覆盖 workspaces: root `package.json#workspaces` 可发现本地 package，`workspace:` 协议依赖由本地 workspace 满足并写入 `node_modules`；`bun.lock` tuple metadata 会记录 workspace path，并以 golden 文本断言固定输出。
+30. installer 覆盖 lockfile replay: root 直接依赖与 workspace 包内的 registry 依赖都会沿用 `bun.lock` 已锁版本，metadata 变更后不会静默漂移到新的 latest。
+31. installer 覆盖 lifecycle scripts: package/root `preinstall`、`install`、`postinstall` 会在 `bun install` 写入 `node_modules` 后通过 MarsShell 执行，脚本失败会使安装失败。
+32. installer 覆盖 lifecycle env: lifecycle scripts 可获得 `npm_lifecycle_*`、`npm_command`、`npm_package_json` 和从所属 package.json 扁平化的 `npm_package_*`。
+33. installer 覆盖 package JS bins: package `bin` 元数据会生成 `node_modules/.bin` shim，lifecycle scripts 可通过 `PATH` 调用 shebang JS binary，并获得 Mars 注入的 `process.env` / `process.argv`。
 
 验证结果:
 
 ```text
-83 pass
+98 pass
 0 fail
-501 expect() calls
+594 expect() calls
 ```
 
 ## 2.1 新增工程化模块复核
 
 | 模块 | 状态 | 说明 |
 | --- | --- | --- |
-| MarsInstaller | Done | 已支持离线 metadata/tarball cache、registry fetch provider、fixture manifest 加载、依赖计划、基础 semver 选择、基础 npm tgz 解包、写入 `node_modules` 和 `mars-lock.json`；lifecycle scripts、workspaces、完整 semver 和 Bun lockfile 作为后续硬化项。 |
+| MarsInstaller | Done | 已支持离线 metadata/tarball cache、registry fetch provider、fixture manifest 加载、本地 workspace package 发现、workspace symlink、依赖计划、optionalDependencies 跳过语义、peerDependencies 自动安装与 range 冲突检测、package/root lifecycle env/scripts、`npm_config_{global,local_prefix,prefix,user_agent}` 边缘 env、package bin `.bin` shim 与 shebang JS binary 执行、常见 semver range 选择、hyphen ranges、partial comparators、partial `^`/`~`、comma comparator sets、spaced comparator tokens、OR-combined prerelease gating、v-prefixed exact/partial versions、prerelease opt-in、build metadata、基础 npm tgz/PAX path/linkpath 解包、tar symlink、路径逃逸过滤、写入 `node_modules`、`mars-lock.json` 和结构化 `bun.lock`（`lockfileVersion/configVersion/workspaces/packages` + root workspace name + tuple-style package entries，固定 metadata object 段位 + resolved/workspace metadata，workspace tuple 文本已 golden 固定，且依赖字段写入最终解析版本），并在 root 依赖声明匹配时回放 lockfile 固定版本，包括 workspace 包内部 registry 依赖；完整 Bun lockfile文本格式细节与更高级 npm semver range 语法作为后续硬化项。 |
 | MarsBundler DevServer | Done | 已支持 `/@vite/client`、`transformRequest()`、`loadModule()`、vite config root、alias、define、HMR update payload；完整 Vite plugin/server 生命周期作为后续硬化项。 |
 | ModuleGraph | Done | 已记录 imports/importers 并支持 invalidation；复杂依赖图清理作为后续硬化项。 |
 | Service Worker module response | Done | 已将 module 请求转成 transpiled JavaScript Response，并接入 runtime router。 |
@@ -202,7 +211,7 @@ SWC 取舍:
 
 1. CJS/ESM bridge 需要支持更多 ESM import CJS、CJS require ESM 的边界语义。
 2. Module graph 与 invalidation 需要补插件 transform 结果缓存、浏览器 HMR 协议兼容；loader importer cache 已支持递归失效并覆盖测试。
-3. Installer 需要补完整 semver 范围选择、lifecycle scripts、workspaces 和 Bun lockfile 兼容。
+3. Installer 需要继续补完整 Bun lockfile文本格式细节和更高级 npm semver range 语法兼容；optionalDependencies、peerDependencies、workspace symlink、workspace tuple metadata 文本、lifecycle env/scripts、`npm_config_{global,local_prefix,prefix,user_agent}` 边缘 env、package JS bins、常见 range 最高满足版本选择、hyphen ranges、partial comparators、partial `^`/`~`、prerelease opt-in/build metadata、PAX path/linkpath、tar symlink 解包与 root/workspace lockfile replay 已覆盖。
 
 ### 低优先级
 

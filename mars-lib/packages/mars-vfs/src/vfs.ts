@@ -1,4 +1,4 @@
-import { defaultWorkspaceRoot, normalizePath, resolvePath } from "./path"
+import { defaultWorkspaceRoot, dirname, normalizePath, resolvePath } from "./path"
 import { MemLayer } from "./mem-layer"
 
 import type {
@@ -53,7 +53,7 @@ export class MarsVFS implements MarsVFSInterface {
     return encoding ? new TextDecoder().decode(data) : data
   }
 
-  writeFileSync(path: string, data: string | Uint8Array, options?: WriteFileOptions): void {
+  writeFileSync(path: string, data: string | Uint8Array, _options?: WriteFileOptions): void {
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data
     const targetPath = this.#resolve(path)
 
@@ -63,6 +63,10 @@ export class MarsVFS implements MarsVFSInterface {
 
   statSync(path: string): MarsStats {
     return this.#memLayer.statSync(this.#resolve(path))
+  }
+
+  lstatSync(path: string): MarsStats {
+    return this.#memLayer.lstatSync(this.#resolve(path))
   }
 
   readdirSync(path: string, options: ReaddirOptions = {}): string[] | MarsDirent[] {
@@ -88,6 +92,17 @@ export class MarsVFS implements MarsVFSInterface {
     this.#emit("rename", toPath)
   }
 
+  symlinkSync(target: string, path: string): void {
+    const linkPath = this.#resolve(path)
+    const targetPath = normalizePath(target, dirname(linkPath))
+    this.#memLayer.symlinkSync(targetPath, linkPath)
+    this.#emit("create", linkPath)
+  }
+
+  readlinkSync(path: string): string {
+    return this.#memLayer.readlinkSync(this.#resolve(path))
+  }
+
   async readFile(path: string, encoding?: BufferEncoding): Promise<Uint8Array | string> {
     return this.readFileSync(path, encoding)
   }
@@ -104,6 +119,10 @@ export class MarsVFS implements MarsVFSInterface {
     return this.statSync(path)
   }
 
+  async lstat(path: string): Promise<MarsStats> {
+    return this.lstatSync(path)
+  }
+
   async readdir(path: string, options?: ReaddirOptions): Promise<string[] | MarsDirent[]> {
     return this.readdirSync(path, options)
   }
@@ -118,6 +137,14 @@ export class MarsVFS implements MarsVFSInterface {
 
   async rename(from: string, to: string): Promise<void> {
     this.renameSync(from, to)
+  }
+
+  async symlink(target: string, path: string): Promise<void> {
+    this.symlinkSync(target, path)
+  }
+
+  async readlink(path: string): Promise<string> {
+    return this.readlinkSync(path)
   }
 
   watch(path: string, listener: VFSWatchListener): Disposable {

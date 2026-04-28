@@ -1,5 +1,6 @@
 import { classifyRequest } from "./classify-request"
 import { createModuleResponse } from "./module-response"
+import { handleWebSocketRoute } from "./websocket-route"
 import { applyVFSPatches } from "@mars/vfs"
 
 import type { MarsStats, MarsVFSPatch } from "@mars/vfs"
@@ -56,6 +57,7 @@ export class ServiceWorkerRouter {
   }
 
   async handle(context: FetchRouteContext): Promise<Response> {
+    if (context.kind === "websocket") return handleWebSocketRoute({ url: context.url, request: context.request })
     if (context.kind === "virtual-server") return this.#handleVirtualServer(context)
     if (context.kind === "module" && this.#moduleClient) return this.#handleModule(context)
     if (context.kind === "vfs-asset" || context.kind === "module") return this.#handleVFSAsset(context)

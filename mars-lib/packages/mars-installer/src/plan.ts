@@ -1,4 +1,6 @@
-import type { InstallOptions, InstallPlan, PackageCache, PackageRegistryClient, ResolvedPackage } from "./types"
+import { packageVersionSatisfies, pickPackageVersion } from "./version-range"
+
+import type { InstallOptions, InstallPlan, PackageCache, PackageRegistryClient, ResolvedPackage, WorkspacePackage } from "./types"
 
 export async function createInstallPlan(
   options: InstallOptions,
@@ -6,12 +8,27 @@ export async function createInstallPlan(
   registryClient?: PackageRegistryClient,
 ): Promise<InstallPlan> {
   const packages = new Map<string, ResolvedPackage>()
+  const workspacePackages = new Map((options.workspaces ?? []).map(pkg => [pkg.name, pkg]))
   const requestedDependencies = {
     ...options.dependencies,
     ...options.devDependencies,
   }
+  const requestedOptionalDependencies = options.optionalDependencies ?? {}
+  const requestedPeerDependencies = options.peerDependencies ?? {}
+
+  for (const workspacePackage of [...workspacePackages.values()].sort((left, right) => left.name.localeCompare(right.name))) {
+    await addWorkspacePackage(workspacePackage, `workspace:${workspacePackage.version}`)
+  }
 
   for (const [name, range] of sortedEntries(requestedDependencies)) {
+    await addPackage(name, range)
+  }
+
+  for (const [name, range] of sortedEntries(requestedOptionalDependencies)) {
+    await addOptionalPackage(name, range)
+  }
+
+  for (const [name, range] of sortedEntries(requestedPeerDependencies)) {
     await addPackage(name, range)
   }
 
@@ -21,8 +38,28 @@ export async function createInstallPlan(
   const lockfile = options.lockfile === false
     ? undefined
     : {
+      root: {
+        ...(options.rootName ? { name: options.rootName } : {}),
+        dependencies: requestedDependencies,
+        devDependencies: options.devDependencies ?? {},
+        optionalDependencies: requestedOptionalDependencies,
+        peerDependencies: requestedPeerDependencies,
+      },
       packages: Object.fromEntries(
         orderedPackages.map(pkg => [pkg.name, pkg.version]),
+      ),
+      entries: Object.fromEntries(
+        orderedPackages.map(pkg => [
+          pkg.name,
+          {
+            version: pkg.version,
+            dependencies: resolveLockfileDependencyVersions(pkg.dependencies, packages),
+            optionalDependencies: resolveLockfileDependencyVersions(pkg.optionalDependencies, packages),
+            peerDependencies: resolveLockfileDependencyVersions(pkg.peerDependencies, packages),
+            ...(pkg.tarballKey ? { tarball: pkg.tarballKey } : {}),
+            ...(pkg.workspacePath ? { workspace: pkg.workspacePath } : {}),
+          },
+        ]),
       ),
     }
 
@@ -33,15 +70,113 @@ export async function createInstallPlan(
   }
 
   async function addPackage(name: string, range: string): Promise<void> {
-    if (packages.has(name)) return
+    const existingPackage = packages.get(name)
+    if (existingPackage) {
+      assertPackageRange(existingPackage, range, name)
+      return
+    }
 
-    const resolvedPackage = await resolvePackage(cache, name, range, options, registryClient)
+    const workspacePackage = workspacePackages.get(name)
+    const resolvedPackage = workspacePackage
+      ? resolveWorkspacePackage(workspacePackage, range)
+      : await resolvePackage(cache, name, range, options, registryClient)
     packages.set(name, resolvedPackage)
 
     for (const [dependencyName, dependencyRange] of sortedEntries(resolvedPackage.dependencies)) {
       await addPackage(dependencyName, dependencyRange)
     }
+
+    for (const [dependencyName, dependencyRange] of sortedEntries(resolvedPackage.optionalDependencies)) {
+      await addOptionalPackage(dependencyName, dependencyRange)
+    }
+
+    for (const [dependencyName, dependencyRange] of sortedEntries(resolvedPackage.peerDependencies)) {
+      if (resolvedPackage.peerDependenciesMeta[dependencyName]?.optional) {
+        await addOptionalPeerPackage(resolvedPackage, dependencyName, dependencyRange)
+        continue
+      }
+
+      await addPeerPackage(resolvedPackage, dependencyName, dependencyRange)
+    }
   }
+
+  async function addWorkspacePackage(workspacePackage: WorkspacePackage, range: string): Promise<void> {
+    await addPackage(workspacePackage.name, range)
+  }
+
+  async function addPeerPackage(requester: ResolvedPackage, name: string, range: string): Promise<void> {
+    const existingPackage = packages.get(name)
+    if (existingPackage) {
+      assertPackageRange(existingPackage, range, name, requester)
+      return
+    }
+
+    await addPackage(name, range)
+  }
+
+  async function addOptionalPeerPackage(requester: ResolvedPackage, name: string, range: string): Promise<void> {
+    const existingPackage = packages.get(name)
+    if (existingPackage) {
+      assertPackageRange(existingPackage, range, name, requester)
+      return
+    }
+
+    await addOptionalPackage(name, range)
+  }
+
+  async function addOptionalPackage(name: string, range: string): Promise<void> {
+    const packageSnapshot = new Map(packages)
+
+    try {
+      await addPackage(name, range)
+    } catch {
+      packages.clear()
+      for (const [packageName, pkg] of packageSnapshot) {
+        packages.set(packageName, pkg)
+      }
+    }
+  }
+}
+
+function resolveLockfileDependencyVersions(
+  dependencies: Record<string, string>,
+  resolvedPackages: Map<string, ResolvedPackage>,
+): Record<string, string> {
+  return Object.fromEntries(
+    sortedEntries(dependencies)
+      .map(([name, range]) => [name, resolvedPackages.get(name)?.version ?? range]),
+  )
+}
+
+function resolveWorkspacePackage(workspacePackage: WorkspacePackage, range: string): ResolvedPackage {
+  if (!packageVersionSatisfies(workspacePackage.version, range)) {
+    throw new Error(`Workspace package ${workspacePackage.name}@${workspacePackage.version} does not satisfy range ${range}`)
+  }
+
+  return {
+    name: workspacePackage.name,
+    version: workspacePackage.version,
+    dependencies: workspacePackage.dependencies ?? {},
+    optionalDependencies: workspacePackage.optionalDependencies ?? {},
+    peerDependencies: workspacePackage.peerDependencies ?? {},
+    peerDependenciesMeta: workspacePackage.peerDependenciesMeta ?? {},
+    scripts: workspacePackage.scripts ?? {},
+    bin: normalizePackageBin(workspacePackage.name, workspacePackage.bin),
+    workspacePath: workspacePackage.path,
+    files: workspacePackage.files,
+  }
+}
+
+function assertPackageRange(
+  pkg: ResolvedPackage,
+  range: string,
+  name: string,
+  requester?: ResolvedPackage,
+): void {
+  if (packageVersionSatisfies(pkg.version, range)) return
+
+  const requestedBy = requester ? ` required by ${requester.name}@${requester.version}` : ""
+  throw new Error(`Package ${name}@${pkg.version} does not satisfy range ${range}${requestedBy}`)
 }
 
 export async function resolvePackage(
@@ -78,7 +213,7 @@ function resolvePackageMetadata(
   range: string,
 ): ResolvedPackage {
   if (!metadata) throw new Error(`Package metadata not found in offline cache: ${name}`)
-  const version = pickVersion(metadata.distTags, Object.keys(metadata.versions), range)
+  const version = pickPackageVersion(metadata.distTags, Object.keys(metadata.versions), range)
   const versionMetadata = metadata.versions[version]
   if (!versionMetadata) throw new Error(`Package version not found in offline cache: ${name}@${range}`)
 
@@ -86,67 +221,21 @@ function resolvePackageMetadata(
     name,
     version,
     dependencies: versionMetadata.dependencies ?? {},
+    optionalDependencies: versionMetadata.optionalDependencies ?? {},
+    peerDependencies: versionMetadata.peerDependencies ?? {},
+    peerDependenciesMeta: versionMetadata.peerDependenciesMeta ?? {},
+    scripts: versionMetadata.scripts ?? {},
+    bin: versionMetadata.bin ?? {},
     files: versionMetadata.files ?? {},
     ...(versionMetadata.tarballKey ? { tarballKey: versionMetadata.tarballKey } : {}),
   }
 }
 
-function pickVersion(
-  distTags: Record<string, string> | undefined,
-  versions: string[],
-  range: string,
-): string {
-  if (range in (distTags ?? {})) return distTags?.[range] ?? range
-  if (versions.includes(range)) return range
-  if (range.startsWith("^") || range.startsWith("~")) {
-    const exact = range.slice(1)
-    if (versions.includes(exact)) return exact
+function normalizePackageBin(name: string, bin: string | Record<string, string> | undefined): Record<string, string> {
+  if (!bin) return {}
+  if (typeof bin === "string") return { [name.split("/").at(-1) ?? name]: bin }
 
-    const compatibleVersion = pickCompatibleVersion(versions, exact, range.startsWith("^"))
-    if (compatibleVersion) return compatibleVersion
-  }
-  if (distTags?.latest) return distTags.latest
-
-  return [...versions].sort().at(-1) ?? range
-}
-
-function pickCompatibleVersion(
-  versions: string[],
-  baseline: string,
-  allowMinorAndPatch: boolean,
-): string | null {
-  const baselineParts = parseVersion(baseline)
-  if (!baselineParts) return null
-
-  return versions
-    .filter(version => {
-      const parts = parseVersion(version)
-      if (!parts) return false
-      if (parts.major !== baselineParts.major) return false
-      if (!allowMinorAndPatch && parts.minor !== baselineParts.minor) return false
-
-      return compareVersions(parts, baselineParts) >= 0
-    })
-    .sort((left, right) => compareVersions(parseVersion(left)!, parseVersion(right)!))
-    .at(-1) ?? null
-}
-
-function parseVersion(version: string): { major: number; minor: number; patch: number } | null {
-  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version)
-  if (!match) return null
-
-  return {
-    major: Number(match[1]),
-    minor: Number(match[2]),
-    patch: Number(match[3]),
-  }
-}
-
-function compareVersions(
-  left: { major: number; minor: number; patch: number },
-  right: { major: number; minor: number; patch: number },
-): number {
-  return left.major - right.major || left.minor - right.minor || left.patch - right.patch
+  return bin
 }
 
 function sortedEntries(input: Record<string, string> | undefined): Array<[string, string]> {

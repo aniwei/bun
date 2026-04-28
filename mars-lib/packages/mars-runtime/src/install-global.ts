@@ -1,15 +1,23 @@
 import { MarsCryptoHasher, marsPassword } from "@mars/crypto"
-import { createMarsSQL } from "@mars/sqlite"
+import { createMarsSQL, type MarsSQLFacade } from "@mars/sqlite"
 import packageJson from "../../../package.json"
 
 import { createBunFile } from "./bun-file"
 import { bunBuild } from "./bun-build"
 import { bunServe } from "./bun-serve"
 import { bunWrite } from "./bun-write"
+import { detectMarsCapabilities } from "@mars/kernel"
 import { createModuleLoader } from "@mars/loader"
 import { normalizePath } from "@mars/vfs"
 
-import type { MarsBun, MarsBunSpawnOptions, MarsBunSpawnSyncResult, RuntimeContext } from "./types"
+import type {
+  MarsBun,
+  MarsBunSpawnOptions,
+  MarsBunSpawnSyncResult,
+  RuntimeContext,
+  RuntimeFeatures,
+} from "./types"
+import type { BuildResult } from "@mars/bundler"
 
 export interface MarsRuntimeContextInstallation {
   readonly bun: MarsBun
@@ -31,19 +39,69 @@ type RuntimeGlobalScope = typeof globalThis & {
 }
 type RuntimeGlobalKey = "Bun" | "process" | "require"
 
+// Feature defaults: sql disabled by default for bundle size optimization; esbuild/swc enabled for runtime transform.
+const DEFAULT_RUNTIME_FEATURES: RuntimeFeatures = {
+  esbuild: true,
+  swc: true,
+  sql: false,
+}
+
+function resolveRuntimeFeatures(input: RuntimeFeatures | undefined): RuntimeFeatures {
+  return {
+    ...DEFAULT_RUNTIME_FEATURES,
+    ...input,
+  }
+}
+
+function createDisabledSqlFacade(): MarsSQLFacade {
+  const throwDisabled = (): never => {
+    throw new Error("Bun.sql runtime feature is disabled. Enable runtimeFeatures.sql to use Bun.sql.")
+  }
+
+  const tagged = ((): Promise<never[]> => Promise.reject(new Error("Bun.sql is disabled"))) as unknown as MarsSQLFacade
+  
+  Object.defineProperties(tagged, {
+    db: {
+      get: throwDisabled,
+      enumerable: true,
+    },
+    open: {
+      value: (): never => throwDisabled(),
+      enumerable: true,
+    },
+  })
+
+  return tagged as MarsSQLFacade
+}
+
+function createDisabledBuildFacade(): Promise<BuildResult> {
+  return Promise.resolve({
+    success: false,
+    outputs: [],
+    logs: [
+      {
+        level: "error",
+        message: "Bun.build runtime feature is disabled. Enable runtimeFeatures.esbuild to use Bun.build.",
+      },
+    ],
+  })
+}
+
 export function createMarsBun(context: RuntimeContext): MarsBun {
+  const runtimeFeatures = resolveRuntimeFeatures(context.runtimeFeatures)
+
   return {
     version: packageJson.version,
     env: context.env ?? {},
     CryptoHasher: MarsCryptoHasher,
     password: marsPassword,
-    sql: createMarsSQL({ vfs: context.vfs }),
+    sql: runtimeFeatures.sql ? createMarsSQL({ vfs: context.vfs }) : createDisabledSqlFacade(),
     file: (path, options) => createBunFile(context, path, options),
     write: (destination, input) => bunWrite(context, destination, input),
     serve: options => bunServe(context, options),
-    build: options => bunBuild(context, options),
+    build: options => runtimeFeatures.esbuild ? bunBuild(context, options) : createDisabledBuildFacade(),
     spawn: options => bunSpawn(context, normalizeSpawnOptions(options)),
-    spawnSync: options => bunSpawnSync(normalizeSpawnOptions(options)),
+    spawnSync: options => bunSpawnSync(context, normalizeSpawnOptions(options)),
     fetch: (input, init) => globalThis.fetch(input, init),
   }
 }
@@ -59,9 +117,9 @@ export function installMarsRuntimeContext(context: RuntimeContext): MarsRuntimeC
   const processGlobal = createMarsProcessGlobal(context)
   const requireParent = normalizePath("__mars_context__.js", context.cwd ?? context.vfs.cwd())
   const require = (specifier: string) => moduleLoader.require(specifier, requireParent)
-  const restoreBun = installScopedGlobal(scope, "Bun", marsBun)
-  const restoreProcess = installScopedGlobal(scope, "process", processGlobal)
-  const restoreRequire = installScopedGlobal(scope, "require", require)
+  const restoreBun = installScopedGlobal(scope, "Bun", marsBun, context.forceGlobals)
+  const restoreProcess = installScopedGlobal(scope, "process", processGlobal, context.forceGlobals)
+  const restoreRequire = installScopedGlobal(scope, "require", require, context.forceGlobals)
 
   return {
     bun: marsBun,
@@ -79,11 +137,12 @@ function installScopedGlobal(
   scope: RuntimeGlobalScope,
   key: RuntimeGlobalKey,
   value: unknown,
+  force = false,
 ): () => void {
   const hadOwnValue = Object.prototype.hasOwnProperty.call(scope, key)
   const descriptor = Object.getOwnPropertyDescriptor(scope, key)
 
-  if (scope === globalThis && descriptor && (key === "Bun" || key === "process")) {
+  if (!force && scope === globalThis && descriptor && (key === "Bun" || key === "process")) {
     return () => {}
   }
 
@@ -129,7 +188,7 @@ function createMarsProcessGlobal(context: RuntimeContext): MarsProcessGlobal {
 
   return {
     argv: [...(context.argv ?? [])],
-    env: { ...(context.env ?? {}) },
+    env: { ...context.env },
     cwd: () => cwd,
   }
 }
@@ -152,8 +211,14 @@ function bunSpawn(context: RuntimeContext, options: MarsBunSpawnOptions) {
   })
 }
 
-function bunSpawnSync(options: MarsBunSpawnOptions): MarsBunSpawnSyncResult {
-  const message = `Bun.spawnSync is not available in this browser profile: ${options.cmd.join(" ")}`
+function bunSpawnSync(context: RuntimeContext, options: MarsBunSpawnOptions): MarsBunSpawnSyncResult {
+  if (context.spawnSync) return context.spawnSync(options)
+
+  const capabilities = detectMarsCapabilities(context.scope ?? globalThis)
+  const command = options.cmd.join(" ")
+  const message = capabilities.sharedArrayBuffer && capabilities.atomicsWait
+    ? `Bun.spawnSync SAB profile detected but no sync executor is wired for: ${command}`
+    : `Bun.spawnSync requires SharedArrayBuffer + Atomics.wait and is not available for: ${command}`
 
   return {
     success: false,

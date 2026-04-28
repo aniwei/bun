@@ -1,4 +1,6 @@
-import type { FileTree, MarsSerializedFileTree } from "@mars/vfs"
+import { isFileTreeSymlink } from "@mars/vfs"
+
+import type { FileTree, FileTreeEntry, MarsSerializedFileTree } from "@mars/vfs"
 
 export interface ProcessWorkerBootstrapScriptOptions {
   runtimeImport?: string
@@ -72,9 +74,10 @@ function fileTreeToSource(tree: FileTree): string {
   return `{ ${entries.join(", ")} }`
 }
 
-function fileTreeValueToSource(value: string | Uint8Array | FileTree): string {
+function fileTreeValueToSource(value: FileTreeEntry): string {
   if (typeof value === "string") return JSON.stringify(value)
   if (value instanceof Uint8Array) return `new Uint8Array(${JSON.stringify([...value])})`
+  if (isFileTreeSymlink(value)) return `{ kind: "symlink", target: ${JSON.stringify(value.target)} }`
 
   return fileTreeToSource(value)
 }
