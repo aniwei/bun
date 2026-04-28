@@ -945,13 +945,13 @@ async function runPasswordCase(): Promise<PlaygroundRunResult> {
 
   try {
     const hash = await runtime.bun.password.hash("mars-secret", {
-      iterations: 1_000,
+      cost: 10,
       salt: new Uint8Array(16).fill(7),
     })
     const verified = await runtime.bun.password.verify("mars-secret", hash)
     const rejected = await runtime.bun.password.verify("wrong-secret", hash)
 
-    if (!verified || rejected) return fail("phase3-password", hash)
+    if (!hash.includes("$mars$pbkdf2-sha256$1024$") || !verified || rejected) return fail("phase3-password", hash)
 
     return pass("phase3-password", `hash=${hash.slice(0, 28)} fixture=${runtimePasswordSource.length}`)
   } finally {

@@ -33,6 +33,7 @@ export interface ProcessHandle {
   readonly stderr: ReadableStream<Uint8Array>
   readonly exited: Promise<number>
   write(input: string | Uint8Array): Promise<void>
+  closeStdin(): void
   kill(signal?: string | number): Promise<void>
 }
 

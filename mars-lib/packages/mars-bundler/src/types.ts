@@ -11,6 +11,7 @@ export interface BuildOptions {
   format?: BuildFormat
   target?: "browser" | "bun" | "node"
   define?: Record<string, string>
+  minify?: boolean
   sourcemap?: boolean
 }
 

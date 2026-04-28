@@ -4,6 +4,7 @@ export type MarsPasswordAlgorithm = "mars-pbkdf2-sha256"
 
 export interface MarsPasswordHashOptions {
   algorithm?: MarsPasswordAlgorithm
+  cost?: number
   iterations?: number
   salt?: MarsHashInput
 }
@@ -15,6 +16,8 @@ export interface MarsPasswordFacade {
 
 const marsPasswordPrefix = "$mars$pbkdf2-sha256"
 const defaultIterations = 100_000
+const minCost = 1
+const maxCost = 17
 const saltByteLength = 16
 const digestBitLength = 256
 
@@ -30,8 +33,7 @@ export async function hashPassword(
   const algorithm = options.algorithm ?? "mars-pbkdf2-sha256"
   if (algorithm !== "mars-pbkdf2-sha256") throw new Error(`Unsupported password algorithm: ${algorithm}`)
 
-  const iterations = options.iterations ?? defaultIterations
-  if (!Number.isInteger(iterations) || iterations <= 0) throw new Error(`Invalid password iterations: ${iterations}`)
+  const iterations = resolveIterations(options)
 
   const salt = options.salt ? toBytes(options.salt) : randomSalt()
   const digest = await derivePasswordDigest(password, salt, iterations)
@@ -50,6 +52,26 @@ export async function verifyPassword(password: MarsHashInput, hash: string): Pro
 
   const digest = await derivePasswordDigest(password, parsedHash.salt, parsedHash.iterations)
   return timingSafeEqual(digest, parsedHash.digest)
+}
+
+function resolveIterations(options: MarsPasswordHashOptions): number {
+  if (options.iterations !== undefined) {
+    if (!Number.isInteger(options.iterations) || options.iterations <= 0) {
+      throw new Error(`Invalid password iterations: ${options.iterations}`)
+    }
+
+    return options.iterations
+  }
+
+  if (options.cost !== undefined) {
+    if (!Number.isInteger(options.cost) || options.cost < minCost || options.cost > maxCost) {
+      throw new Error(`Invalid password cost: ${options.cost}`)
+    }
+
+    return 2 ** options.cost
+  }
+
+  return defaultIterations
 }
 
 async function derivePasswordDigest(

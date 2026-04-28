@@ -167,7 +167,7 @@
     "entry": "vite-react-ts/src/App.tsx",
     "acceptance": "packages/mars-test/src/phase3.acceptance.test.ts",
     "status": "prework",
-    "description": "Bun.build 通过 esbuild-wasm 构建 Vite React TS playground entry，并在 sourcemap: true 时写出 .js.map artifact；Phase 2 Done 前仅作为 gated prework。"
+    "description": "Bun.build 通过 esbuild-wasm 构建 Vite React TS playground entry，支持 minify: true，并在 sourcemap: true 时写出 .js.map artifact；Phase 2 Done 前仅作为 gated prework。"
   },
   {
     "id": "phase3-bun-run-index",
@@ -207,7 +207,7 @@
     "entry": "core-modules/runtime/password.ts",
     "acceptance": "packages/mars-test/src/phase3.acceptance.test.ts",
     "status": "prework",
-    "description": "Bun.password playground 用例覆盖 WebCrypto PBKDF2 sha256 hash/verify fallback；bcrypt/argon2 兼容仍待补。"
+    "description": "Bun.password playground 用例覆盖 WebCrypto PBKDF2 sha256 hash/verify fallback 和 cost-to-iterations 映射；bcrypt/argon2 兼容仍待补。"
   },
   {
     "id": "phase3-bun-sql",

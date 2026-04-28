@@ -34,6 +34,7 @@ export interface MarsProcessWorkerController {
   status(): MarsProcessWorkerStatus
   boot(): Promise<void>
   write(input: string | Uint8Array): Promise<void>
+  closeStdin(): Promise<void>
   syncVFS(patches: MarsVFSPatch[]): Promise<void>
   run(options?: { argv?: string[]; cwd?: string; env?: Record<string, string> }): Promise<void>
   postMessage(message: unknown): Promise<void>
@@ -170,6 +171,10 @@ class AutoSyncProcessWorkerController implements MarsProcessWorkerController {
     return this.#controller.write(input)
   }
 
+  closeStdin(): Promise<void> {
+    return this.#controller.closeStdin()
+  }
+
   syncVFS(patches: MarsVFSPatch[]): Promise<void> {
     return this.#controller.syncVFS(patches)
   }
@@ -262,6 +267,10 @@ class InMemoryProcessWorkerController implements MarsProcessWorkerController {
 
   async write(input: string | Uint8Array): Promise<void> {
     await this.#stdio.writeStdin(input)
+  }
+
+  async closeStdin(): Promise<void> {
+    this.#stdio.closeStdin()
   }
 
   async syncVFS(patches: MarsVFSPatch[]): Promise<void> {
@@ -374,6 +383,16 @@ class BrowserProcessWorkerController implements MarsProcessWorkerController {
       type: "process.worker.stdin",
       id: this.id,
       chunk: input,
+    })
+  }
+
+  async closeStdin(): Promise<void> {
+    if (this.#status !== "running") return
+
+    this.#stdio.closeStdin()
+    this.#worker.postMessage({
+      type: "process.worker.stdin.close",
+      id: this.id,
     })
   }
 

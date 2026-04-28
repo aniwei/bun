@@ -185,6 +185,10 @@ class VirtualProcessHandle implements ProcessHandle {
     await this.#stdio.writeStdin(input)
   }
 
+  closeStdin(): void {
+    this.#stdio.closeStdin()
+  }
+
   async kill(signal?: string | number): Promise<void> {
     await this.#kill(signal)
   }

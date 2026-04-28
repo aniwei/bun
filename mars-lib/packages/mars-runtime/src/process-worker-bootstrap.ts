@@ -5,6 +5,7 @@ import { installMarsRuntimeContext } from "./install-global"
 import { runEntryScript } from "./run-entry"
 
 import type { Disposable } from "@mars/bridge"
+import type { ProcessHandle } from "@mars/kernel"
 import type { MarsVFS } from "@mars/vfs"
 import type { MarsVFSPatch } from "@mars/vfs"
 import type { MarsRuntimeContextInstallation } from "./install-global"
@@ -44,6 +45,11 @@ interface ProcessWorkerDataMessage {
   chunk?: string | Uint8Array
 }
 
+interface ProcessWorkerStdinCloseMessage {
+  type: "process.worker.stdin.close"
+  id: string
+}
+
 interface ProcessWorkerRunMessage {
   type: "process.worker.run"
   id: string
@@ -66,6 +72,7 @@ interface ProcessWorkerTerminateMessage {
 type ProcessWorkerIncomingMessage =
   | ProcessWorkerBootMessage
   | ProcessWorkerDataMessage
+  | ProcessWorkerStdinCloseMessage
   | ProcessWorkerRunMessage
   | ProcessWorkerVFSPatchMessage
   | ProcessWorkerTerminateMessage
@@ -86,6 +93,7 @@ class DefaultProcessWorkerRuntimeBootstrap implements ProcessWorkerRuntimeBootst
   }
   #processId: string | null = null
   #pid: number | null = null
+  #processHandle: ProcessHandle | null = null
   #stdioSubscription: Disposable | null = null
   #contextInstallation: MarsRuntimeContextInstallation | null = null
   #runtimeContext: RuntimeContext | null = null
@@ -132,6 +140,17 @@ class DefaultProcessWorkerRuntimeBootstrap implements ProcessWorkerRuntimeBootst
       return
     }
 
+    if (message.type === "process.worker.stdin") {
+      this.#currentTask = this.#writeStdin(message as ProcessWorkerDataMessage)
+      await this.#currentTask
+      return
+    }
+
+    if (message.type === "process.worker.stdin.close") {
+      this.#closeStdin()
+      return
+    }
+
     if (message.type === "process.worker.vfs.patch") {
       this.#currentTask = this.#applyVFSPatches(message as ProcessWorkerVFSPatchMessage)
       await this.#currentTask
@@ -164,6 +183,7 @@ class DefaultProcessWorkerRuntimeBootstrap implements ProcessWorkerRuntimeBootst
 
     this.#processId = message.id
     this.#pid = handle.pid
+    this.#processHandle = handle
     this.#exited = false
     this.#stdioSubscription = this.#kernel.on("stdio", payload => {
       if (payload.pid !== handle.pid) return
@@ -195,6 +215,16 @@ class DefaultProcessWorkerRuntimeBootstrap implements ProcessWorkerRuntimeBootst
         error: error instanceof Error ? error.message : String(error),
       })
     }
+  }
+
+  async #writeStdin(message: ProcessWorkerDataMessage): Promise<void> {
+    if (!this.#processHandle || message.chunk === undefined) return
+
+    await this.#processHandle.write(message.chunk)
+  }
+
+  #closeStdin(): void {
+    this.#processHandle?.closeStdin()
   }
 
   async #run(message: ProcessWorkerRunMessage): Promise<void> {
@@ -243,6 +273,7 @@ class DefaultProcessWorkerRuntimeBootstrap implements ProcessWorkerRuntimeBootst
     this.#contextInstallation = null
     this.#runtimeContext = null
     this.#processId = null
+    this.#processHandle = null
     this.#pid = null
 
     if (pid !== null) {

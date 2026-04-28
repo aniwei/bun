@@ -20,7 +20,7 @@ import { HookRegistry, type HookPreset } from "./hooks"
 import { preview as createPreviewUrl } from "./preview"
 import { registerRuntimeFeatureHooks, resolveRuntimeFeatures } from "./runtime-features"
 
-import type { MarsKernel, ProcessHandle, SpawnOptions, VirtualServer } from "@mars/kernel"
+import type { MarsKernel, MarsProcessWorkerFactory, ProcessWorkerExitMessage, ProcessHandle, SpawnOptions, VirtualServer } from "@mars/kernel"
 import type { PackageCache, PackageLifecycleScripts, PackageRegistryClient, ResolvedPackage, WorkspacePackage } from "@mars/installer"
 import type { CommandResult, MarsShell, ShellCommand } from "@mars/shell"
 import type { MarsBunSpawnOptions } from "@mars/runtime"
@@ -38,6 +38,7 @@ export interface MarsBootOptions {
   packageCache?: PackageCache
   packageRegistryClient?: PackageRegistryClient
   runtimeFeatures?: Partial<RuntimeFeatures>
+  processWorkerFactory?: MarsProcessWorkerFactory
   hooks?: HookRegistry
   hookPreset?: HookPreset
 }
@@ -84,6 +85,7 @@ class DefaultMarsRuntime implements MarsRuntime {
   readonly #autoSyncServiceWorkerVFS: boolean
   readonly #packageCache: PackageCache | undefined
   readonly #packageRegistryClient: PackageRegistryClient | undefined
+  readonly #processWorkerFactory: MarsProcessWorkerFactory | undefined
   #serviceWorkerVFSWatcher: Disposable | null = null
   #serviceWorkerVFSTasks = new Set<Promise<unknown>>()
   #booted = false
@@ -96,6 +98,7 @@ class DefaultMarsRuntime implements MarsRuntime {
     this.#autoSyncServiceWorkerVFS = options.autoSyncServiceWorkerVFS ?? true
     this.#packageRegistryClient = options.packageRegistryClient
     this.#packageCache = options.packageCache ?? (options.packageRegistryClient ? createMemoryPackageCache() : undefined)
+    this.#processWorkerFactory = options.processWorkerFactory
     this.runtimeFeatures = resolveRuntimeFeatures(options.runtimeFeatures)
     this.#hooks = options.hooks ?? new HookRegistry({ preset: options.hookPreset ?? "default" })
     
@@ -202,6 +205,22 @@ class DefaultMarsRuntime implements MarsRuntime {
     return this.#runScript(entry, options, [entry])
   }
 
+  async #runBunRunScript(
+    entry: string,
+    argv: string[],
+    options: Omit<SpawnOptions, "argv">,
+  ): Promise<ProcessHandle> {
+    if (this.#canSpawnBunRunInProcessWorker(options)) {
+      return this.#runProcessWorkerScript(argv, options)
+    }
+
+    return this.#runScript(
+      entry,
+      { cwd: options.cwd, env: options.env },
+      argv,
+    )
+  }
+
   async #runScript(entry: string, options: RunOptions, argv: string[]): Promise<ProcessHandle> {
     const cwd = options.cwd ?? this.vfs.cwd()
     const processHandle = await this.kernel.spawn({
@@ -249,10 +268,10 @@ class DefaultMarsRuntime implements MarsRuntime {
         }
 
         try {
-          const processHandle = await this.#runScript(
+          const processHandle = await this.#runBunRunScript(
             entry,
-            { cwd: context.cwd, env: context.env },
             context.argv,
+            { cwd: context.cwd, env: context.env },
           )
           const [stdout, stderr, code] = await Promise.all([
             new Response(processHandle.stdout).text(),
@@ -526,14 +545,116 @@ class DefaultMarsRuntime implements MarsRuntime {
     const argv = [command, ...args]
     const entry = parseBunRunEntry(argv)
     if (entry) {
-      return this.#runScript(
+      return this.#runBunRunScript(
         entry,
-        { cwd: options.cwd, env: options.env },
         argv,
+        options,
       )
     }
 
     return this.#runShellCommand(argv, options)
+  }
+
+  #canSpawnBunRunInProcessWorker(options: Omit<SpawnOptions, "argv">): boolean {
+    if (!this.#processWorkerFactory?.supportsNativeWorker()) return false
+
+    return options.kind === undefined || options.kind === "worker"
+  }
+
+  async #runProcessWorkerScript(argv: string[], options: Omit<SpawnOptions, "argv">): Promise<ProcessHandle> {
+    const processWorkerFactory = this.#processWorkerFactory
+    if (!processWorkerFactory) throw new Error("Mars Process Worker factory is not configured")
+
+    const cwd = options.cwd ?? this.vfs.cwd()
+    const processHandle = await this.kernel.spawn({
+      ...options,
+      argv,
+      cwd,
+      kind: "worker",
+    })
+    const controller = await processWorkerFactory.create({
+      argv,
+      cwd,
+      env: options.env,
+    })
+    const reader = controller.messages.getReader()
+    const stdoutDone = this.#pipeProcessWorkerOutput(processHandle.pid, 1, controller.stdout)
+    const stderrDone = this.#pipeProcessWorkerOutput(processHandle.pid, 2, controller.stderr)
+    await controller.boot()
+    const stdinDone = this.#pipeProcessWorkerInput(processHandle.stdin, controller)
+
+    void processHandle.exited.finally(() => {
+      void Promise.allSettled([stdinDone]).finally(() => controller.terminate().catch(() => {}))
+    })
+    void this.#monitorProcessWorker(processHandle.pid, reader, stdoutDone, stderrDone)
+
+    return processHandle
+  }
+
+  async #pipeProcessWorkerInput(
+    stream: ReadableStream<Uint8Array>,
+    controller: {
+      write(input: Uint8Array): Promise<void>
+      closeStdin(): Promise<void>
+    },
+  ): Promise<void> {
+    const reader = stream.getReader()
+
+    try {
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) {
+          await controller.closeStdin()
+          return
+        }
+
+        await controller.write(chunk.value)
+      }
+    } catch {
+      // The worker may exit while stdin is still being drained.
+    } finally {
+      reader.releaseLock()
+    }
+  }
+
+  async #pipeProcessWorkerOutput(pid: number, fd: 1 | 2, stream: ReadableStream<Uint8Array>): Promise<void> {
+    const reader = stream.getReader()
+
+    try {
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) return
+
+        this.kernel.writeStdio(pid, fd, chunk.value)
+      }
+    } catch {
+      // The kernel process may have been killed before the worker stream drains.
+    } finally {
+      reader.releaseLock()
+    }
+  }
+
+  async #monitorProcessWorker(
+    pid: number,
+    reader: ReadableStreamDefaultReader<unknown>,
+    stdoutDone: Promise<void>,
+    stderrDone: Promise<void>,
+  ): Promise<void> {
+    try {
+      while (true) {
+        const message = await reader.read()
+        if (message.done) return
+
+        const payload = message.value as Partial<ProcessWorkerExitMessage> | undefined
+        if (payload?.type !== "process.worker.exit") continue
+
+        await Promise.all([stdoutDone, stderrDone])
+        await this.kernel.kill(pid, payload.code ?? 0)
+        return
+      }
+    } finally {
+      reader.releaseLock()
+    }
   }
 
   async #runShellCommand(argv: string[], options: Omit<SpawnOptions, "argv">): Promise<ProcessHandle> {

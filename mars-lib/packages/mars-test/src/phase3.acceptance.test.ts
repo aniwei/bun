@@ -5,13 +5,13 @@ import { createMarsBridgeEndpoint, createMarsMemoryBridgePair, createMarsPostMes
 import { createMarsRuntime } from "@mars/client"
 import { MarsCryptoHasher, createHashDigest, marsPassword } from "@mars/crypto"
 import { connectMarsKernelWorker, createKernelWorkerController, createMarsKernel, createMarsProcessWorkerFactory, detectMarsCapabilities, installKernelWorkerBootstrap, supportsKernelWorkerClient } from "@mars/kernel"
-import type { KernelWorkerMessageEvent, WorkerLike } from "@mars/kernel"
+import type { KernelWorkerMessageEvent, ProcessHandle, WorkerLike } from "@mars/kernel"
 import { createHash, createHmac, randomBytes, randomUUID } from "@mars/node"
 import { createMarsBun, createProcessWorkerBootstrapBlobURL, createProcessWorkerBootstrapScript, getBunApiCompat, installProcessWorkerRuntimeBootstrap } from "@mars/runtime"
 import { createWebSocketPair, upgradeToWebSocket } from "@mars/runtime"
 import { classifyRequest, createBridgeServiceWorkerKernelClient, createServiceWorkerBridgeController, createServiceWorkerRouter, handleWebSocketRoute, installServiceWorkerBootstrap, installServiceWorkerFetchHandler, moduleUrlFromPath } from "@mars/sw"
 import type { MarsServiceWorkerContainer, MarsServiceWorkerController, MarsServiceWorkerMessageEvent, MarsServiceWorkerRegistration, MarsServiceWorkerRegistrationOptions } from "@mars/sw"
-import { createBrowserTestProfiles } from "@mars/test"
+import { createBrowserAutomationProfiles, createBrowserTestProfiles } from "@mars/test"
 import { createMarsVFS, createOPFSPersistenceAdapter, createWriteFilePatch, restoreVFSSnapshot, snapshotVFS } from "@mars/vfs"
 import {
   loadPlaygroundFiles,
@@ -158,8 +158,11 @@ class MarsTestNativeWorker implements WorkerLike {
     } else if (payload.type === "process.worker.message") {
       this.dispatch({ type: "message", id: payload.id, data: { echoed: payload.data } })
     } else if (payload.type === "process.worker.stdin") {
-      this.dispatch({ type: "process.worker.stdout", id: payload.id, chunk: `stdout:${payload.chunk}` })
-      this.dispatch({ type: "process.worker.stderr", id: payload.id, chunk: `stderr:${payload.chunk}` })
+      const stdinText = payload.chunk instanceof Uint8Array
+        ? new TextDecoder().decode(payload.chunk)
+        : payload.chunk ?? ""
+      this.dispatch({ type: "process.worker.stdout", id: payload.id, chunk: `stdout:${stdinText}` })
+      this.dispatch({ type: "process.worker.stderr", id: payload.id, chunk: `stderr:${stdinText}` })
     } else if (payload.type === "process.worker.vfs.patch") {
       this.dispatch({ type: "process.worker.vfs.patch", id: payload.id, ok: true, count: payload.patches?.length ?? 0 })
     } else if (payload.type === "process.worker.run") {
@@ -183,6 +186,30 @@ class MarsTestNativeWorker implements WorkerLike {
   dispatch(data: unknown): void {
     this.#eventTarget.dispatchEvent(new MessageEvent("message", { data }))
   }
+}
+
+async function waitForMarsTestNativeWorker(): Promise<MarsTestNativeWorker> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const worker = MarsTestNativeWorker.instances[0]
+    if (worker) return worker
+
+    await Promise.resolve()
+  }
+
+  throw new Error("Expected MarsTestNativeWorker to be created")
+}
+
+async function waitForMarsTestNativeWorkerMessages(
+  worker: MarsTestNativeWorker,
+  count: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (worker.messages.length >= count) return
+
+    await Promise.resolve()
+  }
+
+  throw new Error(`Expected ${count} worker messages, received ${worker.messages.length}`)
 }
 
 class MarsTestKernelCarrierWorker implements WorkerLike {
@@ -321,6 +348,36 @@ test("Phase 3 Bun.build writes external source map output to MarsVFS", async () 
   await runtime.dispose()
 })
 
+test("Phase 3 Bun.build minifies output when requested", async () => {
+  const runtime = await createMarsRuntime({
+    initialFiles: {
+      src: {
+        "minify.ts": [
+          "const label: string = 'phase3 minify'",
+          "const value: number = 1 + 2",
+          "console.log(label, value)",
+        ].join("\n"),
+      },
+    },
+  })
+
+  const result = await runtime.bun.build({
+    entrypoints: ["src/minify.ts"],
+    outfile: "dist/minify.js",
+    minify: true,
+  })
+  const output = String(await runtime.vfs.readFile("dist/minify.js", "utf8"))
+
+  expect(result.success).toBe(true)
+  expect(result.outputs[0].path).toBe("/workspace/dist/minify.js")
+  expect(output).toContain("phase3 minify")
+  expect(output).toContain("console.log")
+  expect(output.length < 80).toBe(true)
+  expect(output).not.toContain("const label")
+
+  await runtime.dispose()
+})
+
 test("Phase 3 Bun facade version follows package version", async () => {
   const runtime = await createMarsRuntime()
 
@@ -359,8 +416,8 @@ test("Phase 3 compatibility matrix tracks Bun.build", () => {
     api: "Bun.build",
     status: "partial",
     phase: "M3",
-    notes: "Single or multi-entry esbuild-wasm transform output and external source map artifacts can be written to MarsVFS; full dependency bundling and splitting are pending.",
-    tests: ["Phase 3 Bun.build writes transformed output to MarsVFS", "Phase 3 Bun.build writes external source map output to MarsVFS"],
+    notes: "Single or multi-entry esbuild-wasm transform output, minify output and external source map artifacts can be written to MarsVFS; full dependency bundling and splitting are pending.",
+    tests: ["Phase 3 Bun.build writes transformed output to MarsVFS", "Phase 3 Bun.build writes external source map output to MarsVFS", "Phase 3 Bun.build minifies output when requested"],
   })
 })
 
@@ -369,8 +426,12 @@ test("Phase 3 compatibility matrix tracks bun run", () => {
     api: "bun run",
     status: "partial",
     phase: "M3",
-    notes: "MarsShell can dispatch bun run <entry> into the current in-memory Kernel pid and runEntryScript path; Process Worker isolation and real ServiceWorker module interception are pending.",
-    tests: ["Phase 3 shell bun run executes index.ts through kernel stdio"],
+    notes: "MarsShell and runtime.spawn can dispatch bun run <entry> through the current in-memory Kernel pid fallback or a configured native Process Worker factory; real ServiceWorker module interception is pending.",
+    tests: [
+      "Phase 3 shell bun run executes index.ts through kernel stdio",
+      "Phase 3 shell bun run can execute through configured Process Worker",
+      "Phase 3 runtime.spawn can execute bun run through configured Process Worker",
+    ],
   })
 })
 
@@ -379,9 +440,15 @@ test("Phase 3 compatibility matrix tracks Bun.spawn", () => {
     api: "Bun.spawn",
     status: "partial",
     phase: "M3",
-    notes: "Bun.spawn({ cmd }) and runtime.spawn() can execute both bun run <entry> and generic shell commands through the current in-memory Kernel pid + shell dispatch path; Process Worker isolation and streaming stdin backpressure parity are pending.",
+    notes: "Bun.spawn({ cmd }) and runtime.spawn() can execute bun run <entry> through the current in-memory Kernel pid fallback or a configured native Process Worker factory, can forward ProcessHandle stdin to the worker carrier, close initial stdin streams, and execute generic shell commands through the shell dispatch path; full streaming backpressure parity is pending.",
     tests: [
       "Phase 3 Bun.spawn executes bun run index.ts through kernel stdio",
+      "Phase 3 runtime.spawn can execute bun run through configured Process Worker",
+      "Phase 3 Bun.spawn can execute bun run through configured Process Worker",
+      "Phase 3 configured Process Worker spawn forwards ProcessHandle stdin",
+      "Phase 3 configured Process Worker spawn forwards initial stdin",
+      "Phase 3 configured Process Worker spawn forwards initial stdin stream",
+      "Phase 3 configured Process Worker spawn closes initial stdin stream",
       "Phase 3 Bun.spawn executes general shell command through kernel stdio",
       "Phase 3 runtime.spawn executes general shell command through kernel stdio",
     ],
@@ -1402,6 +1469,63 @@ test("Phase 3 Process Worker runtime bootstrap injects Bun-compatible context", 
   }
 })
 
+test("Phase 3 Process Worker runtime bootstrap closes stdin", async () => {
+  const runtime = await createMarsRuntime()
+  const kernel = createMarsKernel()
+  const originalSpawn = kernel.spawn.bind(kernel)
+  let resolveCapturedHandle: (handle: ProcessHandle) => void = () => {}
+  const capturedHandlePromise = new Promise<ProcessHandle>(resolve => {
+    resolveCapturedHandle = resolve
+  })
+  kernel.spawn = async options => {
+    const handle = await originalSpawn(options)
+    resolveCapturedHandle(handle)
+    return handle
+  }
+  const scope = new MarsTestProcessWorkerRuntimeScope()
+  const bootstrap = installProcessWorkerRuntimeBootstrap({
+    scope: scope as unknown as MarsTestProcessWorkerRuntimeScope & Record<string, unknown>,
+    vfs: runtime.vfs,
+    kernel,
+    autoRun: false,
+  })
+
+  try {
+    scope.dispatch({
+      type: "process.worker.boot",
+      id: "process-worker-stdin-close",
+      argv: ["bun", "run", "worker-entry.ts"],
+      cwd: "/workspace",
+    })
+    await bootstrap.idle()
+    const capturedHandle = await capturedHandlePromise
+    const stdinReader = capturedHandle.stdin.getReader()
+
+    scope.dispatch({
+      type: "process.worker.stdin",
+      id: "process-worker-stdin-close",
+      chunk: new TextEncoder().encode("bootstrap stdin"),
+    })
+    await bootstrap.idle()
+    scope.dispatch({
+      type: "process.worker.stdin.close",
+      id: "process-worker-stdin-close",
+    })
+    await bootstrap.idle()
+    const firstChunk = await stdinReader.read()
+    const closedChunk = await stdinReader.read()
+
+    expect(new TextDecoder().decode(firstChunk.value)).toBe("bootstrap stdin")
+    expect(closedChunk.done).toBe(true)
+
+    stdinReader.releaseLock()
+  } finally {
+    bootstrap.dispose()
+    await kernel.shutdown()
+    await runtime.dispose()
+  }
+})
+
 test("Phase 3 Process Worker runtime bootstrap executes bun run module with stdio", async () => {
   const runtime = await createMarsRuntime({
     initialFiles: {
@@ -1619,6 +1743,50 @@ test("Phase 3 shell bun run executes index.ts through kernel stdio", async () =>
   await runtime.dispose()
 })
 
+test("Phase 3 shell bun run can execute through configured Process Worker", async () => {
+  MarsTestNativeWorker.instances.length = 0
+  const runtime = await createMarsRuntime({
+    initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "/mars-process-worker.js",
+      workerOptions: { type: "module" },
+      workerConstructor: MarsTestNativeWorker,
+    }),
+  })
+
+  const resultTask = runtime.shell.run("bun run index.ts")
+  const worker = await waitForMarsTestNativeWorker()
+  worker.dispatch({
+    type: "process.worker.stdout",
+    id: "process-worker-1",
+    chunk: "shell worker bun run stdout\n",
+  })
+  worker.dispatch({
+    type: "process.worker.stderr",
+    id: "process-worker-1",
+    chunk: "shell worker bun run stderr\n",
+  })
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const result = await resultTask
+
+  expect(worker.messages[0]).toEqual({
+    type: "process.worker.boot",
+    id: "process-worker-1",
+    argv: ["bun", "run", "index.ts"],
+    cwd: "/workspace",
+    env: {},
+  })
+  expect(result.code).toBe(0)
+  expect(result.stdout).toBe("shell worker bun run stdout\n")
+  expect(result.stderr).toBe("shell worker bun run stderr\n")
+
+  await runtime.dispose()
+})
+
 test("Phase 3 runtime.spawn executes bun run index.ts through kernel stdio", async () => {
   const runtime = await createMarsRuntime({
     initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
@@ -1638,6 +1806,56 @@ test("Phase 3 runtime.spawn executes bun run index.ts through kernel stdio", asy
   await runtime.dispose()
 })
 
+test("Phase 3 runtime.spawn can execute bun run through configured Process Worker", async () => {
+  MarsTestNativeWorker.instances.length = 0
+  const runtime = await createMarsRuntime({
+    initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "/mars-process-worker.js",
+      workerOptions: { type: "module" },
+      workerConstructor: MarsTestNativeWorker,
+    }),
+  })
+
+  const processHandle = await runtime.spawn("bun", ["run", "index.ts"])
+  const worker = MarsTestNativeWorker.instances[0]
+  worker.dispatch({
+    type: "process.worker.stdout",
+    id: "process-worker-1",
+    chunk: "worker bun run stdout\n",
+  })
+  worker.dispatch({
+    type: "process.worker.stderr",
+    id: "process-worker-1",
+    chunk: "worker bun run stderr\n",
+  })
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(worker.url).toBe("/mars-process-worker.js")
+  expect(worker.options).toEqual({ type: "module" })
+  expect(worker.messages[0]).toEqual({
+    type: "process.worker.boot",
+    id: "process-worker-1",
+    argv: ["bun", "run", "index.ts"],
+    cwd: "/workspace",
+    env: undefined,
+  })
+  expect(stdout).toBe("worker bun run stdout\n")
+  expect(stderr).toBe("worker bun run stderr\n")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
 test("Phase 3 Bun.spawn executes bun run index.ts through kernel stdio", async () => {
   const runtime = await createMarsRuntime({
     initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
@@ -1652,6 +1870,218 @@ test("Phase 3 Bun.spawn executes bun run index.ts through kernel stdio", async (
 
   expect(stdout).toBe("bun run index {\"phase\":3}\n")
   expect(stderr).toBe("bun run stderr\n")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
+test("Phase 3 Bun.spawn can execute bun run through configured Process Worker", async () => {
+  MarsTestNativeWorker.instances.length = 0
+  const runtime = await createMarsRuntime({
+    initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "/mars-process-worker.js",
+      workerOptions: { type: "module" },
+      workerConstructor: MarsTestNativeWorker,
+    }),
+  })
+
+  const processHandle = await runtime.bun.spawn({ cmd: ["bun", "run", "index.ts"] })
+  const worker = MarsTestNativeWorker.instances[0]
+  worker.dispatch({
+    type: "process.worker.stdout",
+    id: "process-worker-1",
+    chunk: "bun spawn worker stdout\n",
+  })
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(worker.messages[0]).toEqual({
+    type: "process.worker.boot",
+    id: "process-worker-1",
+    argv: ["bun", "run", "index.ts"],
+    cwd: "/workspace",
+    env: undefined,
+  })
+  expect(stdout).toBe("bun spawn worker stdout\n")
+  expect(stderr).toBe("")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
+test("Phase 3 configured Process Worker spawn forwards ProcessHandle stdin", async () => {
+  MarsTestNativeWorker.instances.length = 0
+  const runtime = await createMarsRuntime({
+    initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "/mars-process-worker.js",
+      workerOptions: { type: "module" },
+      workerConstructor: MarsTestNativeWorker,
+    }),
+  })
+
+  const processHandle = await runtime.spawn("bun", ["run", "index.ts"])
+  const worker = MarsTestNativeWorker.instances[0]
+  await processHandle.write("stdin payload")
+  await waitForMarsTestNativeWorkerMessages(worker, 2)
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(worker.messages[1]).toEqual({
+    type: "process.worker.stdin",
+    id: "process-worker-1",
+    chunk: new TextEncoder().encode("stdin payload"),
+  })
+  expect(stdout).toBe("stdout:stdin payload")
+  expect(stderr).toBe("stderr:stdin payload")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
+test("Phase 3 configured Process Worker spawn forwards initial stdin", async () => {
+  MarsTestNativeWorker.instances.length = 0
+  const runtime = await createMarsRuntime({
+    initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "/mars-process-worker.js",
+      workerOptions: { type: "module" },
+      workerConstructor: MarsTestNativeWorker,
+    }),
+  })
+
+  const processHandle = await runtime.spawn("bun", ["run", "index.ts"], {
+    stdin: "initial stdin payload",
+  })
+  const worker = MarsTestNativeWorker.instances[0]
+  await waitForMarsTestNativeWorkerMessages(worker, 2)
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(worker.messages[1]).toEqual({
+    type: "process.worker.stdin",
+    id: "process-worker-1",
+    chunk: new TextEncoder().encode("initial stdin payload"),
+  })
+  expect(stdout).toBe("stdout:initial stdin payload")
+  expect(stderr).toBe("stderr:initial stdin payload")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
+test("Phase 3 configured Process Worker spawn forwards initial stdin stream", async () => {
+  MarsTestNativeWorker.instances.length = 0
+  const runtime = await createMarsRuntime({
+    initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "/mars-process-worker.js",
+      workerOptions: { type: "module" },
+      workerConstructor: MarsTestNativeWorker,
+    }),
+  })
+  const encoder = new TextEncoder()
+  const stdin = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode("stream stdin payload"))
+      controller.close()
+    },
+  })
+
+  const processHandle = await runtime.spawn("bun", ["run", "index.ts"], { stdin })
+  const worker = MarsTestNativeWorker.instances[0]
+  await waitForMarsTestNativeWorkerMessages(worker, 2)
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(worker.messages[1]).toEqual({
+    type: "process.worker.stdin",
+    id: "process-worker-1",
+    chunk: encoder.encode("stream stdin payload"),
+  })
+  expect(stdout).toBe("stdout:stream stdin payload")
+  expect(stderr).toBe("stderr:stream stdin payload")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
+test("Phase 3 configured Process Worker spawn closes initial stdin stream", async () => {
+  MarsTestNativeWorker.instances.length = 0
+  const runtime = await createMarsRuntime({
+    initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "/mars-process-worker.js",
+      workerOptions: { type: "module" },
+      workerConstructor: MarsTestNativeWorker,
+    }),
+  })
+  const encoder = new TextEncoder()
+  const stdin = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode("stream stdin close payload"))
+      controller.close()
+    },
+  })
+
+  const processHandle = await runtime.spawn("bun", ["run", "index.ts"], { stdin })
+  const worker = MarsTestNativeWorker.instances[0]
+  await waitForMarsTestNativeWorkerMessages(worker, 3)
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(worker.messages[1]).toEqual({
+    type: "process.worker.stdin",
+    id: "process-worker-1",
+    chunk: encoder.encode("stream stdin close payload"),
+  })
+  expect(worker.messages[2]).toEqual({
+    type: "process.worker.stdin.close",
+    id: "process-worker-1",
+  })
+  expect(stdout).toBe("stdout:stream stdin close payload")
+  expect(stderr).toBe("stderr:stream stdin close payload")
   expect(exitCode).toBe(0)
 
   await runtime.dispose()
@@ -1733,6 +2163,16 @@ test("Phase 3 CryptoHasher digests common algorithms", async () => {
   await runtime.dispose()
 })
 
+test("Phase 3 CryptoHasher supports digest encodings", async () => {
+  const sha256 = new MarsCryptoHasher("sha256")
+  sha256.update("hello")
+  const sha1Buffer = await createHashDigest("sha1", "hello", "buffer")
+
+  expect(await sha256.digest("base64url")).toBe("LPJNul-wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ")
+  expect(sha1Buffer instanceof Uint8Array).toBe(true)
+  expect((sha1Buffer as Uint8Array).byteLength).toBe(20)
+})
+
 test("Phase 3 node crypto subset covers random, createHash and createHmac", async () => {
   expect(randomBytes(16).byteLength).toBe(16)
   expect(/^[0-9a-f-]{36}$/.test(randomUUID())).toBe(true)
@@ -1742,6 +2182,9 @@ test("Phase 3 node crypto subset covers random, createHash and createHmac", asyn
   expect(await createHash("md5").update("hello").digest()).toBe("5d41402abc4b2a76b9719d911017c592")
   expect(await createHmac("sha256", "mars-key").update("hel").update("lo").digest()).toBe(
     "d1249e55d8f24838cfa2a9bb3fc5950d9002e92d08c142ffdbbd4e251e05c3fd",
+  )
+  expect(await createHmac("sha256", "mars-key").update("hello").digest("base64")).toBe(
+    "0SSeVdjySDjPoqm7P8WVDZAC6S0IwUL/271OJR4Fw/0=",
   )
 })
 
@@ -1757,6 +2200,25 @@ test("Phase 3 Bun.password hashes and verifies through WebCrypto", async () => {
   expect(await runtime.bun.password.verify("mars-secret", hash)).toBe(true)
   expect(await runtime.bun.password.verify("wrong-secret", hash)).toBe(false)
   expect(await marsPassword.verify("mars-secret", hash)).toBe(true)
+
+  const costHash = await runtime.bun.password.hash("mars-secret", {
+    cost: 10,
+    salt,
+  })
+
+  expect(costHash).toContain("$mars$pbkdf2-sha256$1024$")
+  expect(await runtime.bun.password.verify("mars-secret", costHash)).toBe(true)
+  const invalidCostMessage = await runtime.bun.password.hash("mars-secret", { cost: 0 }).then(
+    () => "resolved",
+    error => error instanceof Error ? error.message : String(error),
+  )
+  const tooLargeCostMessage = await runtime.bun.password.hash("mars-secret", { cost: 18 }).then(
+    () => "resolved",
+    error => error instanceof Error ? error.message : String(error),
+  )
+
+  expect(invalidCostMessage).toBe("Invalid password cost: 0")
+  expect(tooLargeCostMessage).toBe("Invalid password cost: 18")
 
   await runtime.dispose()
 })
@@ -1855,7 +2317,7 @@ test("Phase 3 OPFS persistence adapter stores snapshot bytes with memory fallbac
 
 test("Phase 3 browser capabilities and profiles are described", () => {
   const capabilities = detectMarsCapabilities()
-  const profiles = createBrowserTestProfiles({
+  const profileCapabilities = {
     ...capabilities,
     serviceWorker: true,
     sharedArrayBuffer: false,
@@ -1863,12 +2325,22 @@ test("Phase 3 browser capabilities and profiles are described", () => {
     opfs: false,
     webCrypto: true,
     worker: true,
-  })
+  }
+  const profiles = createBrowserTestProfiles(profileCapabilities)
+  const automationProfiles = createBrowserAutomationProfiles(profileCapabilities)
 
   expect(typeof capabilities.webCrypto).toBe("boolean")
   expect(profiles.find(profile => profile.id === "async-fallback")?.enabled).toBe(true)
   expect(profiles.find(profile => profile.id === "service-worker-modules")?.enabled).toBe(true)
   expect(profiles.find(profile => profile.id === "sab-worker")?.enabled).toBe(false)
+  expect(automationProfiles.map(profile => profile.id)).toEqual([
+    "chromium-sab-service-worker",
+    "chromium-opfs-persistence",
+    "firefox-async-fallback",
+    "firefox-service-worker-modules",
+  ])
+  expect(automationProfiles.find(profile => profile.id === "chromium-sab-service-worker")?.enabled).toBe(false)
+  expect(automationProfiles.find(profile => profile.id === "firefox-service-worker-modules")?.enabled).toBe(true)
 })
 
 test("Phase 3 playground host enables SharedArrayBuffer and ServiceWorker preconditions", async () => {

@@ -144,6 +144,7 @@ function createEsbuildOptions(
     target: "es2022",
     platform: options.target === "node" ? "node" : "browser",
     define: options.define,
+    minify: options.minify,
     sourcemap: options.sourcemap ? "external" : false,
     jsx: "transform",
     jsxFactory: "__mars_jsx",

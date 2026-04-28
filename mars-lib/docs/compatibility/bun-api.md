@@ -24,13 +24,13 @@
 | `node:http` | partial | M1 | 覆盖 `createServer()`、`listen()`、`listen(0)`、`address()`、`close()`、IncomingMessage 请求元数据/body 访问和 ServerResponse `writeHead()`/`write()`/`end()`；Express app/router/middleware 与 Koa async middleware playground 已接入。`node:http` 直接注册 MarsKernel 虚拟端口，不基于 `Bun.serve()` 包装；二者共享 port table 与 dispatch 路径。streaming 与 upgrade 完整兼容待补。 | Phase 1 node:http 验收 |
 | `MarsRuntime.run` | partial | M2 | 支持 TS/TSX entry 经 resolver、`@swc/wasm-web` transpiler 和 loader 执行，并将 console stdout/stderr 映射到 ProcessHandle streams；完整 worker 进程隔离待补。 | Phase 2 runtime.run 验收 |
 | `bun install` | partial | M2 | Shell 命令 `bun install` 已能从 MarsVFS `package.json` 读取 dependencies/devDependencies/optionalDependencies/peerDependencies/workspaces，并通过 MarsInstaller 写入 `node_modules`、`mars-lock.json` 和结构化 `bun.lock`（`lockfileVersion/configVersion/workspaces/packages`，含 root workspace name，`packages` 为 tuple-style entries，固定包含 specifier/source/metadata object 段位，并可带 resolved/workspace metadata；package metadata 中的依赖字段写入最终解析版本，且保持 deterministic ordering）；当 root 依赖声明匹配时，可优先从 `bun.lock`/`mars-lock.json` 回放锁定版本安装。cache miss 时可通过注入的 registry client 拉取 package metadata 与 tarball bytes，并支持 optionalDependencies 跳过语义、peerDependencies 自动安装与 range 冲突检测、optional peer 跳过、本地 workspace package 发现、`workspace:` 协议、`node_modules` workspace symlink、package/root `preinstall`/`install`/`postinstall` lifecycle scripts、`npm_lifecycle_*` / `npm_command` / `npm_package_json` / `npm_config_{global,local_prefix,prefix,user_agent}` / 扁平化 `npm_package_*` env、package `bin` 元数据、`node_modules/.bin` shim、lifecycle `PATH` 注入和 shebang JS binary 执行、基础 npm `.tgz`/PAX 解包到 package files、PAX path/linkpath、tar symlink、路径逃逸过滤、常见 semver range 最高满足版本选择、hyphen ranges、partial comparators、partial caret/tilde、comma comparator sets、spaced comparator tokens、OR-combined prerelease gating、v-prefixed exact/partial versions、prerelease opt-in 语义与 build metadata 解析；完整 Bun lockfile parity（文本格式细节）和剩余高级 npm semver 边缘语法待补。当前 Express/Koa playground 使用内置 app 形态 fixture，不依赖真实 npm `express`/`koa` 包。 | Phase 2 shell bun install / registry fetch / optionalDependencies / peerDependencies / workspace symlink / lifecycle env / package JS bins / tgz extract / PAX / tar symlink / semver range 验收 |
-| `Bun.build` | partial | M3 | 支持单/多 entry 经 `esbuild-wasm` transform 后输出到 MarsVFS，并可在 `sourcemap: true` 时写出 `.js.map` artifact；完整依赖 bundling、splitting、plugin pipeline 待补。 | Phase 3 Bun.build 验收 |
-| `bun run` | partial | M3 | `MarsShell` 已能将 `bun run <entry>` 分发到当前内存态 Kernel pid 与 `runEntryScript` 路径；Process Worker 隔离和真实 ServiceWorker 模块拦截待补。 | Phase 3 bun run 验收 |
-| `Bun.spawn` | partial | M3 | `Bun.spawn({ cmd })` 与 `runtime.spawn()` 已能执行 `bun run <entry>`，并可执行通用 shell 命令（如 `echo`）；命令输出和退出码会回灌到当前内存态 Kernel ProcessHandle。Process Worker 隔离与 streaming stdin backpressure 语义待补。 | Phase 3 Bun.spawn 验收 |
+| `Bun.build` | partial | M3 | 支持单/多 entry 经 `esbuild-wasm` transform 后输出到 MarsVFS，支持 `minify: true`，并可在 `sourcemap: true` 时写出 `.js.map` artifact；完整依赖 bundling、splitting、plugin pipeline 待补。 | Phase 3 Bun.build 验收 |
+| `bun run` | partial | M3 | `MarsShell` 与 `runtime.spawn()` 均可将 `bun run <entry>` 分发到当前内存态 Kernel pid fallback；配置 native-capable Process Worker factory 时，两者也可把 `bun run` 路由到 Process Worker，并将 stdout/stderr/exit 回灌到 Kernel ProcessHandle；真实 ServiceWorker 模块拦截待补。 | Phase 3 bun run 验收 |
+| `Bun.spawn` | partial | M3 | `Bun.spawn({ cmd })` 与 `runtime.spawn()` 已能执行 `bun run <entry>`，并可执行通用 shell 命令（如 `echo`）；未配置 worker factory 时继续使用内存态 Kernel fallback，配置 native-capable Process Worker factory 时 `Bun.spawn` / `runtime.spawn` 的 `bun run` 可走 Process Worker，且 `ProcessHandle.write()`、初始 string `stdin` 与初始 `ReadableStream` stdin 会转发为 `process.worker.stdin`，初始 stdin stream 结束会转发为 `process.worker.stdin.close`。完整 streaming backpressure 语义待补。 | Phase 3 Bun.spawn 验收 |
 | `Bun.spawnSync` | partial | M3 | 已提供 capability-aware fallback：无 SharedArrayBuffer/Atomics.wait 时返回明确 requirement 错误；SAB 可用但未接入同步执行器时返回明确 not-wired 错误。SAB 真同步执行路径待补。 | Phase 3 spawnSync fallback 验收 |
-| `Bun.CryptoHasher` | partial | M3 | 基于 WebCrypto 覆盖 sha1/sha256/sha512 async digest，并提供 Mars md5 fallback；Bun 同步 digest 兼容待补。 | Phase 3 CryptoHasher 验收 |
-| `Bun.password` | partial | M3 | 基于 WebCrypto PBKDF2-SHA256 覆盖 hash/verify fallback；Bun bcrypt/argon2 兼容待补。 | Phase 3 Bun.password 验收 |
-| `node:crypto` | partial | M3 | 覆盖 randomUUID、randomBytes、sha/md5 async createHash digest 与 async createHmac digest；完整 Node 同步 Hash/Hmac 语义待补。 | Phase 3 node:crypto 验收 |
+| `Bun.CryptoHasher` | partial | M3 | 基于 WebCrypto 覆盖 sha1/sha256/sha512 async digest，提供 Mars md5 fallback，并覆盖 hex/base64/base64url/buffer 输出编码；Bun 同步 digest 兼容待补。 | Phase 3 CryptoHasher 验收 |
+| `Bun.password` | partial | M3 | 基于 WebCrypto PBKDF2-SHA256 覆盖 hash/verify fallback，支持显式 iterations 与 cost-to-iterations 映射；Bun bcrypt/argon2 兼容待补。 | Phase 3 Bun.password 验收 |
+| `node:crypto` | partial | M3 | 覆盖 randomUUID、randomBytes、sha/md5 async createHash digest、async createHmac digest 与常见 digest encoding；完整 Node 同步 Hash/Hmac 语义待补。 | Phase 3 node:crypto 验收 |
 | `Bun.sql` | partial | M3 | 基于 `sql.js`（sqlite WASM）覆盖 create/insert/select/count/update/delete、tagged query 与 BEGIN/COMMIT/ROLLBACK 事务语义，并将数据库二进制持久化到 MarsVFS。 | Phase 3 Bun.sql 验收 |
 
 ## 当前执行拓扑
@@ -52,7 +52,7 @@
 2. `MarsRuntime.boot()` 启动内存态 Kernel，并把 `Bun` / `process` 安装到当前 `globalThis`
 3. `MarsRuntime.run(entry)` 通过 Kernel 创建虚拟 pid，再调用 `runEntryScript()` 读取、转译并执行 entry
 4. `MarsShell` 已注册 `bun` 命令，`bun run index.ts` 会进入同一条 Kernel pid、SWC WASM transpiler、loader/evaluator 和 stdio bridge 路径
-5. `runtime.spawn("bun", ["run", "index.ts"])` 和 `Bun.spawn({ cmd: ["bun", "run", "index.ts"] })` 已复用上述脚本执行路径
+5. `MarsShell`、`runtime.spawn("bun", ["run", "index.ts"])` 和 `Bun.spawn({ cmd: ["bun", "run", "index.ts"] })` 默认复用上述脚本执行路径；当 `MarsRuntime` 配置 native-capable Process Worker factory 时，`bun run` 会创建 Process Worker，并把 worker stdout/stderr/exit 映射回 Kernel ProcessHandle
 6. Kernel `ProcessHandle` 已有 stdin readable、stdout/stderr readable 和可选 WritableStream mirror，`write()` 可向 stdin 写入
 7. `createMarsProcessWorkerFactory()` 已有受控 worker boot/message/terminate 生命周期；无 worker URL 时走 in-memory fallback，有 worker URL 时可通过 `new Worker()` 承载并使用 `process.worker.boot/message/stdin/stdout/stderr/exit/terminate` 协议
 8. `runtime.fetch(previewUrl)` 手动进入 `ServiceWorkerRouter`，再按虚拟端口转发到 Kernel port table
@@ -112,20 +112,20 @@
 4. `target`
 5. `define`
 6. `sourcemap: true` 透传给 esbuild transform，并写出外部 `.js.map` artifact
-7. 输出目录自动创建
-8. 输出 artifact 的 `text()` / `arrayBuffer()`
-9. 通过统一 playground fixture 构建 `playground/vite-react-ts/src/App.tsx`
-10. 通过 `@mars/shared` 管理 `esbuild-wasm` 初始化，浏览器构建使用 wasm asset URL
+7. `minify: true` 透传给 esbuild transform
+8. 输出目录自动创建
+9. 输出 artifact 的 `text()` / `arrayBuffer()`
+10. 通过统一 playground fixture 构建 `playground/vite-react-ts/src/App.tsx`
+11. 通过 `@mars/shared` 管理 `esbuild-wasm` 初始化，浏览器构建使用 wasm asset URL
 
 暂未支持:
 
 1. 依赖图打包与代码合并
 2. code splitting
 3. tree shaking
-4. minify
-5. external
-6. loader map
-7. 插件 pipeline
+4. external
+5. loader map
+6. 插件 pipeline
 8. CSS / asset 输出
 
 ## 当前 crypto 范围
@@ -137,13 +137,13 @@
 3. `update(string | ArrayBuffer | ArrayBufferView)`
 4. `digest("hex" | "base64" | "base64url" | "buffer")`，当前为 async WebCrypto-backed API
 5. `node:crypto` 子集: `randomUUID()`、`randomBytes(size)`、`createHash(algorithm).update(input).digest(encoding)`、`createHmac(algorithm, key).update(input).digest(encoding)`
-6. `Bun.password.hash()` / `verify()` 的 WebCrypto PBKDF2-SHA256 fallback
+6. `Bun.password.hash()` / `verify()` 的 WebCrypto PBKDF2-SHA256 fallback，包含显式 iterations 和 cost-to-iterations 映射
 
 暂未支持:
 
 1. Bun/Node 完全同步的 Hash digest 语义
 2. 同步 HMAC、sign/verify、cipher、key object、secure heap 等完整 `node:crypto` API
-3. Bun `Bun.password` 的 bcrypt/argon2 格式兼容与 cost 参数完整映射
+3. Bun `Bun.password` 的 bcrypt/argon2 格式兼容与精确 cost 语义
 
 ## 当前 sqlite 范围
 
@@ -188,4 +188,5 @@
 
 1. `detectMarsCapabilities()` 检测 ServiceWorker、SharedArrayBuffer、Atomics.wait、OPFS、WebCrypto、Worker
 2. `createBrowserTestProfiles()` 生成 async fallback、SAB worker、OPFS persistence、ServiceWorker module profile
-3. 当前 Phase 3 测试覆盖 profile 生成逻辑，不假设本机浏览器能力固定开启
+3. `createBrowserAutomationProfiles()` 生成 Chromium/Firefox 自动化矩阵: Chromium SAB+SW、Chromium OPFS、Firefox async fallback、Firefox SW modules
+4. 当前 Phase 3 测试覆盖 profile 与自动化矩阵生成逻辑，不假设本机浏览器能力固定开启
