@@ -33,8 +33,15 @@ export class MarsKernel implements MarsKernelInterface {
       record.server.stop?.(true)
     }
 
+    for (const [pid, handle] of this.#handles.entries()) {
+      handle.close()
+      this.#resolveExit(pid, 0)
+    }
+
     this.#portTable.clear()
     this.#processTable.clear()
+    this.#handles.clear()
+    this.#exitResolvers.clear()
     this.#booted = false
   }
 

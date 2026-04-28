@@ -29,12 +29,21 @@ export interface MarsSQLRunResult {
   changes: number
 }
 
+export interface MarsSQLPreparedStatement<T extends MarsSQLRow = MarsSQLRow> {
+  readonly sql: string
+  all(params?: readonly MarsSQLValue[]): Promise<T[]>
+  get(params?: readonly MarsSQLValue[]): Promise<T | null>
+  run(params?: readonly MarsSQLValue[]): Promise<MarsSQLRunResult>
+  finalize(): Promise<void>
+}
+
 export interface MarsSQLDatabase {
   readonly path: string
   exec(sql: string, params?: readonly MarsSQLValue[]): Promise<MarsSQLRunResult>
   run(sql: string, params?: readonly MarsSQLValue[]): Promise<MarsSQLRunResult>
   all<T extends MarsSQLRow = MarsSQLRow>(sql: string, params?: readonly MarsSQLValue[]): Promise<T[]>
   get<T extends MarsSQLRow = MarsSQLRow>(sql: string, params?: readonly MarsSQLValue[]): Promise<T | null>
+  prepare<T extends MarsSQLRow = MarsSQLRow>(sql: string): MarsSQLPreparedStatement<T>
   close(): Promise<void>
 }
 
@@ -92,6 +101,10 @@ class LazyWasmMarsSQLiteDatabase implements MarsSQLDatabase {
 
   async get<T extends MarsSQLRow = MarsSQLRow>(sql: string, params: readonly MarsSQLValue[] = []): Promise<T | null> {
     return (await this.#resolveBackend()).get<T>(sql, params)
+  }
+
+  prepare<T extends MarsSQLRow = MarsSQLRow>(sql: string): MarsSQLPreparedStatement<T> {
+    return new LazyPreparedStatement<T>(this, sql)
   }
 
   async close(): Promise<void> {
@@ -162,6 +175,10 @@ class WasmMarsSQLiteDatabase implements MarsSQLDatabase {
 
   async get<T extends MarsSQLRow = MarsSQLRow>(sql: string, params: readonly MarsSQLValue[] = []): Promise<T | null> {
     return (await this.all<T>(sql, params))[0] ?? null
+  }
+
+  prepare<T extends MarsSQLRow = MarsSQLRow>(sql: string): MarsSQLPreparedStatement<T> {
+    return new LazyPreparedStatement<T>(this, sql)
   }
 
   async close(): Promise<void> {
@@ -272,4 +289,38 @@ function templateToSQL(strings: TemplateStringsArray): string {
 
 function splitStatements(sql: string): string[] {
   return sql.split(";").map(statement => statement.trim()).filter(Boolean)
+}
+
+class LazyPreparedStatement<T extends MarsSQLRow = MarsSQLRow> implements MarsSQLPreparedStatement<T> {
+  readonly sql: string
+  readonly #db: MarsSQLDatabase
+  #finalized = false
+
+  constructor(db: MarsSQLDatabase, sql: string) {
+    this.#db = db
+    this.sql = sql
+  }
+
+  async all(params: readonly MarsSQLValue[] = []): Promise<T[]> {
+    this.#assertNotFinalized()
+    return this.#db.all<T>(this.sql, params)
+  }
+
+  async get(params: readonly MarsSQLValue[] = []): Promise<T | null> {
+    this.#assertNotFinalized()
+    return this.#db.get<T>(this.sql, params)
+  }
+
+  async run(params: readonly MarsSQLValue[] = []): Promise<MarsSQLRunResult> {
+    this.#assertNotFinalized()
+    return this.#db.exec(this.sql, params)
+  }
+
+  async finalize(): Promise<void> {
+    this.#finalized = true
+  }
+
+  #assertNotFinalized(): void {
+    if (this.#finalized) throw new Error(`Prepared statement has been finalized: ${this.sql}`)
+  }
 }

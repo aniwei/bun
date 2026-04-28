@@ -1,4 +1,4 @@
-export type MarsHashAlgorithm = "md5" | "sha1" | "sha256" | "sha512"
+export type MarsHashAlgorithm = "md5" | "sha1" | "sha256" | "sha384" | "sha512"
 export type MarsHashDigestEncoding = "hex" | "base64" | "base64url" | "buffer"
 export type MarsHashInput = string | ArrayBuffer | ArrayBufferView
 
@@ -19,6 +19,33 @@ export class MarsCryptoHasher {
     const bytes = concatBytes(this.#chunks)
     return digestBytes(this.algorithm, bytes, encoding)
   }
+
+  digestSync(encoding: MarsHashDigestEncoding = "hex"): string | Uint8Array {
+    if (this.algorithm !== "md5") {
+      throw new Error(
+        `MarsCryptoHasher.digestSync() is only available for md5 in browser environments. Use await hasher.digest() for ${this.algorithm}.`,
+      )
+    }
+
+    const bytes = concatBytes(this.#chunks)
+    const output = digestMD5(bytes)
+
+    if (encoding === "buffer") return output
+    if (encoding === "hex") return toHex(output)
+    if (encoding === "base64") return toBase64(output)
+    if (encoding === "base64url") return toBase64(output).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")
+
+    return output
+  }
+
+  copy(): MarsCryptoHasher {
+    const clone = new MarsCryptoHasher(this.algorithm)
+    for (const chunk of this.#chunks) {
+      clone.update(chunk.slice())
+    }
+
+    return clone
+  }
 }
 
 export async function createHashDigest(
@@ -35,6 +62,7 @@ export function normalizeHashAlgorithmName(algorithm: string): MarsHashAlgorithm
   if (normalized === "md5") return "md5"
   if (normalized === "sha1") return "sha1"
   if (normalized === "sha256") return "sha256"
+  if (normalized === "sha384") return "sha384"
   if (normalized === "sha512") return "sha512"
 
   throw new Error(`Unsupported hash algorithm: ${algorithm}`)
@@ -62,6 +90,7 @@ async function digestBytes(
 function toWebCryptoAlgorithm(algorithm: MarsHashAlgorithm): AlgorithmIdentifier {
   if (algorithm === "sha1") return "SHA-1"
   if (algorithm === "sha256") return "SHA-256"
+  if (algorithm === "sha384") return "SHA-384"
   if (algorithm === "sha512") return "SHA-512"
 
   throw new Error(`Unsupported WebCrypto hash algorithm: ${algorithm}`)

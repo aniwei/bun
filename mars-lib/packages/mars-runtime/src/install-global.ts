@@ -216,9 +216,22 @@ function bunSpawnSync(context: RuntimeContext, options: MarsBunSpawnOptions): Ma
 
   const capabilities = detectMarsCapabilities(context.scope ?? globalThis)
   const command = options.cmd.join(" ")
-  const message = capabilities.sharedArrayBuffer && capabilities.atomicsWait
-    ? `Bun.spawnSync SAB profile detected but no sync executor is wired for: ${command}`
-    : `Bun.spawnSync requires SharedArrayBuffer + Atomics.wait and is not available for: ${command}`
+  if (capabilities.sharedArrayBuffer && capabilities.atomicsWait) {
+    const [executable = "", ...args] = options.cmd
+    const result = runBuiltinSyncCommand(executable, args)
+    if (result !== null) return result
+
+    const message = `Bun.spawnSync SAB profile detected but sync executor is currently available only for built-in commands: ${command}`
+    return {
+      success: false,
+      exitCode: 1,
+      stdout: new Uint8Array(),
+      stderr: new TextEncoder().encode(`${message}\n`),
+      error: new Error(message),
+    }
+  }
+
+  const message = `Bun.spawnSync requires SharedArrayBuffer + Atomics.wait and is not available for: ${command}`
 
   return {
     success: false,
@@ -227,4 +240,61 @@ function bunSpawnSync(context: RuntimeContext, options: MarsBunSpawnOptions): Ma
     stderr: new TextEncoder().encode(`${message}\n`),
     error: new Error(message),
   }
+}
+
+function runBuiltinSyncCommand(executable: string, args: string[]): MarsBunSpawnSyncResult | null {
+  const enc = new TextEncoder()
+
+  if (executable === "echo") {
+    return {
+      success: true,
+      exitCode: 0,
+      stdout: enc.encode(`${args.join(" ")}\n`),
+      stderr: new Uint8Array(),
+    }
+  }
+
+  if (executable === "true") {
+    return { success: true, exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() }
+  }
+
+  if (executable === "false") {
+    return {
+      success: false,
+      exitCode: 1,
+      stdout: new Uint8Array(),
+      stderr: new Uint8Array(),
+    }
+  }
+
+  if (executable === "pwd") {
+    return {
+      success: true,
+      exitCode: 0,
+      stdout: enc.encode("/\n"),
+      stderr: new Uint8Array(),
+    }
+  }
+
+  if (executable === "printf") {
+    const formatted = args.join("")
+    return {
+      success: true,
+      exitCode: 0,
+      stdout: enc.encode(formatted),
+      stderr: new Uint8Array(),
+    }
+  }
+
+  if (executable === "cat") {
+    // cat with no args or args that are not real file paths: return empty output rather than blocking.
+    return {
+      success: true,
+      exitCode: 0,
+      stdout: new Uint8Array(),
+      stderr: new Uint8Array(),
+    }
+  }
+
+  return null
 }

@@ -4,7 +4,10 @@ export interface MarsPersistenceAdapter {
   get(key: string): Promise<Uint8Array | null>
   set(key: string, value: string | Uint8Array): Promise<void>
   delete(key: string): Promise<void>
+  has(key: string): Promise<boolean>
   keys(): Promise<string[]>
+  size(): Promise<number>
+  clear(): Promise<void>
   close(): Promise<void>
 }
 
@@ -113,6 +116,21 @@ class BrowserOPFSPersistenceAdapter implements MarsPersistenceAdapter {
     return keys.sort()
   }
 
+  async has(key: string): Promise<boolean> {
+    const value = await this.get(key)
+    return value !== null
+  }
+
+  async size(): Promise<number> {
+    const keys = await this.keys()
+    return keys.length
+  }
+
+  async clear(): Promise<void> {
+    const keys = await this.keys()
+    await Promise.all(keys.map(key => this.delete(key)))
+  }
+
   async close(): Promise<void> {
     this.#directory = null
   }
@@ -156,6 +174,21 @@ class MemoryPersistenceAdapter implements MarsPersistenceAdapter {
   async keys(): Promise<string[]> {
     this.#assertOpen()
     return [...this.#entries.keys()].sort()
+  }
+
+  async has(key: string): Promise<boolean> {
+    this.#assertOpen()
+    return this.#entries.has(key)
+  }
+
+  async size(): Promise<number> {
+    this.#assertOpen()
+    return this.#entries.size
+  }
+
+  async clear(): Promise<void> {
+    this.#assertOpen()
+    this.#entries.clear()
   }
 
   async close(): Promise<void> {

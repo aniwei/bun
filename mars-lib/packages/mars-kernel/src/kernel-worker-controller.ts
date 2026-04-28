@@ -63,6 +63,7 @@ interface ManagedProcessWorker {
   pid: number
   controller: MarsProcessWorkerController
   reader: ReadableStreamDefaultReader<unknown>
+  stdinDone?: Promise<void>
   stdoutDone?: Promise<void>
   stderrDone?: Promise<void>
 }
@@ -183,6 +184,7 @@ class DefaultKernelWorkerController implements KernelWorkerController {
       onMessage: message => ({ echoed: message }),
     })
     const reader = controller.messages.getReader()
+    const stdinDone = this.#pipeWorkerInput(processHandle.stdin, controller)
     const stdoutDone = this.#pipeWorkerOutput(processHandle.pid, 1, controller.stdout)
     const stderrDone = this.#pipeWorkerOutput(processHandle.pid, 2, controller.stderr)
 
@@ -190,12 +192,16 @@ class DefaultKernelWorkerController implements KernelWorkerController {
       pid: processHandle.pid,
       controller,
       reader,
+      stdinDone,
       stdoutDone,
       stderrDone,
     })
     await controller.boot()
     const bootEvent = await reader.read()
 
+    void processHandle.exited.finally(() => {
+      void Promise.allSettled([stdinDone]).finally(() => controller.terminate().catch(() => {}))
+    })
     void this.#monitorProcessWorker(processHandle.pid, controller.id, reader, stdoutDone, stderrDone)
 
     return {
@@ -204,6 +210,29 @@ class DefaultKernelWorkerController implements KernelWorkerController {
       workerId: controller.id,
       status: controller.status(),
       event: bootEvent.value,
+    }
+  }
+
+  async #pipeWorkerInput(
+    stream: ReadableStream<Uint8Array>,
+    controller: MarsProcessWorkerController,
+  ): Promise<void> {
+    const reader = stream.getReader()
+
+    try {
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) {
+          await controller.closeStdin()
+          return
+        }
+
+        await controller.write(chunk.value)
+      }
+    } catch {
+      // The worker may exit while stdin is still being drained.
+    } finally {
+      reader.releaseLock()
     }
   }
 

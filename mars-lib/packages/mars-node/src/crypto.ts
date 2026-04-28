@@ -109,6 +109,100 @@ function toBytes(input: MarsHashInput): Uint8Array {
   return new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
 }
 
+const supportedHashAlgorithms = ["sha1", "sha256", "sha384", "sha512", "md5"] as const
+
+export function getHashes(): string[] {
+  return [...supportedHashAlgorithms]
+}
+
+export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false
+
+  let result = 0
+
+  for (let index = 0; index < a.byteLength; index += 1) {
+    result |= a[index] ^ b[index]
+  }
+
+  return result === 0
+}
+
+export interface Pbkdf2Options {
+  hash?: string
+}
+
+export function pbkdf2(
+  password: MarsHashInput,
+  salt: MarsHashInput,
+  iterations: number,
+  keylen: number,
+  digest: string,
+  callback: (err: Error | null, derivedKey: Uint8Array | null) => void,
+): void {
+  pbkdf2Async(password, salt, iterations, keylen, digest)
+    .then(key => callback(null, key))
+    .catch(err => callback(err instanceof Error ? err : new Error(String(err)), null))
+}
+
+export async function pbkdf2Async(
+  password: MarsHashInput,
+  salt: MarsHashInput,
+  iterations: number,
+  keylen: number,
+  digest: string,
+): Promise<Uint8Array> {
+  const normalizedDigest = normalizeWebCryptoDigest(digest)
+  const passwordBytes = toBytes(password)
+  const saltBytes = toBytes(salt)
+  const key = await crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(passwordBytes),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  )
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: normalizedDigest,
+      salt: toArrayBuffer(saltBytes),
+      iterations,
+    },
+    key,
+    keylen * 8,
+  )
+
+  return new Uint8Array(derivedBits)
+}
+
+export function pbkdf2Sync(): never {
+  throw new Error("pbkdf2Sync is not available in browser context; use pbkdf2 or pbkdf2Async instead")
+}
+
+export function scrypt(): never {
+  throw new Error("scrypt is not available in browser context; use pbkdf2Async instead")
+}
+
+export function scryptSync(): never {
+  throw new Error("scryptSync is not available in browser context; use pbkdf2Async instead")
+}
+
+function normalizeWebCryptoDigest(digest: string): string {
+  const lower = digest.toLowerCase().replace(/-/g, "")
+  if (lower === "sha1") return "SHA-1"
+  if (lower === "sha256") return "SHA-256"
+  if (lower === "sha384") return "SHA-384"
+  if (lower === "sha512") return "SHA-512"
+
+  return digest.toUpperCase()
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const arrayBuffer = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(arrayBuffer).set(bytes)
+  return arrayBuffer
+}
+
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
   const totalLength = chunks.reduce((length, chunk) => length + chunk.byteLength, 0)
   const bytes = new Uint8Array(totalLength)

@@ -76,6 +76,7 @@ import {
 } from "../core-modules/runtime/playground-host"
 import {
   serviceWorkerScopeSmokeEntry,
+  serviceWorkerScopeSmokeFetchMode,
   serviceWorkerScopeSmokePatchedMessage,
   serviceWorkerScopeSmokePatchMode,
   serviceWorkerScopeSmokeScope,
@@ -1716,9 +1717,11 @@ async function runServiceWorkerScopeSmokeCase(): Promise<PlaygroundRunResult> {
     )
     await runtime.flushServiceWorkerVFS()
 
+    const moduleRequestUrl = `${globalThis.location.origin}${moduleUrlFromPath(serviceWorkerScopeSmokeEntry)}`
+
     const response = await serviceWorker.endpoint.request(
       "sw.fetch",
-      { url: `${globalThis.location.origin}${moduleUrlFromPath(serviceWorkerScopeSmokeEntry)}` },
+      { url: moduleRequestUrl },
       { target: "sw" },
     ) as { status: number; headers: Record<string, string>; body: string }
 
@@ -1730,9 +1733,19 @@ async function runServiceWorkerScopeSmokeCase(): Promise<PlaygroundRunResult> {
       return fail("phase3-service-worker-scope-smoke", response.body)
     }
 
+    const nativeResponse = await fetch(moduleRequestUrl)
+    const nativeBody = await nativeResponse.text()
+
+    if (nativeResponse.status !== 200) {
+      return fail("phase3-service-worker-scope-smoke", `native-status=${nativeResponse.status}`)
+    }
+    if (!nativeBody.includes(serviceWorkerScopeSmokePatchedMessage)) {
+      return fail("phase3-service-worker-scope-smoke", nativeBody)
+    }
+
     return pass(
       "phase3-service-worker-scope-smoke",
-      `module=${response.headers["x-mars-module-path"]} mode=auto-${serviceWorkerScopeSmokePatchMode} fixture=${runtimeServiceWorkerScopeSmokeSource.length}`,
+      `module=${response.headers["x-mars-module-path"]} mode=auto-${serviceWorkerScopeSmokePatchMode} fetch=${serviceWorkerScopeSmokeFetchMode} fixture=${runtimeServiceWorkerScopeSmokeSource.length}`,
     )
   } finally {
     await runtime.dispose()

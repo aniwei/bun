@@ -6,12 +6,12 @@ import { createMarsRuntime } from "@mars/client"
 import { MarsCryptoHasher, createHashDigest, marsPassword } from "@mars/crypto"
 import { connectMarsKernelWorker, createKernelWorkerController, createMarsKernel, createMarsProcessWorkerFactory, detectMarsCapabilities, installKernelWorkerBootstrap, supportsKernelWorkerClient } from "@mars/kernel"
 import type { KernelWorkerMessageEvent, ProcessHandle, WorkerLike } from "@mars/kernel"
-import { createHash, createHmac, randomBytes, randomUUID } from "@mars/node"
+import { createHash, createHmac, getHashes, pbkdf2Async, randomBytes, randomUUID, timingSafeEqual } from "@mars/node"
 import { createMarsBun, createProcessWorkerBootstrapBlobURL, createProcessWorkerBootstrapScript, getBunApiCompat, installProcessWorkerRuntimeBootstrap } from "@mars/runtime"
 import { createWebSocketPair, upgradeToWebSocket } from "@mars/runtime"
 import { classifyRequest, createBridgeServiceWorkerKernelClient, createServiceWorkerBridgeController, createServiceWorkerRouter, handleWebSocketRoute, installServiceWorkerBootstrap, installServiceWorkerFetchHandler, moduleUrlFromPath } from "@mars/sw"
 import type { MarsServiceWorkerContainer, MarsServiceWorkerController, MarsServiceWorkerMessageEvent, MarsServiceWorkerRegistration, MarsServiceWorkerRegistrationOptions } from "@mars/sw"
-import { createBrowserAutomationProfiles, createBrowserTestProfiles } from "@mars/test"
+import { createBrowserAutomationProfiles, createBrowserAutomationRunPlan, createBrowserTestProfiles, createBunSpawnBrowserAutomationExecutor, runBrowserAutomationPlan } from "@mars/test"
 import { createMarsVFS, createOPFSPersistenceAdapter, createWriteFilePatch, restoreVFSSnapshot, snapshotVFS } from "@mars/vfs"
 import {
   loadPlaygroundFiles,
@@ -440,12 +440,13 @@ test("Phase 3 compatibility matrix tracks Bun.spawn", () => {
     api: "Bun.spawn",
     status: "partial",
     phase: "M3",
-    notes: "Bun.spawn({ cmd }) and runtime.spawn() can execute bun run <entry> through the current in-memory Kernel pid fallback or a configured native Process Worker factory, can forward ProcessHandle stdin to the worker carrier, close initial stdin streams, and execute generic shell commands through the shell dispatch path; full streaming backpressure parity is pending.",
+    notes: "Bun.spawn({ cmd }) and runtime.spawn() can execute bun run <entry> through the current in-memory Kernel pid fallback or a configured native Process Worker factory, can forward ProcessHandle stdin writes and explicit close to the worker carrier, close initial stdin streams, and execute generic shell commands through the shell dispatch path; full streaming backpressure parity is pending.",
     tests: [
       "Phase 3 Bun.spawn executes bun run index.ts through kernel stdio",
       "Phase 3 runtime.spawn can execute bun run through configured Process Worker",
       "Phase 3 Bun.spawn can execute bun run through configured Process Worker",
       "Phase 3 configured Process Worker spawn forwards ProcessHandle stdin",
+      "Phase 3 configured Process Worker spawn forwards ProcessHandle closeStdin",
       "Phase 3 configured Process Worker spawn forwards initial stdin",
       "Phase 3 configured Process Worker spawn forwards initial stdin stream",
       "Phase 3 configured Process Worker spawn closes initial stdin stream",
@@ -781,8 +782,12 @@ test("Phase 3 ServiceWorker module response serves ESM module graph", async () =
         "entry.ts": [
           "import { message } from './message'",
           "import { packageMessage } from 'mars-sw-package'",
+          "import { exportsPackageMessage } from 'mars-sw-exports-package/subpath'",
+          "import { scopedExportsPackageMessage } from '@mars/sw-scoped-package/feature'",
           "export const entryMessage: string = `entry:${message}`",
           "export const entryPackageMessage: string = `pkg:${packageMessage}`",
+          "export const entryExportsPackageMessage: string = `exports:${exportsPackageMessage}`",
+          "export const entryScopedExportsPackageMessage: string = `scoped:${scopedExportsPackageMessage}`",
           "export async function loadValue() { return (await import('./dynamic')).dynamicMessage }",
         ].join("\n"),
         "message.ts": "export const message: string = 'service-worker-module'",
@@ -791,7 +796,40 @@ test("Phase 3 ServiceWorker module response serves ESM module graph", async () =
       node_modules: {
         "mars-sw-package": {
           "package.json": JSON.stringify({ name: "mars-sw-package", module: "index.ts" }),
-          "index.ts": "export const packageMessage: string = 'bare-package-module'",
+          "index.ts": [
+            "import { nestedPackageMessage } from 'mars-sw-nested-package'",
+            "export const packageMessage: string = `bare-package-module:${nestedPackageMessage}`",
+          ].join("\n"),
+        },
+        "mars-sw-nested-package": {
+          "package.json": JSON.stringify({ name: "mars-sw-nested-package", module: "index.ts" }),
+          "index.ts": "export const nestedPackageMessage: string = 'nested-bare-package-module'",
+        },
+        "mars-sw-exports-package": {
+          "package.json": JSON.stringify({
+            name: "mars-sw-exports-package",
+            exports: {
+              "./subpath": "./subpath.ts",
+            },
+          }),
+          "subpath.ts": [
+            "import { nestedPackageMessage } from 'mars-sw-nested-package'",
+            "export const exportsPackageMessage: string = `exports-subpath:${nestedPackageMessage}`",
+          ].join("\n"),
+        },
+        "@mars": {
+          "sw-scoped-package": {
+            "package.json": JSON.stringify({
+              name: "@mars/sw-scoped-package",
+              exports: {
+                "./feature": "./feature.ts",
+              },
+            }),
+            "feature.ts": [
+              "import { nestedPackageMessage } from 'mars-sw-nested-package'",
+              "export const scopedExportsPackageMessage: string = `scoped-exports-subpath:${nestedPackageMessage}`",
+            ].join("\n"),
+          },
         },
       },
     },
@@ -821,6 +859,8 @@ test("Phase 3 ServiceWorker module response serves ESM module graph", async () =
   const messageUrl = moduleUrls.find(url => url.includes("message.ts"))
   const dynamicUrl = moduleUrls.find(url => url.includes("dynamic.ts"))
   const packageUrl = moduleUrls.find(url => url.includes("node_modules%2Fmars-sw-package%2Findex.ts"))
+  const exportsPackageUrl = moduleUrls.find(url => url.includes("node_modules%2Fmars-sw-exports-package%2Fsubpath.ts"))
+  const scopedExportsPackageUrl = moduleUrls.find(url => url.includes("node_modules%2F%40mars%2Fsw-scoped-package%2Ffeature.ts"))
 
   expect(entryResponse.status).toBe(200)
   expect(entryResponse.headers.get("content-type")).toContain("text/javascript")
@@ -829,9 +869,13 @@ test("Phase 3 ServiceWorker module response serves ESM module graph", async () =
   expect(entryCode).toContain("/__mars__/module?path=%2Fworkspace%2Fsrc%2Fmessage.ts")
   expect(entryCode).toContain("/__mars__/module?path=%2Fworkspace%2Fsrc%2Fdynamic.ts")
   expect(entryCode).toContain("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2Fmars-sw-package%2Findex.ts")
+  expect(entryCode).toContain("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2Fmars-sw-exports-package%2Fsubpath.ts")
+  expect(entryCode).toContain("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2F%40mars%2Fsw-scoped-package%2Ffeature.ts")
   expect(messageUrl).toBe("/__mars__/module?path=%2Fworkspace%2Fsrc%2Fmessage.ts")
   expect(dynamicUrl).toBe("/__mars__/module?path=%2Fworkspace%2Fsrc%2Fdynamic.ts")
   expect(packageUrl).toBe("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2Fmars-sw-package%2Findex.ts")
+  expect(exportsPackageUrl).toBe("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2Fmars-sw-exports-package%2Fsubpath.ts")
+  expect(scopedExportsPackageUrl).toBe("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2F%40mars%2Fsw-scoped-package%2Ffeature.ts")
 
   const messageResponse = await router.fetch(new Request(`https://app.localhost${messageUrl}`))
   const messageCode = await messageResponse.text()
@@ -839,6 +883,8 @@ test("Phase 3 ServiceWorker module response serves ESM module graph", async () =
   const nativeEntryCode = await nativeEntryResponse.text()
   const packageResponse = await router.fetch(new Request(`https://app.localhost${packageUrl}`))
   const packageCode = await packageResponse.text()
+  const packageModuleUrls = JSON.parse(packageResponse.headers.get("x-mars-module-urls") ?? "[]") as string[]
+  const nestedPackageUrl = packageModuleUrls.find(url => url.includes("node_modules%2Fmars-sw-nested-package%2Findex.ts"))
 
   expect(messageResponse.status).toBe(200)
   expect(messageResponse.headers.get("x-mars-module-path")).toBe("/workspace/src/message.ts")
@@ -851,6 +897,27 @@ test("Phase 3 ServiceWorker module response serves ESM module graph", async () =
   expect(packageResponse.status).toBe(200)
   expect(packageResponse.headers.get("x-mars-module-path")).toBe("/workspace/node_modules/mars-sw-package/index.ts")
   expect(packageCode).toContain("export const packageMessage")
+  expect(packageCode).toContain("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2Fmars-sw-nested-package%2Findex.ts")
+  expect(nestedPackageUrl).toBe("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2Fmars-sw-nested-package%2Findex.ts")
+
+  const nestedPackageResponse = await router.fetch(new Request(`https://app.localhost${nestedPackageUrl}`))
+  const nestedPackageCode = await nestedPackageResponse.text()
+  const exportsPackageResponse = await router.fetch(new Request(`https://app.localhost${exportsPackageUrl}`))
+  const exportsPackageCode = await exportsPackageResponse.text()
+  const scopedExportsPackageResponse = await router.fetch(new Request(`https://app.localhost${scopedExportsPackageUrl}`))
+  const scopedExportsPackageCode = await scopedExportsPackageResponse.text()
+
+  expect(nestedPackageResponse.status).toBe(200)
+  expect(nestedPackageResponse.headers.get("x-mars-module-path")).toBe("/workspace/node_modules/mars-sw-nested-package/index.ts")
+  expect(nestedPackageCode).toContain("export const nestedPackageMessage")
+  expect(exportsPackageResponse.status).toBe(200)
+  expect(exportsPackageResponse.headers.get("x-mars-module-path")).toBe("/workspace/node_modules/mars-sw-exports-package/subpath.ts")
+  expect(exportsPackageCode).toContain("export const exportsPackageMessage")
+  expect(exportsPackageCode).toContain("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2Fmars-sw-nested-package%2Findex.ts")
+  expect(scopedExportsPackageResponse.status).toBe(200)
+  expect(scopedExportsPackageResponse.headers.get("x-mars-module-path")).toBe("/workspace/node_modules/@mars/sw-scoped-package/feature.ts")
+  expect(scopedExportsPackageCode).toContain("export const scopedExportsPackageMessage")
+  expect(scopedExportsPackageCode).toContain("/__mars__/module?path=%2Fworkspace%2Fnode_modules%2Fmars-sw-nested-package%2Findex.ts")
 
   await runtime.dispose()
 })
@@ -886,14 +953,46 @@ test("Phase 3 ServiceWorker router falls back to network for Vite host modules",
 
   try {
     const viteClientResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/@vite/client`))
+    const viteEnvResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/@vite/env`))
+    const reactRefreshResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/@react-refresh`))
+    const virtualModuleResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/@id/__x00__virtual:mars-runtime`))
+    const fsPathResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/@fs/Users/aniwei/Desktop/workspaces/bun/mars-lib/playground/src/main.tsx`))
     const hostSourceResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/src/main.tsx?t=1777319900061`))
+    const hostImportResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/src/main.tsx?import`))
+    const hostRawResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/src/main.tsx?raw`))
+    const hostUrlResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/src/main.tsx?url`))
+    const optimizedDependencyResponse = await router.fetch(new Request(`http://127.0.0.1:${server.port}/node_modules/.vite/deps/react.js?v=1777319900061`))
 
     expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/@vite/client`))).toBe("external")
+    expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/@vite/env`))).toBe("external")
+    expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/@react-refresh`))).toBe("external")
+    expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/@id/__x00__virtual:mars-runtime`))).toBe("external")
+    expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/@fs/Users/aniwei/Desktop/workspaces/bun/mars-lib/playground/src/main.tsx`))).toBe("external")
     expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/src/main.tsx?t=1777319900061`))).toBe("module")
+    expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/src/main.tsx?import`))).toBe("module")
+    expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/src/main.tsx?raw`))).toBe("module")
+    expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/src/main.tsx?url`))).toBe("module")
+    expect(classifyRequest(new URL(`http://127.0.0.1:${server.port}/node_modules/.vite/deps/react.js?v=1777319900061`))).toBe("module")
     expect(viteClientResponse.status).toBe(200)
     expect(await viteClientResponse.text()).toBe("network:/@vite/client")
+    expect(viteEnvResponse.status).toBe(200)
+    expect(await viteEnvResponse.text()).toBe("network:/@vite/env")
+    expect(reactRefreshResponse.status).toBe(200)
+    expect(await reactRefreshResponse.text()).toBe("network:/@react-refresh")
+    expect(virtualModuleResponse.status).toBe(200)
+    expect(await virtualModuleResponse.text()).toBe("network:/@id/__x00__virtual:mars-runtime")
+    expect(fsPathResponse.status).toBe(200)
+    expect(await fsPathResponse.text()).toBe("network:/@fs/Users/aniwei/Desktop/workspaces/bun/mars-lib/playground/src/main.tsx")
     expect(hostSourceResponse.status).toBe(200)
     expect(await hostSourceResponse.text()).toBe("network:/src/main.tsx")
+    expect(hostImportResponse.status).toBe(200)
+    expect(await hostImportResponse.text()).toBe("network:/src/main.tsx")
+    expect(hostRawResponse.status).toBe(200)
+    expect(await hostRawResponse.text()).toBe("network:/src/main.tsx")
+    expect(hostUrlResponse.status).toBe(200)
+    expect(await hostUrlResponse.text()).toBe("network:/src/main.tsx")
+    expect(optimizedDependencyResponse.status).toBe(200)
+    expect(await optimizedDependencyResponse.text()).toBe("network:/node_modules/.vite/deps/react.js")
   } finally {
     server.stop(true)
     await runtime.dispose()
@@ -1384,9 +1483,16 @@ test("Phase 3 kernel.spawn can auto-create a Process Worker through Kernel Worke
   expect(await clientEndpoint.request("kernel.boot", {}, { target: "kernel" })).toEqual({ booted: true })
   const spawned = await clientEndpoint.request(
     "kernel.spawn",
-    { argv: ["bun", "run", "worker-entry.ts"], cwd: "/workspace", env: { MARS: "1" }, kind: "worker" },
+    {
+      argv: ["bun", "run", "worker-entry.ts"],
+      cwd: "/workspace",
+      env: { MARS: "1" },
+      kind: "worker",
+      stdin: "kernel worker stdin",
+    },
     { target: "kernel" },
   ) as { pid: number; workerId: string; status: string; event: unknown }
+  await waitForMarsTestNativeWorkerMessages(MarsTestNativeWorker.instances[0], 3)
   MarsTestNativeWorker.instances[0].dispatch({
     type: "process.worker.stdout",
     id: spawned.workerId,
@@ -1416,7 +1522,20 @@ test("Phase 3 kernel.spawn can auto-create a Process Worker through Kernel Worke
     cwd: "/workspace",
     env: { MARS: "1" },
   })
-  expect(stdio).toEqual(["1:auto worker stdout"])
+  expect(MarsTestNativeWorker.instances[0].messages[1]).toEqual({
+    type: "process.worker.stdin",
+    id: spawned.workerId,
+    chunk: new TextEncoder().encode("kernel worker stdin"),
+  })
+  expect(MarsTestNativeWorker.instances[0].messages[2]).toEqual({
+    type: "process.worker.stdin.close",
+    id: spawned.workerId,
+  })
+  expect(stdio).toEqual([
+    "1:stdout:kernel worker stdin",
+    "2:stderr:kernel worker stdin",
+    "1:auto worker stdout",
+  ])
   expect(waited).toEqual({ pid: spawned.pid, exitCode: 0 })
 
   stdioSubscription.dispose()
@@ -1956,6 +2075,43 @@ test("Phase 3 configured Process Worker spawn forwards ProcessHandle stdin", asy
   await runtime.dispose()
 })
 
+test("Phase 3 configured Process Worker spawn forwards ProcessHandle closeStdin", async () => {
+  MarsTestNativeWorker.instances.length = 0
+  const runtime = await createMarsRuntime({
+    initialFiles: await loadPlaygroundFiles("core-runtime-bun-run"),
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "/mars-process-worker.js",
+      workerOptions: { type: "module" },
+      workerConstructor: MarsTestNativeWorker,
+    }),
+  })
+
+  const processHandle = await runtime.spawn("bun", ["run", "index.ts"])
+  const worker = MarsTestNativeWorker.instances[0]
+  processHandle.closeStdin()
+  await waitForMarsTestNativeWorkerMessages(worker, 2)
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(worker.messages[1]).toEqual({
+    type: "process.worker.stdin.close",
+    id: "process-worker-1",
+  })
+  expect(stdout).toBe("")
+  expect(stderr).toBe("")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
 test("Phase 3 configured Process Worker spawn forwards initial stdin", async () => {
   MarsTestNativeWorker.instances.length = 0
   const runtime = await createMarsRuntime({
@@ -2121,6 +2277,112 @@ test("Phase 3 Bun.spawn executes general shell command through kernel stdio", as
   await runtime.dispose()
 })
 
+test("Phase 3 Bun.spawn supports shorthand argv through configured Process Worker", async () => {
+  MarsTestNativeWorker.instances = []
+  const runtime = await createMarsRuntime({
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "mars-worker://spawn-shorthand",
+      workerConstructor: MarsTestNativeWorker,
+    }),
+    initialFiles: {
+      src: {
+        "index.ts": "console.log('spawn shorthand route')",
+      },
+    },
+  })
+
+  const processHandle = await runtime.bun.spawn(["bun", "run", "index.ts"])
+  const worker = await waitForMarsTestNativeWorker()
+  await waitForMarsTestNativeWorkerMessages(worker, 1)
+
+  await processHandle.write("shorthand payload")
+  await waitForMarsTestNativeWorkerMessages(worker, 2)
+  worker.dispatch({
+    type: "process.worker.exit",
+    id: "process-worker-1",
+    code: 0,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(processHandle.stdout).text(),
+    new Response(processHandle.stderr).text(),
+    processHandle.exited,
+  ])
+
+  expect(worker.messages[0]).toEqual({
+    type: "process.worker.boot",
+    id: "process-worker-1",
+    argv: ["bun", "run", "index.ts"],
+    cwd: "/workspace",
+    env: undefined,
+  })
+  expect(worker.messages[1]).toEqual({
+    type: "process.worker.stdin",
+    id: "process-worker-1",
+    chunk: new TextEncoder().encode("shorthand payload"),
+  })
+  expect(stdout).toBe("stdout:shorthand payload")
+  expect(stderr).toBe("stderr:shorthand payload")
+  expect(exitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
+test("Phase 3 configured Process Worker spawn rejects writes after closeStdin", async () => {
+  MarsTestNativeWorker.instances = []
+  const runtime = await createMarsRuntime({
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "mars-worker://stdin-close-error",
+      workerConstructor: MarsTestNativeWorker,
+    }),
+    initialFiles: {
+      src: {
+        "index.ts": "console.log('stdin close error route')",
+      },
+    },
+  })
+
+  const processHandle = await runtime.spawn("bun", ["run", "index.ts"])
+  processHandle.closeStdin()
+
+  let writeError: Error | null = null
+  try {
+    await processHandle.write("late payload")
+  } catch (error) {
+    writeError = error as Error
+  }
+
+  expect(writeError).not.toBeNull()
+  expect(String(writeError?.message ?? "")).toContain("Stdio channel is closed")
+  await processHandle.kill(0)
+  await processHandle.exited
+
+  await runtime.dispose()
+})
+
+test("Phase 3 runtime.dispose terminates active native Process Worker carriers", async () => {
+  MarsTestNativeWorker.instances = []
+  const runtime = await createMarsRuntime({
+    processWorkerFactory: createMarsProcessWorkerFactory({
+      workerURL: "mars-worker://dispose-terminate",
+      workerConstructor: MarsTestNativeWorker,
+    }),
+    initialFiles: {
+      src: {
+        "index.ts": "console.log('dispose terminate route')",
+      },
+    },
+  })
+
+  const processHandle = await runtime.spawn("bun", ["run", "index.ts"])
+  const worker = await waitForMarsTestNativeWorker()
+  await waitForMarsTestNativeWorkerMessages(worker, 1)
+
+  await runtime.dispose()
+
+  await processHandle.exited
+  expect(worker.terminated).toBe(true)
+})
+
 test("Phase 3 Bun.spawnSync returns explicit fallback result", async () => {
   const runtime = await createMarsRuntime()
   const result = runtime.bun.spawnSync({ cmd: ["bun", "run", "index.ts"] })
@@ -2128,6 +2390,18 @@ test("Phase 3 Bun.spawnSync returns explicit fallback result", async () => {
   expect(result.success).toBe(false)
   expect(result.exitCode).toBe(1)
   expect(new TextDecoder().decode(result.stderr)).toContain("Bun.spawnSync")
+
+  await runtime.dispose()
+})
+
+test("Phase 3 Bun.spawnSync executes echo when SAB sync profile is available", async () => {
+  const runtime = await createMarsRuntime()
+  const result = runtime.bun.spawnSync({ cmd: ["echo", "sync", "path"] })
+
+  expect(result.success).toBe(true)
+  expect(result.exitCode).toBe(0)
+  expect(new TextDecoder().decode(result.stdout)).toBe("sync path\n")
+  expect(new TextDecoder().decode(result.stderr)).toBe("")
 
   await runtime.dispose()
 })
@@ -2315,6 +2589,58 @@ test("Phase 3 OPFS persistence adapter stores snapshot bytes with memory fallbac
   await adapter.close()
 })
 
+test("Phase 3 OPFS persistence adapter uses OPFS scope when available", async () => {
+  const opfsEntries = new Map<string, Uint8Array>()
+  const scope = {
+    navigator: {
+      storage: {
+        getDirectory: async () => ({
+          getFileHandle: async (name: string, options?: { create?: boolean }) => {
+            if (!opfsEntries.has(name) && !options?.create) throw new Error("File not found")
+
+            return {
+              getFile: async () => ({
+                arrayBuffer: async () => {
+                  const value = opfsEntries.get(name)
+                  if (!value) throw new Error("File not found")
+                  return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)
+                },
+              }),
+              createWritable: async () => ({
+                write: async (data: Uint8Array) => {
+                  opfsEntries.set(name, data.slice())
+                },
+                close: async () => {},
+              }),
+            }
+          },
+          removeEntry: async (name: string) => {
+            opfsEntries.delete(name)
+          },
+          keys: async function* () {
+            for (const key of opfsEntries.keys()) yield key
+          },
+        }),
+      },
+    },
+  }
+
+  const adapter = createOPFSPersistenceAdapter({
+    namespace: "phase3",
+    scope: scope as typeof globalThis,
+  })
+  await adapter.open()
+  await adapter.set("workspace-snapshot", "opfs available")
+
+  expect(adapter.kind).toBe("opfs")
+  expect(new TextDecoder().decode((await adapter.get("workspace-snapshot")) ?? new Uint8Array())).toBe("opfs available")
+  expect(await adapter.keys()).toEqual(["workspace-snapshot"])
+
+  await adapter.delete("workspace-snapshot")
+  expect(await adapter.get("workspace-snapshot")).toBe(null)
+  await adapter.close()
+})
+
 test("Phase 3 browser capabilities and profiles are described", () => {
   const capabilities = detectMarsCapabilities()
   const profileCapabilities = {
@@ -2341,6 +2667,217 @@ test("Phase 3 browser capabilities and profiles are described", () => {
   ])
   expect(automationProfiles.find(profile => profile.id === "chromium-sab-service-worker")?.enabled).toBe(false)
   expect(automationProfiles.find(profile => profile.id === "firefox-service-worker-modules")?.enabled).toBe(true)
+})
+
+test("Phase 3 browser automation run plan wires enabled profiles to runner args", () => {
+  const plan = createBrowserAutomationRunPlan({
+    capabilities: {
+      serviceWorker: true,
+      sharedArrayBuffer: false,
+      atomicsWait: false,
+      opfs: false,
+      webCrypto: true,
+      worker: true,
+    },
+    command: "playwright",
+    baseArgs: ["test", "--reporter=line"],
+    env: {
+      MARS_E2E: "1",
+    },
+  })
+
+  expect(plan.map(target => target.profileId)).toEqual([
+    "firefox-async-fallback",
+    "firefox-service-worker-modules",
+  ])
+  expect(plan[0]).toEqual({
+    profileId: "firefox-async-fallback",
+    engine: "firefox",
+    enabled: true,
+    notes: "Firefox baseline profile for async fallback paths when SAB or OPFS are unavailable.",
+    command: "playwright",
+    args: [
+      "test",
+      "--reporter=line",
+      "--project=firefox",
+      "--grep=firefox-async-fallback",
+    ],
+    env: {
+      MARS_E2E: "1",
+      MARS_BROWSER_PROFILE: "firefox-async-fallback",
+    },
+  })
+  expect(plan[1].args).toEqual([
+    "test",
+    "--reporter=line",
+    "--project=firefox",
+    "--grep=firefox-service-worker-modules",
+  ])
+  expect(plan[1].env).toEqual({
+    MARS_E2E: "1",
+    MARS_BROWSER_PROFILE: "firefox-service-worker-modules",
+  })
+})
+
+test("Phase 3 browser automation runner executes plan targets and summarizes results", async () => {
+  const summary = await runBrowserAutomationPlan({
+    plan: {
+      capabilities: {
+        serviceWorker: true,
+        sharedArrayBuffer: false,
+        atomicsWait: false,
+        opfs: false,
+        webCrypto: true,
+        worker: true,
+      },
+      command: "playwright",
+      baseArgs: ["test"],
+      env: {
+        MARS_E2E: "1",
+      },
+    },
+    executor: {
+      execute: async target => {
+        if (target.profileId === "firefox-service-worker-modules") {
+          return {
+            exitCode: 1,
+            stderr: "service worker module timeout",
+          }
+        }
+
+        return {
+          exitCode: 0,
+          stdout: `ok:${target.profileId}`,
+        }
+      },
+    },
+  })
+
+  expect(summary.passed).toBe(false)
+  expect(summary.results.map(result => result.profileId)).toEqual([
+    "firefox-async-fallback",
+    "firefox-service-worker-modules",
+  ])
+  expect(summary.results[0].passed).toBe(true)
+  expect(summary.results[0].stdout).toBe("ok:firefox-async-fallback")
+  expect(summary.results[1].passed).toBe(false)
+  expect(summary.results[1].stderr).toBe("service worker module timeout")
+})
+
+test("Phase 3 browser automation runner supports stopOnFailure", async () => {
+  const summary = await runBrowserAutomationPlan({
+    targets: [
+      {
+        profileId: "firefox-async-fallback",
+        engine: "firefox",
+        enabled: true,
+        notes: "phase3",
+        command: "playwright",
+        args: ["test", "--grep=firefox-async-fallback"],
+        env: { MARS_BROWSER_PROFILE: "firefox-async-fallback" },
+      },
+      {
+        profileId: "firefox-service-worker-modules",
+        engine: "firefox",
+        enabled: true,
+        notes: "phase3",
+        command: "playwright",
+        args: ["test", "--grep=firefox-service-worker-modules"],
+        env: { MARS_BROWSER_PROFILE: "firefox-service-worker-modules" },
+      },
+      {
+        profileId: "chromium-opfs-persistence",
+        engine: "chromium",
+        enabled: true,
+        notes: "phase3",
+        command: "playwright",
+        args: ["test", "--grep=chromium-opfs-persistence"],
+        env: { MARS_BROWSER_PROFILE: "chromium-opfs-persistence" },
+      },
+    ],
+    stopOnFailure: true,
+    executor: {
+      execute: async target => ({
+        exitCode: target.profileId === "firefox-service-worker-modules" ? 2 : 0,
+      }),
+    },
+  })
+
+  expect(summary.passed).toBe(false)
+  expect(summary.results.map(result => result.profileId)).toEqual([
+    "firefox-async-fallback",
+    "firefox-service-worker-modules",
+  ])
+  expect(summary.results[1].exitCode).toBe(2)
+})
+
+test("Phase 3 browser automation runner can execute targets through Bun.spawn", async () => {
+  const executedCommands: string[][] = []
+  const executor = createBunSpawnBrowserAutomationExecutor({
+    scope: {
+      Bun: {
+        spawn: options => {
+          executedCommands.push(options.cmd)
+          return {
+            stdout: new ReadableStream<Uint8Array>({
+              start: controller => {
+                controller.enqueue(new TextEncoder().encode(`ok:${options.cmd.join(" ")}`))
+                controller.close()
+              },
+            }),
+            stderr: new ReadableStream<Uint8Array>({
+              start: controller => {
+                controller.close()
+              },
+            }),
+            exited: Promise.resolve(0),
+          }
+        },
+      },
+    },
+  })
+
+  const summary = await runBrowserAutomationPlan({
+    targets: [
+      {
+        profileId: "firefox-async-fallback",
+        engine: "firefox",
+        enabled: true,
+        notes: "phase3",
+        command: "playwright",
+        args: ["test", "--grep=firefox-async-fallback"],
+        env: { MARS_BROWSER_PROFILE: "firefox-async-fallback" },
+      },
+    ],
+    executor,
+  })
+
+  expect(summary.passed).toBe(true)
+  expect(summary.results[0].stdout).toBe("ok:playwright test --grep=firefox-async-fallback")
+  expect(executedCommands).toEqual([["playwright", "test", "--grep=firefox-async-fallback"]])
+})
+
+test("Phase 3 browser automation runner reports missing Bun runtime", async () => {
+  const executor = createBunSpawnBrowserAutomationExecutor({ scope: {} })
+
+  const summary = await runBrowserAutomationPlan({
+    targets: [
+      {
+        profileId: "firefox-async-fallback",
+        engine: "firefox",
+        enabled: true,
+        notes: "phase3",
+        command: "playwright",
+        args: ["test", "--grep=firefox-async-fallback"],
+        env: { MARS_BROWSER_PROFILE: "firefox-async-fallback" },
+      },
+    ],
+    executor,
+  })
+
+  expect(summary.passed).toBe(false)
+  expect(summary.results[0].exitCode).toBe(1)
+  expect(summary.results[0].stderr).toContain("Bun runtime is not available")
 })
 
 test("Phase 3 playground host enables SharedArrayBuffer and ServiceWorker preconditions", async () => {
@@ -2464,6 +3001,9 @@ test("Phase 3 playground module cases include bun run prework", async () => {
   expect(serviceWorkerScopeSmokeCase?.module).toBe("service-worker-scope-smoke")
   expect(await readPlaygroundCaseEntry(serviceWorkerScopeSmokeCase?.entry ?? "")).toContain("serviceWorkerScopeSmokeScriptURL")
   expect(await readPlaygroundCaseEntry(serviceWorkerScopeSmokeCase?.entry ?? "")).toContain("serviceWorkerScopeSmokePatchMode")
+  expect(await readPlaygroundCaseEntry(serviceWorkerScopeSmokeCase?.entry ?? "")).toContain("serviceWorkerScopeSmokeFetchMode")
+  expect(await readPlaygroundText("src/browser-runtime.ts")).toContain("const nativeResponse = await fetch(moduleRequestUrl)")
+  expect(await readPlaygroundText("src/browser-runtime.ts")).toContain("fetch=${serviceWorkerScopeSmokeFetchMode}")
   expect(kernelWorkerBootstrapCase?.status).toBe("prework")
   expect(kernelWorkerBootstrapCase?.module).toBe("kernel-worker-bootstrap")
   expect(await readPlaygroundCaseEntry(kernelWorkerBootstrapCase?.entry ?? "")).toContain("kernelWorkerConnectType")
@@ -2585,4 +3125,254 @@ test("Phase 3 compat matrix includes WebSocket upgrade entry for Bun.serve", () 
   expect(entry).not.toBeNull()
   expect(entry!.tests).toContain("Phase 3 Bun.serve WebSocket upgrade creates bidirectional WebSocket connection")
   expect(entry!.notes).toContain("MarsServerWebSocket")
+})
+
+test("Phase 3 node crypto subset covers timingSafeEqual, getHashes and pbkdf2Async", async () => {
+  const encoder = new TextEncoder()
+  const a = encoder.encode("mars-equal-test")
+  const b = encoder.encode("mars-equal-test")
+  const c = encoder.encode("different-input!")
+
+  expect(timingSafeEqual(a, b)).toBe(true)
+  expect(timingSafeEqual(a, c)).toBe(false)
+  expect(timingSafeEqual(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2]))).toBe(false)
+
+  const hashes = getHashes()
+  expect(hashes).toContain("sha256")
+  expect(hashes).toContain("sha512")
+  expect(hashes).toContain("md5")
+  expect(hashes).toContain("sha1")
+
+  const derivedKey = await pbkdf2Async("mars-password", "mars-salt", 1_000, 32, "sha256")
+  expect(derivedKey instanceof Uint8Array).toBe(true)
+  expect(derivedKey.byteLength).toBe(32)
+
+  const derivedKeySha512 = await pbkdf2Async("mars-password", "mars-salt", 1_000, 64, "sha512")
+  expect(derivedKeySha512.byteLength).toBe(64)
+
+  const derivedKeyA = await pbkdf2Async("mars-password", "mars-salt", 1_000, 32, "sha256")
+  const derivedKeyB = await pbkdf2Async("mars-password", "mars-salt", 1_000, 32, "sha256")
+  expect(timingSafeEqual(derivedKeyA, derivedKeyB)).toBe(true)
+})
+
+test("Phase 3 Bun.password recognizes bcrypt and argon2 format and throws explicit error", async () => {
+  const bcrypt2yHash = "$2y$10$someHashValueHere/abcdefghijklm/nopqrstuvwxyz1234567890"
+  const bcrypt2bHash = "$2b$12$anotherBcryptHashValue/abcdefghijklmno/pqrstuvwxyz01234"
+  const argon2Hash = "$argon2id$v=19$m=65536,t=3,p=4$someSaltValue$someHashValue"
+
+  const bcrypt2yError = await marsPassword.verify("any-password", bcrypt2yHash).then(
+    () => "resolved",
+    error => error instanceof Error ? error.message : String(error),
+  )
+  const bcrypt2bError = await marsPassword.verify("any-password", bcrypt2bHash).then(
+    () => "resolved",
+    error => error instanceof Error ? error.message : String(error),
+  )
+  const argon2Error = await marsPassword.verify("any-password", argon2Hash).then(
+    () => "resolved",
+    error => error instanceof Error ? error.message : String(error),
+  )
+  const bcryptHashError = await marsPassword.hash("any-password", { algorithm: "bcrypt" }).then(
+    () => "resolved",
+    error => error instanceof Error ? error.message : String(error),
+  )
+  const argon2IdHashError = await marsPassword.hash("any-password", { algorithm: "argon2id" }).then(
+    () => "resolved",
+    error => error instanceof Error ? error.message : String(error),
+  )
+
+  expect(bcrypt2yError).toContain("bcrypt")
+  expect(bcrypt2yError).toContain("not supported")
+  expect(bcrypt2bError).toContain("bcrypt")
+  expect(bcrypt2bError).toContain("not supported")
+  expect(argon2Error).toContain("argon2")
+  expect(argon2Error).toContain("not supported")
+  expect(bcryptHashError).toContain("bcrypt")
+  expect(bcryptHashError).toContain("not available")
+  expect(argon2IdHashError).toContain("argon2id")
+  expect(argon2IdHashError).toContain("not available")
+})
+
+test("Phase 3 CryptoHasher supports sha384 algorithm", async () => {
+  const hasher = new MarsCryptoHasher("sha384")
+  expect(hasher.algorithm).toBe("sha384")
+
+  hasher.update("hello mars")
+  const hex = await hasher.digest("hex")
+  expect(typeof hex).toBe("string")
+  expect((hex as string).length).toBe(96)
+
+  const base64 = await new MarsCryptoHasher("sha384").update("hello mars").digest("base64")
+  expect(typeof base64).toBe("string")
+  expect((base64 as string).length > 60).toBe(true)
+
+  const direct = await createHashDigest("sha384", "hello mars", "hex")
+  expect(direct).toBe(hex)
+})
+
+test("Phase 3 CryptoHasher copy method duplicates hasher state", async () => {
+  const original = new MarsCryptoHasher("sha256")
+  original.update("hello ")
+
+  const clone = original.copy()
+  clone.update("world")
+
+  original.update("world")
+
+  const originalHex = await original.digest("hex")
+  const cloneHex = await clone.digest("hex")
+  expect(originalHex).toBe(cloneHex)
+
+  const freshHex = await new MarsCryptoHasher("sha256").update("hello world").digest("hex")
+  expect(originalHex).toBe(freshHex)
+
+  const earlyClone = new MarsCryptoHasher("md5")
+  earlyClone.update("abc")
+  const earlyCloneCopy = earlyClone.copy()
+  earlyCloneCopy.update("def")
+  earlyClone.update("def")
+
+  const earlyCloneHex = await earlyClone.digest("hex")
+  const earlyCloneCopyHex = await earlyCloneCopy.digest("hex")
+  expect(earlyCloneHex).toBe(earlyCloneCopyHex)
+})
+
+test("Phase 3 CryptoHasher digestSync returns sync result for md5 and throws for sha algorithms", () => {
+  const md5Hasher = new MarsCryptoHasher("md5")
+  md5Hasher.update("hello mars")
+  const md5Hex = md5Hasher.digestSync("hex")
+  expect(typeof md5Hex).toBe("string")
+  expect((md5Hex as string).length).toBe(32)
+
+  const md5HexAgain = new MarsCryptoHasher("md5").update("hello mars").digestSync()
+  expect(md5HexAgain).toBe(md5Hex)
+
+  const md5Base64 = new MarsCryptoHasher("md5").update("hello mars").digestSync("base64")
+  expect(typeof md5Base64).toBe("string")
+
+  const shaHasher = new MarsCryptoHasher("sha256")
+  shaHasher.update("hello mars")
+
+  let sha256SyncError: string | null = null
+  try {
+    shaHasher.digestSync("hex")
+  } catch (error) {
+    sha256SyncError = error instanceof Error ? error.message : String(error)
+  }
+  expect(sha256SyncError).not.toBeNull()
+  expect(sha256SyncError).toContain("sha256")
+  expect(sha256SyncError).toContain("digest")
+})
+
+test("Phase 3 Bun.spawnSync supports built-in commands: true, false, pwd, printf", () => {
+  const vfs = createMarsVFS()
+  const kernel = createMarsKernel()
+  const bun = createMarsBun({ kernel, vfs })
+
+  const trueResult = bun.spawnSync({ cmd: ["true"] })
+  expect(trueResult.exitCode).toBe(0)
+  expect(trueResult.success).toBe(true)
+
+  const falseResult = bun.spawnSync({ cmd: ["false"] })
+  expect(falseResult.exitCode).toBe(1)
+  expect(falseResult.success).toBe(false)
+
+  const pwdResult = bun.spawnSync({ cmd: ["pwd"] })
+  expect(pwdResult.exitCode).toBe(0)
+  expect(pwdResult.success).toBe(true)
+  const pwdOut = new TextDecoder().decode(pwdResult.stdout)
+  expect(pwdOut.trim().length > 0).toBe(true)
+
+  const printfResult = bun.spawnSync({ cmd: ["printf", "mars-sync-test"] })
+  expect(printfResult.exitCode).toBe(0)
+  const printfOut = new TextDecoder().decode(printfResult.stdout)
+  expect(printfOut).toBe("mars-sync-test")
+
+  const catResult = bun.spawnSync({ cmd: ["cat"] })
+  expect(catResult.exitCode).toBe(0)
+  expect(catResult.success).toBe(true)
+
+  const unknownResult = bun.spawnSync({ cmd: ["not-a-builtin-command", "arg1"] })
+  expect(unknownResult.success).toBe(false)
+  const unknownStderr = new TextDecoder().decode(unknownResult.stderr)
+  expect(unknownStderr).toContain("not-a-builtin-command")
+})
+
+test("Phase 3 OPFS persistence adapter supports has, size and clear operations", async () => {
+  const adapter = createOPFSPersistenceAdapter({ fallback: "memory" })
+  await adapter.open()
+
+  expect(await adapter.size()).toBe(0)
+  expect(await adapter.has("missing")).toBe(false)
+
+  await adapter.set("key-a", "value-a")
+  await adapter.set("key-b", "value-b")
+  await adapter.set("key-c", "value-c")
+
+  expect(await adapter.size()).toBe(3)
+  expect(await adapter.has("key-a")).toBe(true)
+  expect(await adapter.has("key-b")).toBe(true)
+  expect(await adapter.has("missing-key")).toBe(false)
+
+  const keys = await adapter.keys()
+  expect(keys).toEqual(["key-a", "key-b", "key-c"])
+
+  await adapter.clear()
+  expect(await adapter.size()).toBe(0)
+  expect(await adapter.has("key-a")).toBe(false)
+  const keysAfterClear = await adapter.keys()
+  expect(keysAfterClear).toEqual([])
+
+  await adapter.close()
+})
+
+test("Phase 3 Bun.sql prepared statements support parameterized queries", async () => {
+  const vfs = createMarsVFS()
+  const kernel = createMarsKernel()
+  const bun = createMarsBun({ kernel, vfs, runtimeFeatures: { sql: true, esbuild: false, swc: false } })
+
+  const db = bun.sql.open("/test-prepared.sqlite")
+  await db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)")
+  await db.exec("INSERT INTO users (name, score) VALUES (?, ?)", ["alice", 100])
+  await db.exec("INSERT INTO users (name, score) VALUES (?, ?)", ["bob", 85])
+  await db.exec("INSERT INTO users (name, score) VALUES (?, ?)", ["carol", 95])
+
+  const stmt = db.prepare<{ id: number; name: string; score: number }>(
+    "SELECT * FROM users WHERE score >= ? ORDER BY score DESC",
+  )
+
+  const topTwo = await stmt.all([90])
+  expect(topTwo.length).toBe(2)
+  expect(topTwo[0].name).toBe("alice")
+  expect(topTwo[1].name).toBe("carol")
+
+  const stmtGet = db.prepare<{ id: number; name: string; score: number }>(
+    "SELECT * FROM users WHERE name = ?",
+  )
+  const alice = await stmtGet.get(["alice"])
+  expect(alice).not.toBeNull()
+  expect(alice!.name).toBe("alice")
+  expect(alice!.score).toBe(100)
+
+  const notFound = await stmtGet.get(["dave"])
+  expect(notFound).toBeNull()
+
+  const insertStmt = db.prepare("INSERT INTO users (name, score) VALUES (?, ?)")
+  const insertResult = await insertStmt.run(["dave", 70])
+  expect(insertResult.changes).toBe(1)
+
+  const allUsers = await db.all("SELECT * FROM users ORDER BY id")
+  expect(allUsers.length).toBe(4)
+
+  await insertStmt.finalize()
+  let finalizedError: string | null = null
+  try {
+    await insertStmt.run(["eve", 60])
+  } catch (error) {
+    finalizedError = error instanceof Error ? error.message : String(error)
+  }
+  expect(finalizedError).not.toBeNull()
+  expect(finalizedError).toContain("finalized")
+
+  await db.close()
 })

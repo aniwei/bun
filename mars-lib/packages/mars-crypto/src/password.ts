@@ -1,6 +1,6 @@
 import type { MarsHashInput } from "./hasher"
 
-export type MarsPasswordAlgorithm = "mars-pbkdf2-sha256"
+export type MarsPasswordAlgorithm = "mars-pbkdf2-sha256" | "bcrypt" | "argon2id" | "argon2d" | "argon2i"
 
 export interface MarsPasswordHashOptions {
   algorithm?: MarsPasswordAlgorithm
@@ -26,11 +26,20 @@ export const marsPassword: MarsPasswordFacade = {
   verify: verifyPassword,
 }
 
+const unsupportedNativeAlgorithms = ["bcrypt", "argon2id", "argon2d", "argon2i"] as const
+
 export async function hashPassword(
   password: MarsHashInput,
   options: MarsPasswordHashOptions = {},
 ): Promise<string> {
   const algorithm = options.algorithm ?? "mars-pbkdf2-sha256"
+
+  if ((unsupportedNativeAlgorithms as readonly string[]).includes(algorithm)) {
+    throw new Error(
+      `${algorithm} is not available in browser context; use marsPassword.hash() which provides WebCrypto PBKDF2-SHA256`,
+    )
+  }
+
   if (algorithm !== "mars-pbkdf2-sha256") throw new Error(`Unsupported password algorithm: ${algorithm}`)
 
   const iterations = resolveIterations(options)
@@ -47,6 +56,18 @@ export async function hashPassword(
 }
 
 export async function verifyPassword(password: MarsHashInput, hash: string): Promise<boolean> {
+  if (hash.startsWith("$2y$") || hash.startsWith("$2b$") || hash.startsWith("$2a$")) {
+    throw new Error(
+      "bcrypt hash format is not supported in browser context; use marsPassword.hash() which provides WebCrypto PBKDF2-SHA256",
+    )
+  }
+
+  if (hash.startsWith("$argon2")) {
+    throw new Error(
+      "argon2 hash format is not supported in browser context; use marsPassword.hash() which provides WebCrypto PBKDF2-SHA256",
+    )
+  }
+
   const parsedHash = parsePasswordHash(hash)
   if (!parsedHash) return false
 
