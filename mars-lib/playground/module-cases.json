@@ -37,7 +37,7 @@
     "entry": "node-http/server.ts",
     "acceptance": "packages/mars-test/src/phase1.acceptance.test.ts",
     "status": "covered",
-    "description": "纯 node:http playground 用例覆盖 createServer、listen(0) 动态端口、runtime.fetch() POST 请求、headers/body 写回、address() 和 close() 解绑。"
+    "description": "纯 node:http playground 用例覆盖通过 node:http 导入 createServer、listen(0) 动态端口、runtime.fetch() POST 请求、headers/body 写回、address() 和 close() 解绑。"
   },
   {
     "id": "phase1-node-http-express",
@@ -47,7 +47,7 @@
     "entry": "express/server.ts",
     "acceptance": "packages/mars-test/src/phase1.acceptance.test.ts",
     "status": "covered",
-    "description": "Express playground 以 app.use/app.get/app.post/app.listen 形态映射到 Mars node:http 虚拟服务，覆盖 middleware header、GET query、POST JSON body 和 close() 解绑。"
+    "description": "Express playground 以 app.use/app.get/app.post/app.listen 形态通过 node:http 映射到 Mars 虚拟服务，覆盖 middleware header、GET query、POST JSON body 和 close() 解绑。"
   },
   {
     "id": "phase1-node-http-koa",
@@ -57,7 +57,7 @@
     "entry": "koa/server.ts",
     "acceptance": "packages/mars-test/src/phase1.acceptance.test.ts",
     "status": "covered",
-    "description": "Koa playground 以 app.use 洋葱中间件和 app.listen 形态映射到 Mars node:http 虚拟服务，覆盖 async next、after middleware header、GET query、POST body 和 close() 解绑。"
+    "description": "Koa playground 以 app.use 洋葱中间件和 app.listen 形态通过 http 映射到 Mars 虚拟服务，覆盖 async next、after middleware header、GET query、POST body 和 close() 解绑。"
   },
   {
     "id": "phase2-resolver-browser-map",

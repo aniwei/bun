@@ -25,6 +25,7 @@ export interface BuildOutputArtifact {
   kind: "entry-point" | "source-map"
   loader: Loader
   size: number
+  hash?: string
   text(): Promise<string>
   arrayBuffer(): Promise<ArrayBuffer>
 }

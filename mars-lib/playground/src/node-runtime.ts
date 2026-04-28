@@ -143,16 +143,32 @@ export async function loadPlaygroundPackageCache(): Promise<PackageCache> {
   ) as PackageCacheFixtureManifest
   const tarballs: Record<string, Uint8Array> = {}
 
+  for (const tarballKey of collectFixtureTarballKeys(manifest)) {
+    tarballs[tarballKey] = await readPlaygroundBytes(`fixtures/npm-cache/${tarballKey}`)
+  }
+
+  return createMemoryPackageCacheFromFixture(manifest, tarballs)
+}
+
+function collectFixtureTarballKeys(manifest: PackageCacheFixtureManifest): string[] {
+  const keys = new Set<string>()
+
   for (const fixture of manifest.packages ?? []) {
     const packageName = typeof fixture === "string" ? fixture : fixture.name
     const version = typeof fixture === "string" ? "0.0.0-mars" : fixture.version ?? "0.0.0-mars"
     const tarballKey = typeof fixture === "string"
       ? `${packageName}-${version}.tgz`
       : fixture.tarballKey ?? `${packageName}-${version}.tgz`
-    tarballs[tarballKey] = await readPlaygroundBytes(`fixtures/npm-cache/${tarballKey}`)
+    keys.add(tarballKey)
   }
 
-  return createMemoryPackageCacheFromFixture(manifest, tarballs)
+  for (const metadata of manifest.metadata ?? []) {
+    for (const version of Object.values(metadata.versions)) {
+      if (version.tarballKey) keys.add(version.tarballKey)
+    }
+  }
+
+  return [...keys].sort()
 }
 
 export function readPlaygroundCaseEntry(entry: string): Promise<string> {
@@ -164,5 +180,6 @@ export function readPlaygroundText(path: string): Promise<string> {
 }
 
 async function readPlaygroundBytes(path: string): Promise<Uint8Array> {
-  return new TextEncoder().encode(await readPlaygroundText(path))
+  const file = Bun.file(new URL(`../${path}`, import.meta.url)) as unknown as { arrayBuffer(): Promise<ArrayBuffer> }
+  return new Uint8Array(await file.arrayBuffer())
 }

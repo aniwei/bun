@@ -21,25 +21,27 @@ export async function writeBuildOutputs(
   for (const output of outputs) {
     await vfs.mkdir(dirname(output.path), { recursive: true })
     await vfs.writeFile(output.path, output.code)
-    artifacts.push(createBuildOutputArtifact(output))
+    artifacts.push(await createBuildOutputArtifact(output))
 
     if (output.map && output.mapPath) {
       await vfs.writeFile(output.mapPath, output.map)
-      artifacts.push(createSourceMapArtifact(output.mapPath, output.map))
+      artifacts.push(await createSourceMapArtifact(output.mapPath, output.map))
     }
   }
 
   return artifacts
 }
 
-function createSourceMapArtifact(path: string, sourceMap: string): BuildOutputArtifact {
+async function createSourceMapArtifact(path: string, sourceMap: string): Promise<BuildOutputArtifact> {
   const bytes = new TextEncoder().encode(sourceMap)
+  const hash = await computeHash(bytes)
 
   return {
     path,
     kind: "source-map",
     loader: "json",
     size: bytes.byteLength,
+    hash,
     text: async () => sourceMap,
     arrayBuffer: async () => {
       const arrayBuffer = new ArrayBuffer(bytes.byteLength)
@@ -50,14 +52,16 @@ function createSourceMapArtifact(path: string, sourceMap: string): BuildOutputAr
   }
 }
 
-function createBuildOutputArtifact(output: PendingBuildOutput): BuildOutputArtifact {
+async function createBuildOutputArtifact(output: PendingBuildOutput): Promise<BuildOutputArtifact> {
   const bytes = new TextEncoder().encode(output.code)
+  const hash = await computeHash(bytes)
 
   return {
     path: output.path,
     kind: "entry-point",
     loader: output.loader,
     size: bytes.byteLength,
+    hash,
     text: async () => output.code,
     arrayBuffer: async () => {
       const arrayBuffer = new ArrayBuffer(bytes.byteLength)
@@ -66,4 +70,12 @@ function createBuildOutputArtifact(output: PendingBuildOutput): BuildOutputArtif
       return arrayBuffer
     },
   }
+}
+
+async function computeHash(bytes: Uint8Array): Promise<string> {
+  const input = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+  const hashBuffer = await crypto.subtle.digest("SHA-256", input)
+  const hashBytes = new Uint8Array(hashBuffer)
+
+  return Array.from(hashBytes, byte => byte.toString(16).padStart(2, "0")).join("").slice(0, 16)
 }

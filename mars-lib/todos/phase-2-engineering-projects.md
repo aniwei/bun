@@ -81,19 +81,19 @@ Phase 2 的 `Done` 指 M2 设计文档中定义的工程化验收闭环已完成
 | M2-23 | Done | 100% | Pass | `mars-lib/packages/mars-sw/src/module-response.ts` | 将 VFS 模块请求转成 transpiled JavaScript Response。 | 已接入 ServiceWorkerRouter，并通过 dev server module response 验收。 |
 | M2-24 | Done | 100% | Pass | `mars-lib/playground/tsx/app.tsx` | 编写直接执行 TSX 验收样例。 | TSX JSX 执行已由 acceptance 覆盖，通过 `loadPlaygroundFiles()` 纳入统一 playground fixture，并校验 first screen render model。 |
 | M2-25 | Done | 100% | Pass | `mars-lib/playground/vite-react-ts/` | 放置 Vite React TS 验收项目骨架。 | package/index/src/vite.config/src/App.tsx 已落盘，由 dev server、loader render model 和 Bun.build 从真实 playground fixture 加载验收，且 playground TSX 已纳入 typecheck。 |
-| M2-26 | Done | 100% | Pass | `mars-lib/playground/fixtures/npm-cache/` | 放置 express/koa/vite/react/typescript 等离线 tgz fixture。 | metadata、tarball key 与包文件内容已落盘，并通过 `loadPlaygroundPackageCache()` 真实安装验收。 |
-| M2-27 | Done | 100% | Pass | `mars-lib/packages/mars-test/src/phase2.acceptance.test.ts`, `mars-lib/packages/mars-test/src/phase2.installer.acceptance.test.ts` | 覆盖 resolver、tsx 执行、installer 离线安装、Vite client/module response 与 HMR。 | 已覆盖 browser map、static/dynamic import、基础 JSX、stdout/stderr、installer fixture、semver range/hyphen/partial/prerelease/build metadata、optionalDependencies、peerDependencies、workspace symlink、lifecycle env、package JS bins、tgz/PAX path/linkpath、tar symlink、dev server、module response、HMR、vite config root、alias、define、统一 playground fixture 与 first screen render model。 |
+| M2-26 | Done | 100% | Pass | `mars-lib/playground/fixtures/npm-cache/` | 放置 express/koa/vite/react/typescript 等离线 tgz fixture。 | metadata、tarball key 与包文件内容已落盘，并通过 `loadPlaygroundPackageCache()` 真实安装验收；express/koa fixture 已切到官方 `express@5.1.0` / `koa@2.14.2` tarball 与依赖图，会通过 `node:http`/`http` 创建虚拟服务。 |
+| M2-27 | Done | 100% | Pass | `mars-lib/packages/mars-test/src/phase2.acceptance.test.ts`, `mars-lib/packages/mars-test/src/phase2.installer.acceptance.test.ts` | 覆盖 resolver、tsx 执行、installer 离线安装、Vite client/module response 与 HMR。 | 已覆盖 browser map、static/dynamic import、基础 JSX、stdout/stderr、installer fixture、官方 npm-installed express/koa/node:http 虚拟服务、semver range/hyphen/partial/prerelease/build metadata、嵌套 transitive dependency、optionalDependencies、peerDependencies、workspace symlink、lifecycle env、package JS bins、tgz/PAX path/linkpath、tar symlink、dev server、module response、HMR、vite config root、alias、define、统一 playground fixture 与 first screen render model。 |
 
 ## Phase 完成标准
 
 - MarsResolver 能解析验收项目中的相对路径、bare package、package self-reference、exports/imports array fallback、`.mjs`/`.cjs` 扩展名补全、tsconfig paths。
 - MarsTranspiler 能转译 `.ts`、`.tsx`、`.jsx`，并输出 imports 和 diagnostics。
 - ModuleLoader 能执行 `.tsx` 文件、缓存循环 ESM/CJS namespace、递归失效 importer cache，并返回正确 stdout 或 virtual server 输出。
-- MarsInstaller 能从 cache、registry fetch provider 或本地 workspace 写入验收项目需要的 `node_modules`，支持基础 npm tgz 解包、PAX path/linkpath、tar symlink、路径逃逸过滤、常见 semver range 最高满足版本选择、hyphen ranges、partial comparators、prerelease opt-in/build metadata、optionalDependencies 跳过语义、核心 peerDependencies 解析、`workspace:` 协议、workspace symlink、package/root lifecycle env/scripts 和 package JS bins；`bun install` shell 命令已能读取 MarsVFS `package.json` 并触发该安装路径。
+- MarsInstaller 能从 cache、registry fetch provider 或本地 workspace 写入验收项目需要的 `node_modules`，支持基础 npm tgz 解包、PAX path/linkpath、tar symlink、路径逃逸过滤、常见 semver range 最高满足版本选择、hyphen ranges、partial comparators、prerelease opt-in/build metadata、冲突 transitive dependency 嵌套安装、optionalDependencies 跳过语义、核心 peerDependencies 解析、`workspace:` 协议、workspace symlink、package/root lifecycle env/scripts 和 package JS bins；`bun install` shell 命令已能读取 MarsVFS `package.json` 并触发该安装路径，且 npm-cache fixture 中的官方 `express` / `koa` 可通过安装后的 `node_modules` 路径与 Mars core module 注入启动虚拟 HTTP 服务。
 - Vite React TS 项目可以通过 playground fixture 加载，并由 loader 验证 first screen render model。
 - 修改 `src/App.tsx` 后 HMR 生效，且不重启整个 runtime。
 - Playground 已接入 `playground/core-modules`、`playground/tsx`、`playground/vite-react-ts` 与 `playground/fixtures/npm-cache`，并通过 `loadPlaygroundFiles()` / `loadPlaygroundPackageCache()` 被 Phase 2 acceptance test 真实加载；功能模块用例已登记到 `playground/module-cases.json` 并校验真实入口文件。
-- Phase 2 测试全部通过；最新完整验证为 `bun run check`（typecheck + `oxlint --max-warnings 0` + tests），结果 `98 pass / 0 fail / 594 expect() calls`。
+- Phase 2 测试全部通过；最新完整验证为 `bunx tsc -p tsconfig.json --noEmit && bunx oxlint --max-warnings 0 && bun test packages/mars-test/src/`，结果 `151 pass / 0 fail / 991 expect() calls`。
 
 ## 状态更新规则
 

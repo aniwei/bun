@@ -176,13 +176,34 @@ export class MarsShell implements MarsShellInterface {
       argv,
       cwd: options.cwd ?? this.#cwd,
       env: { ...this.#env, ...options.env },
-      stdin: new ReadableStream<Uint8Array>({ start(controller) { controller.close() } }),
+      stdin: createShellStdin(options.stdin),
       stdout: new WritableStream<Uint8Array>(),
       stderr: new WritableStream<Uint8Array>(),
       vfs: this.#vfs,
       kernel: this.#kernel,
     }
   }
+}
+
+function createShellStdin(input: ReadableStream<Uint8Array> | string | undefined): ReadableStream<Uint8Array> {
+  if (typeof input === "string") {
+    const bytes = new TextEncoder().encode(input)
+
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes)
+        controller.close()
+      },
+    })
+  }
+
+  if (input) return input
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.close()
+    },
+  })
 }
 
 function quoteShellArg(value: string): string {

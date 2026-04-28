@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 
 import { createMarsRuntime } from "@mars/client"
 import { createMarsInstaller, createMemoryPackageCache } from "@mars/installer"
+import { resolve } from "@mars/resolver"
 
 test("Phase 2 installer selects highest satisfying semver ranges", async () => {
   const runtime = await createMarsRuntime()
@@ -117,6 +118,75 @@ test("Phase 2 installer selects highest satisfying semver ranges", async () => {
   expect(result.lockfile?.root.dependencies["caret-demo"]).toBe("^1.1.0")
   expect(result.lockfile?.entries["hyphen-demo"]?.version).toBe("2.0.0")
   expect(result.lockfile?.entries["hyphen-demo"]?.dependencies).toEqual({})
+
+  await runtime.dispose()
+})
+
+test("Phase 2 installer nests incompatible transitive dependency versions", async () => {
+  const runtime = await createMarsRuntime()
+  const packageCache = createMemoryPackageCache({
+    metadata: [
+      {
+        name: "framework-a",
+        distTags: { latest: "1.0.0" },
+        versions: {
+          "1.0.0": {
+            version: "1.0.0",
+            dependencies: { shared: "^2.0.0" },
+            files: { "index.js": "module.exports = require('shared')" },
+          },
+        },
+      },
+      {
+        name: "framework-b",
+        distTags: { latest: "1.0.0" },
+        versions: {
+          "1.0.0": {
+            version: "1.0.0",
+            dependencies: { shared: "^1.0.0" },
+            files: { "index.js": "module.exports = require('shared')" },
+          },
+        },
+      },
+      createVersionedPackage("shared", ["1.5.0", "2.1.0"]),
+    ],
+  })
+  const installer = createMarsInstaller({ vfs: runtime.vfs, cache: packageCache })
+
+  const result = await installer.install({
+    cwd: "/workspace",
+    dependencies: {
+      "framework-a": "latest",
+      "framework-b": "latest",
+    },
+    offline: true,
+  })
+
+  expect(result.packages.map(pkg => `${pkg.installPath ?? pkg.name}@${pkg.version}`).sort()).toEqual([
+    "framework-a@1.0.0",
+    "framework-b/node_modules/shared@1.5.0",
+    "framework-b@1.0.0",
+    "shared@2.1.0",
+  ])
+  expect(await runtime.vfs.readFile("/workspace/node_modules/shared/index.js", "utf8")).toBe(
+    'module.exports = {"version":"2.1.0"}',
+  )
+  expect(await runtime.vfs.readFile("/workspace/node_modules/framework-b/node_modules/shared/index.js", "utf8")).toBe(
+    'module.exports = {"version":"1.5.0"}',
+  )
+
+  const fileSystem = {
+    existsSync: (path: string) => runtime.vfs.existsSync(path),
+    readFileSync: (path: string) => runtime.vfs.existsSync(path)
+      ? String(runtime.vfs.readFileSync(path, "utf8"))
+      : null,
+  }
+  expect(resolve("shared", "/workspace/node_modules/framework-a/index.js", { fileSystem })).toBe(
+    "/workspace/node_modules/shared/index.js",
+  )
+  expect(resolve("shared", "/workspace/node_modules/framework-b/index.js", { fileSystem })).toBe(
+    "/workspace/node_modules/framework-b/node_modules/shared/index.js",
+  )
 
   await runtime.dispose()
 })
@@ -285,7 +355,7 @@ test("Phase 2 installer rejects incompatible peer dependency ranges", async () =
     metadata: [
       createVersionedPackage("react", ["17.0.0", "18.2.0"]),
       {
-        name: "react-plugin",
+        name: "alpha-react-plugin",
         distTags: { latest: "1.0.0" },
         versions: {
           "1.0.0": {
@@ -309,7 +379,7 @@ test("Phase 2 installer rejects incompatible peer dependency ranges", async () =
       cwd: "/workspace",
       dependencies: {
         react: "17.0.0",
-        "react-plugin": "latest",
+        "alpha-react-plugin": "latest",
       },
       offline: true,
     })
@@ -318,7 +388,7 @@ test("Phase 2 installer rejects incompatible peer dependency ranges", async () =
   }
 
   expect(caughtError instanceof Error ? caughtError.message : String(caughtError)).toContain(
-    "Package react@17.0.0 does not satisfy range ^18.0.0 required by react-plugin@1.0.0",
+    "Package react@17.0.0 does not satisfy range ^18.0.0 required by alpha-react-plugin@1.0.0",
   )
 
   await runtime.dispose()

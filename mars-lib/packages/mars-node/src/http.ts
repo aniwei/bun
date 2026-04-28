@@ -15,6 +15,68 @@ export interface NodeHttpRuntimeOptions {
   hostname?: string
 }
 
+export interface NodeHttpCompatModule {
+  createServer(listener: RequestListener): NodeHttpServer
+  IncomingMessage: typeof IncomingMessage
+  METHODS: string[]
+  ServerResponse: typeof ServerResponse
+  STATUS_CODES: Record<number, string>
+}
+
+export const METHODS = [
+  "ACL",
+  "BIND",
+  "CHECKOUT",
+  "CONNECT",
+  "COPY",
+  "DELETE",
+  "GET",
+  "HEAD",
+  "LINK",
+  "LOCK",
+  "M-SEARCH",
+  "MERGE",
+  "MKACTIVITY",
+  "MKCALENDAR",
+  "MKCOL",
+  "MOVE",
+  "NOTIFY",
+  "OPTIONS",
+  "PATCH",
+  "POST",
+  "PROPFIND",
+  "PROPPATCH",
+  "PURGE",
+  "PUT",
+  "REBIND",
+  "REPORT",
+  "SEARCH",
+  "SOURCE",
+  "SUBSCRIBE",
+  "TRACE",
+  "UNBIND",
+  "UNLINK",
+  "UNLOCK",
+  "UNSUBSCRIBE",
+]
+
+export const STATUS_CODES: Record<number, string> = {
+  200: "OK",
+  201: "Created",
+  202: "Accepted",
+  203: "Non-Authoritative Information",
+  204: "No Content",
+  301: "Moved Permanently",
+  302: "Found",
+  304: "Not Modified",
+  400: "Bad Request",
+  401: "Unauthorized",
+  403: "Forbidden",
+  404: "Not Found",
+  405: "Method Not Allowed",
+  500: "Internal Server Error",
+}
+
 export class NodeHttpServer {
   readonly #listener: RequestListener
   readonly #options: NodeHttpRuntimeOptions
@@ -123,4 +185,14 @@ export function createServer(
   options: NodeHttpRuntimeOptions,
 ): NodeHttpServer {
   return new NodeHttpServer(listener, options)
+}
+
+export function createNodeHttpModule(options: NodeHttpRuntimeOptions): NodeHttpCompatModule {
+  return {
+    createServer: listener => createServer(listener, options),
+    IncomingMessage,
+    METHODS,
+    ServerResponse,
+    STATUS_CODES,
+  }
 }

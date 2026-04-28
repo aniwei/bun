@@ -30,8 +30,10 @@ export function createFSCommands(onCd: (path: string) => void): ShellCommand[] {
     },
     {
       name: "cat",
-      run: context => {
+      run: async context => {
         const paths = context.argv.slice(1)
+        if (paths.length === 0) return ok(await readShellStdin(context.stdin))
+
         const output = paths
           .map(path => context.vfs.readFileSync(normalizePath(path, context.cwd), "utf8"))
           .join("")
@@ -112,6 +114,33 @@ function collectFiles(context: CommandContext, root: string): string[] {
   }
 
   return files
+}
+
+async function readShellStdin(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let byteLength = 0
+
+  try {
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+
+      chunks.push(result.value)
+      byteLength += result.value.byteLength
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const bytes = new Uint8Array(byteLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+
+  return new TextDecoder().decode(bytes)
 }
 
 function ok(stdout: string, json?: unknown): CommandResult {

@@ -2,35 +2,14 @@ import { expect, test } from "bun:test"
 
 import { createMarsRuntime } from "@mars/client"
 import { createModuleLoader } from "@mars/loader"
-import {
-  createExpressPlaygroundApp,
-  expressCreatePath,
-  expressRequestBody,
-  expressTraceHeader,
-  expressTraceHeaderValue,
-  expressUsersPath,
-} from "../../../playground/express/server"
-import {
-  createKoaPlaygroundApp,
-  koaEchoPath,
-  koaProfilePath,
-  koaRequestBody,
-  koaTraceHeader,
-  koaTraceHeaderValue,
-} from "../../../playground/koa/server"
-import {
-  createNodeHttpPlaygroundServer,
-  nodeHttpExpectedMethod,
-  nodeHttpHeaderName,
-  nodeHttpHeaderValue,
-  nodeHttpRequestBody,
-  nodeHttpRequestPath,
-} from "../../../playground/node-http/server"
+import { createRuntimeNodeCoreModules } from "@mars/runtime"
 import {
   loadPlaygroundFiles,
   loadPlaygroundModuleCases,
   readPlaygroundCaseEntry,
 } from "../../../playground/src/node-runtime"
+
+import type { MarsRuntime } from "@mars/client"
 
 interface RuntimeVfsShellPlayground {
   readmePath: string
@@ -57,6 +36,45 @@ interface BunServePlayground {
 
 interface GrepJsonResult {
   matches: Array<{ file: string; line: number; text: string }>
+}
+
+interface NodeHttpPlaygroundModule {
+  createNodeHttpPlaygroundServer(): { listen(port?: number, callback?: () => void): unknown; address(): { port: number } | null; close(): void; on(event: string, listener: () => void): unknown }
+  nodeHttpExpectedMethod: string
+  nodeHttpHeaderName: string
+  nodeHttpHeaderValue: string
+  nodeHttpRequestBody: string
+  nodeHttpRequestPath: string
+}
+
+interface ExpressPlaygroundModule {
+  createExpressPlaygroundApp(): { listen(port?: number, callback?: () => void): { close(): void } }
+  expressCreatePath: string
+  expressRequestBody: string
+  expressTraceHeader: string
+  expressTraceHeaderValue: string
+  expressUsersPath: string
+}
+
+interface KoaPlaygroundModule {
+  createKoaPlaygroundApp(): { listen(port?: number, callback?: () => void): { close(): void } }
+  koaEchoPath: string
+  koaProfilePath: string
+  koaRequestBody: string
+  koaTraceHeader: string
+  koaTraceHeaderValue: string
+}
+
+async function importServerPlayground<T>(runtime: MarsRuntime): Promise<T> {
+  const moduleLoader = createModuleLoader({
+    vfs: runtime.vfs,
+    coreModules: createRuntimeNodeCoreModules({
+      vfs: runtime.vfs,
+      kernel: runtime.kernel,
+    }),
+  })
+
+  return await moduleLoader.import("./server", "/workspace/src/index.ts") as T
 }
 
 test("Phase 1 runtime boots and VFS supports base operations", async () => {
@@ -133,8 +151,13 @@ test("Bun.serve registers a virtual port and runtime fetch dispatches to it", as
 })
 
 test("node:http compat creates virtual servers for pure Node HTTP, Express and Koa style handlers", async () => {
-  const nodeHttpRuntime = await createMarsRuntime()
-  const nodeHttpServer = createNodeHttpPlaygroundServer(nodeHttpRuntime.kernel)
+  const nodeHttpRuntime = await createMarsRuntime({
+    initialFiles: {
+      src: await loadPlaygroundFiles("node-http"),
+    },
+  })
+  const nodeHttpPlayground = await importServerPlayground<NodeHttpPlaygroundModule>(nodeHttpRuntime)
+  const nodeHttpServer = nodeHttpPlayground.createNodeHttpPlaygroundServer()
   let requestEvents = 0
   let listeningEvents = 0
   let closeEvents = 0
@@ -156,21 +179,21 @@ test("node:http compat creates virtual servers for pure Node HTTP, Express and K
   expect(listenCallbackCalled).toBe(true)
   expect(listeningEvents).toBe(1)
 
-  const nodeHttpResponse = await nodeHttpRuntime.fetch(`${nodeHttpRuntime.preview(nodeHttpAddress?.port ?? 0)}${nodeHttpRequestPath.slice(1)}`, {
-    method: nodeHttpExpectedMethod,
+  const nodeHttpResponse = await nodeHttpRuntime.fetch(`${nodeHttpRuntime.preview(nodeHttpAddress?.port ?? 0)}${nodeHttpPlayground.nodeHttpRequestPath.slice(1)}`, {
+    method: nodeHttpPlayground.nodeHttpExpectedMethod,
     headers: {
-      [nodeHttpHeaderName]: nodeHttpHeaderValue,
+      [nodeHttpPlayground.nodeHttpHeaderName]: nodeHttpPlayground.nodeHttpHeaderValue,
     },
-    body: nodeHttpRequestBody,
+    body: nodeHttpPlayground.nodeHttpRequestBody,
   })
   expect(nodeHttpResponse.status).toBe(201)
   expect(nodeHttpResponse.headers.get("content-type")).toBe("application/json; charset=utf-8")
   expect(nodeHttpResponse.headers.get("x-mars-handler")).toBe("node-http")
   expect(await nodeHttpResponse.json()).toEqual({
-    method: nodeHttpExpectedMethod,
-    url: nodeHttpRequestPath,
-    header: nodeHttpHeaderValue,
-    body: nodeHttpRequestBody,
+    method: nodeHttpPlayground.nodeHttpExpectedMethod,
+    url: nodeHttpPlayground.nodeHttpRequestPath,
+    header: nodeHttpPlayground.nodeHttpHeaderValue,
+    body: nodeHttpPlayground.nodeHttpRequestBody,
   })
   expect(requestEvents).toBe(1)
 
@@ -179,27 +202,32 @@ test("node:http compat creates virtual servers for pure Node HTTP, Express and K
   expect(nodeHttpRuntime.kernel.resolvePort(nodeHttpAddress?.port ?? 0)).toBe(null)
   await nodeHttpRuntime.dispose()
 
-  const expressRuntime = await createMarsRuntime()
-  const expressApp = createExpressPlaygroundApp(expressRuntime.kernel)
+  const expressRuntime = await createMarsRuntime({
+    initialFiles: {
+      src: await loadPlaygroundFiles("express"),
+    },
+  })
+  const expressPlayground = await importServerPlayground<ExpressPlaygroundModule>(expressRuntime)
+  const expressApp = expressPlayground.createExpressPlaygroundApp()
   const expressServer = expressApp.listen(3001)
 
-  const expressResponse = await expressRuntime.fetch(expressRuntime.preview(3001) + expressUsersPath.slice(1))
+  const expressResponse = await expressRuntime.fetch(expressRuntime.preview(3001) + expressPlayground.expressUsersPath.slice(1))
   expect(expressResponse.headers.get("content-type")).toBe("application/json; charset=utf-8")
-  expect(expressResponse.headers.get(expressTraceHeader)).toBe(expressTraceHeaderValue)
+  expect(expressResponse.headers.get(expressPlayground.expressTraceHeader)).toBe(expressPlayground.expressTraceHeaderValue)
   expect(await expressResponse.json()).toEqual({
     framework: "express",
     route: "users.index",
     method: "GET",
     active: "1",
-    middleware: expressTraceHeaderValue,
+    middleware: expressPlayground.expressTraceHeaderValue,
   })
 
-  const expressCreateResponse = await expressRuntime.fetch(expressRuntime.preview(3001) + expressCreatePath.slice(1), {
+  const expressCreateResponse = await expressRuntime.fetch(expressRuntime.preview(3001) + expressPlayground.expressCreatePath.slice(1), {
     method: "POST",
-    body: expressRequestBody,
+    body: expressPlayground.expressRequestBody,
   })
   expect(expressCreateResponse.status).toBe(201)
-  expect(expressCreateResponse.headers.get(expressTraceHeader)).toBe(expressTraceHeaderValue)
+  expect(expressCreateResponse.headers.get(expressPlayground.expressTraceHeader)).toBe(expressPlayground.expressTraceHeaderValue)
   expect(await expressCreateResponse.json()).toEqual({
     framework: "express",
     route: "users.create",
@@ -211,32 +239,37 @@ test("node:http compat creates virtual servers for pure Node HTTP, Express and K
   expect(expressRuntime.kernel.resolvePort(3001)).toBe(null)
   await expressRuntime.dispose()
 
-  const koaRuntime = await createMarsRuntime()
-  const koaApp = createKoaPlaygroundApp(koaRuntime.kernel)
+  const koaRuntime = await createMarsRuntime({
+    initialFiles: {
+      src: await loadPlaygroundFiles("koa"),
+    },
+  })
+  const koaPlayground = await importServerPlayground<KoaPlaygroundModule>(koaRuntime)
+  const koaApp = koaPlayground.createKoaPlaygroundApp()
   const koaServer = koaApp.listen(3002)
 
-  const koaResponse = await koaRuntime.fetch(koaRuntime.preview(3002) + koaProfilePath.slice(1))
+  const koaResponse = await koaRuntime.fetch(koaRuntime.preview(3002) + koaPlayground.koaProfilePath.slice(1))
   expect(koaResponse.headers.get("content-type")).toBe("application/json; charset=utf-8")
-  expect(koaResponse.headers.get(koaTraceHeader)).toBe(koaTraceHeaderValue)
+  expect(koaResponse.headers.get(koaPlayground.koaTraceHeader)).toBe(koaPlayground.koaTraceHeaderValue)
   expect(koaResponse.headers.get("x-mars-koa-after")).toBe("returned")
   expect(await koaResponse.json()).toEqual({
     framework: "koa",
     route: "profile.show",
     name: "mars",
-    middleware: koaTraceHeaderValue,
+    middleware: koaPlayground.koaTraceHeaderValue,
   })
 
-  const koaEchoResponse = await koaRuntime.fetch(koaRuntime.preview(3002) + koaEchoPath.slice(1), {
+  const koaEchoResponse = await koaRuntime.fetch(koaRuntime.preview(3002) + koaPlayground.koaEchoPath.slice(1), {
     method: "POST",
-    body: koaRequestBody,
+    body: koaPlayground.koaRequestBody,
   })
   expect(koaEchoResponse.status).toBe(202)
-  expect(koaEchoResponse.headers.get(koaTraceHeader)).toBe(koaTraceHeaderValue)
+  expect(koaEchoResponse.headers.get(koaPlayground.koaTraceHeader)).toBe(koaPlayground.koaTraceHeaderValue)
   expect(koaEchoResponse.headers.get("x-mars-koa-after")).toBe("returned")
   expect(await koaEchoResponse.json()).toEqual({
     framework: "koa",
     route: "echo.create",
-    body: koaRequestBody,
+    body: koaPlayground.koaRequestBody,
   })
 
   koaServer.close()

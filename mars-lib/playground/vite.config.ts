@@ -67,6 +67,10 @@ export default {
       "@mars/node": `${workspaceRoot}/packages/mars-node/src/index.ts`,
       "@mars/shell": `${workspaceRoot}/packages/mars-shell/src/index.ts`,
       "@mars/client": `${workspaceRoot}/packages/mars-client/src/index.ts`,
+      "node:crypto": `${workspaceRoot}/packages/mars-node/src/index.ts`,
+      crypto: `${workspaceRoot}/packages/mars-node/src/index.ts`,
+      "node:http": `${workspaceRoot}/packages/mars-node/src/index.ts`,
+      http: `${workspaceRoot}/packages/mars-node/src/index.ts`,
     },
   },
 }

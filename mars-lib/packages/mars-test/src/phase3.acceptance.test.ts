@@ -6,12 +6,13 @@ import { createMarsRuntime } from "@mars/client"
 import { MarsCryptoHasher, createHashDigest, marsPassword } from "@mars/crypto"
 import { connectMarsKernelWorker, createKernelWorkerController, createMarsKernel, createMarsProcessWorkerFactory, detectMarsCapabilities, installKernelWorkerBootstrap, supportsKernelWorkerClient } from "@mars/kernel"
 import type { KernelWorkerMessageEvent, ProcessHandle, WorkerLike } from "@mars/kernel"
-import { createHash, createHmac, getHashes, pbkdf2Async, randomBytes, randomUUID, timingSafeEqual } from "@mars/node"
+import { createHash, createHmac, createCipheriv, createDecipheriv, createSign, createVerify, getCiphers, getCurves, getHashes, hkdfAsync, pbkdf2Async, randomBytes, randomUUID, timingSafeEqual } from "@mars/node"
 import { createMarsBun, createProcessWorkerBootstrapBlobURL, createProcessWorkerBootstrapScript, getBunApiCompat, installProcessWorkerRuntimeBootstrap } from "@mars/runtime"
 import { createWebSocketPair, upgradeToWebSocket } from "@mars/runtime"
 import { classifyRequest, createBridgeServiceWorkerKernelClient, createServiceWorkerBridgeController, createServiceWorkerRouter, handleWebSocketRoute, installServiceWorkerBootstrap, installServiceWorkerFetchHandler, moduleUrlFromPath } from "@mars/sw"
 import type { MarsServiceWorkerContainer, MarsServiceWorkerController, MarsServiceWorkerMessageEvent, MarsServiceWorkerRegistration, MarsServiceWorkerRegistrationOptions } from "@mars/sw"
 import { createBrowserAutomationProfiles, createBrowserAutomationRunPlan, createBrowserTestProfiles, createBunSpawnBrowserAutomationExecutor, runBrowserAutomationPlan } from "@mars/test"
+import type { ShellCommand } from "@mars/shell"
 import { createMarsVFS, createOPFSPersistenceAdapter, createWriteFilePatch, restoreVFSSnapshot, snapshotVFS } from "@mars/vfs"
 import {
   loadPlaygroundFiles,
@@ -416,8 +417,13 @@ test("Phase 3 compatibility matrix tracks Bun.build", () => {
     api: "Bun.build",
     status: "partial",
     phase: "M3",
-    notes: "Single or multi-entry esbuild-wasm transform output, minify output and external source map artifacts can be written to MarsVFS; full dependency bundling and splitting are pending.",
-    tests: ["Phase 3 Bun.build writes transformed output to MarsVFS", "Phase 3 Bun.build writes external source map output to MarsVFS", "Phase 3 Bun.build minifies output when requested"],
+    notes: "Single or multi-entry esbuild-wasm transform output, minify output, external source map artifacts and SHA-256 artifact hash metadata can be written to MarsVFS; full dependency bundling and splitting are pending.",
+    tests: [
+      "Phase 3 Bun.build writes transformed output to MarsVFS",
+      "Phase 3 Bun.build writes external source map output to MarsVFS",
+      "Phase 3 Bun.build minifies output when requested",
+      "Phase 3 Bun.build output artifacts include hash field",
+    ],
   })
 })
 
@@ -426,11 +432,12 @@ test("Phase 3 compatibility matrix tracks bun run", () => {
     api: "bun run",
     status: "partial",
     phase: "M3",
-    notes: "MarsShell and runtime.spawn can dispatch bun run <entry> through the current in-memory Kernel pid fallback or a configured native Process Worker factory; real ServiceWorker module interception is pending.",
+    notes: "MarsShell, runtime.spawn and Bun.spawn can dispatch bun run <entry> through the current in-memory Kernel pid fallback or a configured native Process Worker factory, and bun run <script> can execute package.json scripts through MarsShell with pre<script>/post<script> lifecycle hooks, forwarded arguments, npm_lifecycle_* / npm_package_* env, and node_modules/.bin PATH lookup; real ServiceWorker module interception is pending.",
     tests: [
       "Phase 3 shell bun run executes index.ts through kernel stdio",
       "Phase 3 shell bun run can execute through configured Process Worker",
       "Phase 3 runtime.spawn can execute bun run through configured Process Worker",
+      "Phase 3 bun run package scripts execute through shell and spawn entrypoints",
     ],
   })
 })
@@ -440,7 +447,7 @@ test("Phase 3 compatibility matrix tracks Bun.spawn", () => {
     api: "Bun.spawn",
     status: "partial",
     phase: "M3",
-    notes: "Bun.spawn({ cmd }) and runtime.spawn() can execute bun run <entry> through the current in-memory Kernel pid fallback or a configured native Process Worker factory, can forward ProcessHandle stdin writes and explicit close to the worker carrier, close initial stdin streams, and execute generic shell commands through the shell dispatch path; full streaming backpressure parity is pending.",
+    notes: "Bun.spawn({ cmd }) and runtime.spawn() can execute bun run <entry> through the current in-memory Kernel pid fallback or a configured native Process Worker factory, can forward ProcessHandle stdin writes and explicit close to the worker carrier, close initial stdin streams, execute generic shell commands through the shell dispatch path, and pipe initial stdin into shell built-ins such as cat; full streaming backpressure parity is pending.",
     tests: [
       "Phase 3 Bun.spawn executes bun run index.ts through kernel stdio",
       "Phase 3 runtime.spawn can execute bun run through configured Process Worker",
@@ -452,6 +459,7 @@ test("Phase 3 compatibility matrix tracks Bun.spawn", () => {
       "Phase 3 configured Process Worker spawn closes initial stdin stream",
       "Phase 3 Bun.spawn executes general shell command through kernel stdio",
       "Phase 3 runtime.spawn executes general shell command through kernel stdio",
+      "Phase 3 Bun.spawn and runtime.spawn pipe initial stdin into shell command",
     ],
   })
 })
@@ -1862,6 +1870,111 @@ test("Phase 3 shell bun run executes index.ts through kernel stdio", async () =>
   await runtime.dispose()
 })
 
+test("Phase 3 bun run package scripts execute through shell and spawn entrypoints", async () => {
+  const runtime = await createMarsRuntime({
+    initialFiles: {
+      "package.json": JSON.stringify({
+        name: "phase3-package-scripts",
+        scripts: {
+          prestart: "echo package-script-pre",
+          start: "echo package-script-started",
+          poststart: "echo package-script-post",
+          envcheck: "envdump from-script",
+          bincheck: "mars-bin from-script",
+        },
+      }),
+    },
+  })
+  const envdumpCommand: ShellCommand = {
+    name: "envdump",
+    run: context => ({
+      code: 0,
+      stdout: `${JSON.stringify({
+        argv: context.argv.slice(1),
+        custom: context.env.CUSTOM_SCRIPT_ENV,
+        initCwd: context.env.INIT_CWD,
+        lifecycleEvent: context.env.npm_lifecycle_event,
+        lifecycleScript: context.env.npm_lifecycle_script,
+        nodeExecPath: context.env.npm_node_execpath,
+        packageJson: context.env.npm_package_json,
+        packageName: context.env.npm_package_name,
+        path: context.env.PATH,
+        userAgent: context.env.npm_config_user_agent,
+      })}\n`,
+      stderr: "",
+    }),
+  }
+  runtime.shell.registerCommand(envdumpCommand)
+  runtime.vfs.mkdirSync("node_modules/.bin", { recursive: true })
+  runtime.vfs.writeFileSync("node_modules/.bin/mars-bin", "echo bin-script")
+
+  const shellResult = await runtime.shell.run("bun run start -- shell-arg")
+  const runtimeProcess = await runtime.spawn("bun", ["run", "start", "--", "runtime-arg"])
+  const bunProcess = await runtime.bun.spawn({ cmd: ["bun", "run", "start", "--", "bun-arg"] })
+  const shellEnvResult = await runtime.shell.run("bun run envcheck -- shell-extra", {
+    env: { CUSTOM_SCRIPT_ENV: "shell-env" },
+  })
+  const runtimeEnvProcess = await runtime.spawn("bun", ["run", "envcheck", "--", "runtime-extra"], {
+    env: { CUSTOM_SCRIPT_ENV: "runtime-env" },
+  })
+  const bunEnvProcess = await runtime.bun.spawn({
+    cmd: ["bun", "run", "envcheck", "--", "bun-extra"],
+    env: { CUSTOM_SCRIPT_ENV: "bun-env" },
+  })
+  const binResult = await runtime.shell.run("bun run bincheck")
+  const [runtimeStdout, runtimeStderr, runtimeExitCode, bunStdout, bunStderr, bunExitCode] = await Promise.all([
+    new Response(runtimeProcess.stdout).text(),
+    new Response(runtimeProcess.stderr).text(),
+    runtimeProcess.exited,
+    new Response(bunProcess.stdout).text(),
+    new Response(bunProcess.stderr).text(),
+    bunProcess.exited,
+  ])
+  const [runtimeEnvStdout, runtimeEnvExitCode, bunEnvStdout, bunEnvExitCode] = await Promise.all([
+    new Response(runtimeEnvProcess.stdout).text(),
+    runtimeEnvProcess.exited,
+    new Response(bunEnvProcess.stdout).text(),
+    bunEnvProcess.exited,
+  ])
+  const shellEnv = JSON.parse(shellEnvResult.stdout) as Record<string, unknown>
+  const runtimeEnv = JSON.parse(runtimeEnvStdout) as Record<string, unknown>
+  const bunEnv = JSON.parse(bunEnvStdout) as Record<string, unknown>
+
+  expect(shellResult.code).toBe(0)
+  expect(shellResult.stdout).toBe("package-script-pre\npackage-script-started shell-arg\npackage-script-post\n")
+  expect(shellResult.stderr).toBe("")
+  expect(runtimeStdout).toBe("package-script-pre\npackage-script-started runtime-arg\npackage-script-post\n")
+  expect(runtimeStderr).toBe("")
+  expect(runtimeExitCode).toBe(0)
+  expect(bunStdout).toBe("package-script-pre\npackage-script-started bun-arg\npackage-script-post\n")
+  expect(bunStderr).toBe("")
+  expect(bunExitCode).toBe(0)
+  expect(shellEnv.argv).toEqual(["from-script", "shell-extra"])
+  expect(shellEnv.custom).toBe("shell-env")
+  expect(shellEnv.initCwd).toBe("/workspace")
+  expect(shellEnv.lifecycleEvent).toBe("envcheck")
+  expect(shellEnv.lifecycleScript).toBe("envdump from-script")
+  expect(shellEnv.nodeExecPath).toBe("bun")
+  expect(shellEnv.packageJson).toBe("/workspace/package.json")
+  expect(shellEnv.packageName).toBe("phase3-package-scripts")
+  expect(shellEnv.userAgent).toBe("bun/mars")
+  expect(String(shellEnv.path)).toContain("/workspace/node_modules/.bin")
+  expect(runtimeEnv.argv).toEqual(["from-script", "runtime-extra"])
+  expect(runtimeEnv.custom).toBe("runtime-env")
+  expect(runtimeEnv.lifecycleEvent).toBe("envcheck")
+  expect(runtimeEnv.packageName).toBe("phase3-package-scripts")
+  expect(runtimeEnvExitCode).toBe(0)
+  expect(bunEnv.argv).toEqual(["from-script", "bun-extra"])
+  expect(bunEnv.custom).toBe("bun-env")
+  expect(bunEnv.lifecycleEvent).toBe("envcheck")
+  expect(bunEnv.packageName).toBe("phase3-package-scripts")
+  expect(bunEnvExitCode).toBe(0)
+  expect(binResult.code).toBe(0)
+  expect(binResult.stdout).toBe("bin-script from-script\n")
+
+  await runtime.dispose()
+})
+
 test("Phase 3 shell bun run can execute through configured Process Worker", async () => {
   MarsTestNativeWorker.instances.length = 0
   const runtime = await createMarsRuntime({
@@ -2277,6 +2390,37 @@ test("Phase 3 Bun.spawn executes general shell command through kernel stdio", as
   await runtime.dispose()
 })
 
+test("Phase 3 Bun.spawn and runtime.spawn pipe initial stdin into shell command", async () => {
+  const runtime = await createMarsRuntime()
+  const encoder = new TextEncoder()
+  const stdin = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode("streamed shell stdin\n"))
+      controller.close()
+    },
+  })
+
+  const runtimeProcess = await runtime.spawn("cat", [], { stdin: "runtime shell stdin\n" })
+  const bunProcess = await runtime.bun.spawn({ cmd: ["cat"], stdin })
+  const [runtimeStdout, runtimeStderr, runtimeExitCode, bunStdout, bunStderr, bunExitCode] = await Promise.all([
+    new Response(runtimeProcess.stdout).text(),
+    new Response(runtimeProcess.stderr).text(),
+    runtimeProcess.exited,
+    new Response(bunProcess.stdout).text(),
+    new Response(bunProcess.stderr).text(),
+    bunProcess.exited,
+  ])
+
+  expect(runtimeStdout).toBe("runtime shell stdin\n")
+  expect(runtimeStderr).toBe("")
+  expect(runtimeExitCode).toBe(0)
+  expect(bunStdout).toBe("streamed shell stdin\n")
+  expect(bunStderr).toBe("")
+  expect(bunExitCode).toBe(0)
+
+  await runtime.dispose()
+})
+
 test("Phase 3 Bun.spawn supports shorthand argv through configured Process Worker", async () => {
   MarsTestNativeWorker.instances = []
   const runtime = await createMarsRuntime({
@@ -2631,13 +2775,22 @@ test("Phase 3 OPFS persistence adapter uses OPFS scope when available", async ()
   })
   await adapter.open()
   await adapter.set("workspace-snapshot", "opfs available")
+  await adapter.set("workspace-log", "opfs log")
+  opfsEntries.set("other:workspace-snapshot", new TextEncoder().encode("other namespace"))
 
   expect(adapter.kind).toBe("opfs")
   expect(new TextDecoder().decode((await adapter.get("workspace-snapshot")) ?? new Uint8Array())).toBe("opfs available")
-  expect(await adapter.keys()).toEqual(["workspace-snapshot"])
+  expect(await adapter.has("workspace-snapshot")).toBe(true)
+  expect(await adapter.has("missing")).toBe(false)
+  expect(await adapter.size()).toBe(2)
+  expect(await adapter.keys()).toEqual(["workspace-log", "workspace-snapshot"])
 
   await adapter.delete("workspace-snapshot")
   expect(await adapter.get("workspace-snapshot")).toBe(null)
+  expect(await adapter.size()).toBe(1)
+  await adapter.clear()
+  expect(await adapter.keys()).toEqual([])
+  expect(opfsEntries.has("other:workspace-snapshot")).toBe(true)
   await adapter.close()
 })
 
@@ -2678,6 +2831,9 @@ test("Phase 3 browser automation run plan wires enabled profiles to runner args"
       opfs: false,
       webCrypto: true,
       worker: true,
+      crossOriginIsolated: false,
+      broadcastChannel: false,
+      indexedDB: false,
     },
     command: "playwright",
     baseArgs: ["test", "--reporter=line"],
@@ -2729,6 +2885,9 @@ test("Phase 3 browser automation runner executes plan targets and summarizes res
         opfs: false,
         webCrypto: true,
         worker: true,
+        crossOriginIsolated: false,
+        broadcastChannel: false,
+        indexedDB: false,
       },
       command: "playwright",
       baseArgs: ["test"],
@@ -3193,6 +3352,22 @@ test("Phase 3 Bun.password recognizes bcrypt and argon2 format and throws explic
   expect(argon2IdHashError).toContain("not available")
 })
 
+test("Phase 3 Bun.password handles binary inputs and malformed Mars hashes", async () => {
+  const encoder = new TextEncoder()
+  const passwordBytes = encoder.encode("mars-binary-secret")
+  const saltBytes = encoder.encode("fixed-salt-123456")
+  const hash = await marsPassword.hash(passwordBytes.buffer.slice(0), {
+    iterations: 1_000,
+    salt: saltBytes,
+  })
+
+  expect(await marsPassword.verify(passwordBytes, hash)).toBe(true)
+  expect(await marsPassword.verify(encoder.encode("wrong-secret"), hash)).toBe(false)
+  expect(await marsPassword.verify("mars-binary-secret", "$mars$pbkdf2-sha256$0$bad$bad")).toBe(false)
+  expect(await marsPassword.verify("mars-binary-secret", "$mars$pbkdf2-sha256$1000$not valid$bad")).toBe(false)
+  expect(await marsPassword.verify("mars-binary-secret", "$mars$pbkdf2-sha256$1000$Zm9v$YmFy")).toBe(false)
+})
+
 test("Phase 3 CryptoHasher supports sha384 algorithm", async () => {
   const hasher = new MarsCryptoHasher("sha384")
   expect(hasher.algorithm).toBe("sha384")
@@ -3264,10 +3439,14 @@ test("Phase 3 CryptoHasher digestSync returns sync result for md5 and throws for
   expect(sha256SyncError).toContain("digest")
 })
 
-test("Phase 3 Bun.spawnSync supports built-in commands: true, false, pwd, printf", () => {
-  const vfs = createMarsVFS()
+test("Phase 3 Bun.spawnSync supports built-in commands and VFS-backed reads", () => {
+  const vfs = createMarsVFS({ cwd: "/workspace/app" })
   const kernel = createMarsKernel()
   const bun = createMarsBun({ kernel, vfs })
+
+  vfs.mkdirSync("notes", { recursive: true })
+  vfs.writeFileSync("notes/a.txt", "alpha\n")
+  vfs.writeFileSync("notes/b.txt", "beta\n")
 
   const trueResult = bun.spawnSync({ cmd: ["true"] })
   expect(trueResult.exitCode).toBe(0)
@@ -3281,7 +3460,7 @@ test("Phase 3 Bun.spawnSync supports built-in commands: true, false, pwd, printf
   expect(pwdResult.exitCode).toBe(0)
   expect(pwdResult.success).toBe(true)
   const pwdOut = new TextDecoder().decode(pwdResult.stdout)
-  expect(pwdOut.trim().length > 0).toBe(true)
+  expect(pwdOut).toBe("/workspace/app\n")
 
   const printfResult = bun.spawnSync({ cmd: ["printf", "mars-sync-test"] })
   expect(printfResult.exitCode).toBe(0)
@@ -3291,6 +3470,47 @@ test("Phase 3 Bun.spawnSync supports built-in commands: true, false, pwd, printf
   const catResult = bun.spawnSync({ cmd: ["cat"] })
   expect(catResult.exitCode).toBe(0)
   expect(catResult.success).toBe(true)
+
+  const catStdinResult = bun.spawnSync({ cmd: ["cat"], stdin: "sync stdin payload\n" })
+  expect(catStdinResult.exitCode).toBe(0)
+  expect(catStdinResult.success).toBe(true)
+  expect(new TextDecoder().decode(catStdinResult.stdout)).toBe("sync stdin payload\n")
+
+  const lsResult = bun.spawnSync({ cmd: ["ls", "notes"] })
+  expect(lsResult.exitCode).toBe(0)
+  const lsOut = new TextDecoder().decode(lsResult.stdout)
+  expect(lsOut).toContain("a.txt")
+  expect(lsOut).toContain("b.txt")
+
+  const catFilesResult = bun.spawnSync({ cmd: ["cat", "notes/a.txt", "notes/b.txt"] })
+  expect(catFilesResult.exitCode).toBe(0)
+  expect(new TextDecoder().decode(catFilesResult.stdout)).toBe("alpha\nbeta\n")
+
+  const grepResult = bun.spawnSync({ cmd: ["grep", "alpha", "notes/a.txt"] })
+  expect(grepResult.exitCode).toBe(0)
+  expect(new TextDecoder().decode(grepResult.stdout)).toBe("/workspace/app/notes/a.txt:1:alpha\n")
+
+  const recursiveGrepResult = bun.spawnSync({ cmd: ["grep", "-R", "beta", "notes"] })
+  expect(recursiveGrepResult.exitCode).toBe(0)
+  expect(new TextDecoder().decode(recursiveGrepResult.stdout)).toBe("/workspace/app/notes/b.txt:1:beta\n")
+
+  const noMatchGrepResult = bun.spawnSync({ cmd: ["grep", "missing", "notes/a.txt"] })
+  expect(noMatchGrepResult.success).toBe(false)
+  expect(noMatchGrepResult.exitCode).toBe(1)
+  expect(new TextDecoder().decode(noMatchGrepResult.stdout)).toBe("")
+
+  const mkdirResult = bun.spawnSync({ cmd: ["mkdir", "-p", "generated/logs"] })
+  expect(mkdirResult.success).toBe(true)
+  vfs.writeFileSync("generated/logs/run.txt", "created by spawnSync\n")
+  expect(vfs.readFileSync("generated/logs/run.txt", "utf8")).toBe("created by spawnSync\n")
+
+  const rmResult = bun.spawnSync({ cmd: ["rm", "generated/logs/run.txt"] })
+  expect(rmResult.success).toBe(true)
+  expect(vfs.existsSync("generated/logs/run.txt")).toBe(false)
+
+  const missingCatResult = bun.spawnSync({ cmd: ["cat", "notes/missing.txt"] })
+  expect(missingCatResult.success).toBe(false)
+  expect(new TextDecoder().decode(missingCatResult.stderr)).toContain("missing.txt")
 
   const unknownResult = bun.spawnSync({ cmd: ["not-a-builtin-command", "arg1"] })
   expect(unknownResult.success).toBe(false)
@@ -3375,4 +3595,123 @@ test("Phase 3 Bun.sql prepared statements support parameterized queries", async 
   expect(finalizedError).toContain("finalized")
 
   await db.close()
+})
+
+test("Phase 3 node crypto hkdfAsync derives key via WebCrypto HKDF", async () => {
+  const key = new TextEncoder().encode("master-secret")
+  const salt = new TextEncoder().encode("random-salt")
+  const info = new TextEncoder().encode("mars-context-v1")
+
+  const derived32 = await hkdfAsync("sha256", key, salt, info, 32)
+  expect(derived32 instanceof Uint8Array).toBe(true)
+  expect(derived32.byteLength).toBe(32)
+
+  const derived64 = await hkdfAsync("sha512", key, salt, info, 64)
+  expect(derived64.byteLength).toBe(64)
+
+  // Same inputs should produce deterministic output
+  const derived32b = await hkdfAsync("sha256", key, salt, info, 32)
+  expect(timingSafeEqual(derived32, derived32b)).toBe(true)
+
+  // Different info => different output
+  const derived32c = await hkdfAsync("sha256", key, salt, new TextEncoder().encode("other-ctx"), 32)
+  expect(timingSafeEqual(derived32, derived32c)).toBe(false)
+})
+
+test("Phase 3 node crypto getCiphers and getCurves return available algorithms", () => {
+  const ciphers = getCiphers()
+  expect(Array.isArray(ciphers)).toBe(true)
+
+  const curves = getCurves()
+  expect(Array.isArray(curves)).toBe(true)
+  expect(curves).toContain("P-256")
+  expect(curves).toContain("P-384")
+  expect(curves).toContain("P-521")
+})
+
+test("Phase 3 node crypto createSign/Verify/CipherIV/DecipherIV throw explicit errors", () => {
+  let signError: string | null = null
+  try { createSign("sha256") } catch (error) { signError = error instanceof Error ? error.message : String(error) }
+  expect(signError).not.toBeNull()
+  expect(signError).toContain("createSign")
+  expect(signError).toContain("browser context")
+
+  let verifyError: string | null = null
+  try { createVerify("sha256") } catch (error) { verifyError = error instanceof Error ? error.message : String(error) }
+  expect(verifyError).not.toBeNull()
+  expect(verifyError).toContain("createVerify")
+
+  let cipherError: string | null = null
+  try { createCipheriv("aes-256-gcm") } catch (error) { cipherError = error instanceof Error ? error.message : String(error) }
+  expect(cipherError).not.toBeNull()
+  expect(cipherError).toContain("createCipheriv")
+
+  let decipherError: string | null = null
+  try { createDecipheriv("aes-256-gcm") } catch (error) { decipherError = error instanceof Error ? error.message : String(error) }
+  expect(decipherError).not.toBeNull()
+  expect(decipherError).toContain("createDecipheriv")
+})
+
+test("Phase 3 capabilities detects crossOriginIsolated, broadcastChannel and indexedDB", () => {
+  const caps = detectMarsCapabilities(globalThis)
+  expect(typeof caps.crossOriginIsolated).toBe("boolean")
+  expect(typeof caps.broadcastChannel).toBe("boolean")
+  expect(typeof caps.indexedDB).toBe("boolean")
+
+  // In Bun test environment: crossOriginIsolated is false, broadcastChannel may vary
+  expect(caps.crossOriginIsolated).toBe(false)
+
+  // All capabilities are serializable booleans
+  const keys = Object.keys(caps) as (keyof typeof caps)[]
+  for (const key of keys) {
+    expect(typeof caps[key]).toBe("boolean")
+  }
+
+  // Capability set covers the full expected surface
+  expect("serviceWorker" in caps).toBe(true)
+  expect("sharedArrayBuffer" in caps).toBe(true)
+  expect("opfs" in caps).toBe(true)
+  expect("webCrypto" in caps).toBe(true)
+  expect("worker" in caps).toBe(true)
+  expect("crossOriginIsolated" in caps).toBe(true)
+  expect("broadcastChannel" in caps).toBe(true)
+  expect("indexedDB" in caps).toBe(true)
+})
+
+test("Phase 3 Bun.build output artifacts include hash field", async () => {
+  const vfs = createMarsVFS()
+  vfs.writeFileSync("/workspace/entry.ts", "export const value = 42")
+
+  const result = await buildProject({
+    entrypoints: ["/workspace/entry.ts"],
+    outdir: "/dist",
+    vfs,
+  })
+
+  expect(result.success).toBe(true)
+  expect(result.outputs.length >= 1).toBe(true)
+
+  const artifact = result.outputs[0]
+  expect(typeof artifact.hash).toBe("string")
+  expect(artifact.hash!.length).toBe(16)
+
+  // Same content should produce same hash
+  const vfs2 = createMarsVFS()
+  vfs2.writeFileSync("/workspace/entry.ts", "export const value = 42")
+  const result2 = await buildProject({
+    entrypoints: ["/workspace/entry.ts"],
+    outdir: "/dist",
+    vfs: vfs2,
+  })
+  expect(result2.outputs[0].hash).toBe(artifact.hash)
+
+  // Different content should produce different hash
+  const vfs3 = createMarsVFS()
+  vfs3.writeFileSync("/workspace/entry.ts", "export const value = 99")
+  const result3 = await buildProject({
+    entrypoints: ["/workspace/entry.ts"],
+    outdir: "/dist",
+    vfs: vfs3,
+  })
+  expect(result3.outputs[0].hash).not.toBe(artifact.hash)
 })

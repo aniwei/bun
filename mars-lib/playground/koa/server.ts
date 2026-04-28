@@ -1,7 +1,6 @@
-import { createServer } from "@mars/node"
+import { createServer } from "http"
 
-import type { MarsKernel } from "@mars/kernel"
-import type { IncomingMessage, NodeHttpServer, ServerResponse } from "@mars/node"
+import type { IncomingMessage, Server as NodeHttpServer, ServerResponse } from "http"
 
 export const koaProfilePath = "/profile?name=mars"
 export const koaEchoPath = "/echo"
@@ -30,7 +29,7 @@ export interface KoaPlaygroundApp {
   listen(port?: number, callback?: () => void): NodeHttpServer
 }
 
-export function createKoaPlaygroundApp(kernel: MarsKernel): KoaPlaygroundApp {
+export function createKoaPlaygroundApp(): KoaPlaygroundApp {
   const middlewares: KoaMiddleware[] = []
 
   const app: KoaPlaygroundApp = {
@@ -73,7 +72,7 @@ export function createKoaPlaygroundApp(kernel: MarsKernel): KoaPlaygroundApp {
         }
 
         response.send(context.body)
-      }, { kernel }).listen(port, callback)
+      }).listen(port, callback)
     },
   }
 
@@ -111,6 +110,6 @@ export function createKoaPlaygroundApp(kernel: MarsKernel): KoaPlaygroundApp {
   return app
 }
 
-export function createKoaHelloWorldServer(kernel: MarsKernel): NodeHttpServer {
-  return createKoaPlaygroundApp(kernel).listen(3002)
+export function createKoaHelloWorldServer(): NodeHttpServer {
+  return createKoaPlaygroundApp().listen(3002)
 }

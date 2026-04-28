@@ -1,6 +1,4 @@
-import { createServer } from "@mars/node"
-
-import type { MarsKernel } from "@mars/kernel"
+import { createServer } from "node:http"
 
 export const nodeHttpRequestPath = "/api/users?active=1"
 export const nodeHttpHeaderName = "x-mars-node-http"
@@ -8,7 +6,7 @@ export const nodeHttpHeaderValue = "playground"
 export const nodeHttpExpectedMethod = "POST"
 export const nodeHttpRequestBody = "hello node http"
 
-export function createNodeHttpPlaygroundServer(kernel: MarsKernel) {
+export function createNodeHttpPlaygroundServer() {
   return createServer(async (request, response) => {
     const body = await request.request.text()
 
@@ -22,5 +20,5 @@ export function createNodeHttpPlaygroundServer(kernel: MarsKernel) {
       header: request.headers[nodeHttpHeaderName],
       body,
     }))
-  }, { kernel })
+  })
 }

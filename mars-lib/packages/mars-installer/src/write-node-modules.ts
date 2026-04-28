@@ -141,7 +141,7 @@ async function writePackage(
   nodeModulesPath: string,
   pkg: ResolvedPackage,
 ): Promise<void> {
-  const packageRoot = normalizePath(pkg.name, nodeModulesPath)
+  const packageRoot = normalizePath(pkg.installPath ?? pkg.name, nodeModulesPath)
   if (pkg.workspacePath) {
     await writeWorkspacePackage(vfs, packageRoot, pkg)
     return

@@ -19,12 +19,14 @@ export interface ModuleLoader {
 
 export interface ModuleLoaderOptions {
   vfs: MarsVFS
+  coreModules?: Record<string, unknown>
   transpiler?: Transpiler
   resolveOptions?: ResolveOptions
 }
 
 class MarsModuleLoader implements ModuleLoader {
   readonly #vfs: MarsVFS
+  readonly #coreModules: Record<string, unknown>
   readonly #transpiler: Transpiler
   readonly #resolveOptions?: ResolveOptions
   readonly #records = new Map<string, ModuleRecord>()
@@ -32,11 +34,15 @@ class MarsModuleLoader implements ModuleLoader {
 
   constructor(options: ModuleLoaderOptions) {
     this.#vfs = options.vfs
+    this.#coreModules = options.coreModules ?? {}
     this.#transpiler = options.transpiler ?? createTranspiler()
     this.#resolveOptions = options.resolveOptions
   }
 
   async import(specifier: string, parentUrl = "/workspace/index.ts"): Promise<unknown> {
+    const coreModule = this.#resolveCoreModule(specifier)
+    if (coreModule !== undefined) return namespaceForCoreModule(coreModule)
+
     const loadedModule = await this.#load(specifier, parentUrl)
     this.#trackImporter(parentUrl, loadedModule.path)
     const cachedRecord = this.#records.get(loadedModule.path)
@@ -55,6 +61,9 @@ class MarsModuleLoader implements ModuleLoader {
   }
 
   require(specifier: string, parentPath: string): unknown {
+    const coreModule = this.#resolveCoreModule(specifier)
+    if (coreModule !== undefined) return coreModule
+
     const resolvedPath = this.#resolve(specifier, parentPath)
     if (!resolvedPath) throw new Error(`Cannot resolve module: ${specifier}`)
     this.#trackImporter(parentPath, resolvedPath)
@@ -86,7 +95,7 @@ class MarsModuleLoader implements ModuleLoader {
       return jsonValue
     }
 
-    const transformedCode = moduleFormat === "cjs"
+    const transformedCode = moduleFormat === "cjs" || resolvedPath.endsWith(".js")
       ? sourceCode
       : transformSourceCode(sourceCode, inferSourceLoader(resolvedPath))
     const namespace: ModuleNamespace = {}
@@ -205,9 +214,25 @@ class MarsModuleLoader implements ModuleLoader {
     })
   }
 
+  #resolveCoreModule(specifier: string): unknown {
+    if (Object.prototype.hasOwnProperty.call(this.#coreModules, specifier)) {
+      return this.#coreModules[specifier]
+    }
+
+    return undefined
+  }
+
   #readText(path: string): string {
     return String(this.#vfs.readFileSync(path, "utf8"))
   }
+}
+
+function namespaceForCoreModule(coreModule: unknown): unknown {
+  if (!coreModule || typeof coreModule !== "object") return { default: coreModule }
+
+  const namespace = { ...(coreModule as Record<string, unknown>) }
+  if (!("default" in namespace)) namespace.default = coreModule
+  return namespace
 }
 
 export function createModuleLoader(options: ModuleLoaderOptions): ModuleLoader {

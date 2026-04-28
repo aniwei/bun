@@ -18,7 +18,7 @@
 - 确认 MarsVFS 在 M1 需要覆盖同步与异步基础读写，支持 `exists`、`readFile`、`writeFile`、`stat`、`readdir`、`mkdir`、`unlink`、`rename`。
 - 确认 MarsServiceWorkerRuntime 需要完成虚拟端口请求转发，访问 `http://mars.localhost:3000/` 时能转发到 MarsKernel 注册的 VirtualServer。
 - 确认 Bun API Facade 在 M1 只需要优先实现 `Bun.file()`、`Bun.write()`、`Bun.serve()`、`Bun.fetch()` 的验收路径。
-- 确认 Node HTTP 兼容层只做纯 `node:http`、Express app/router/middleware 与 Koa async middleware 所需最小实现；`node:http` 直接注册 MarsKernel 虚拟端口，不基于 `Bun.serve()` 包装。
+- 确认 Node HTTP 兼容层只做纯 `node:http`/`http`、Express app/router/middleware 与 Koa async middleware 所需最小实现；Mars loader 注入 `node:http`/`http` 核心模块，应用源码不直接引用 `@mars/node`；`node:http` 直接注册 MarsKernel 虚拟端口，不基于 `Bun.serve()` 包装。
 - 确认 MarsShell 在 M1 只做基础命令和结构化结果，不做完整 POSIX shell。
 
 ### 代码风格
@@ -57,7 +57,7 @@
 | M1-14 | Done | 100% | Pass | `mars-lib/packages/mars-runtime/src/bun-write.ts` | 实现 `Bun.write()` 到 MarsVFS 的写入路径。 | 核对 RFC 第 11 节和 VFS 写入语义。 |
 | M1-15 | Done | 100% | Pass | `mars-lib/packages/mars-runtime/src/bun-serve.ts` | 实现 `Bun.serve()`、Server 对象、动态 port 注册、stop/reload 骨架。 | 核对 RFC 第 11 与第 19.1 节。 |
 | M1-16 | Done | 100% | Pass | `mars-lib/packages/mars-runtime/src/install-global.ts` | 安装 `globalThis.Bun`、`process`、基础 `Buffer` 入口。 | 核对 RFC 第 11 节全局对象要求。 |
-| M1-17 | Done | 100% | Pass | `mars-lib/packages/mars-node/src/http.ts` | 实现 `createServer()`、`listen()`/`listen(0)`、`close()`、`address()` 的最小 HTTP 兼容层。 | 核对 RFC 第 12 节纯 node:http 与 Express/Koa 映射。 |
+| M1-17 | Done | 100% | Pass | `mars-lib/packages/mars-node/src/http.ts` | 实现 `createServer()`、`listen()`/`listen(0)`、`close()`、`address()` 的最小 HTTP 兼容层，并通过 runtime core module 注入绑定 `node:http`/`http`。 | 核对 RFC 第 12 节纯 node:http 与 Express/Koa 映射。 |
 | M1-18 | Done | 100% | Pass | `mars-lib/packages/mars-node/src/incoming-message.ts` | 将 Request 适配为 Express/Koa 可读的 IncomingMessage 子集。 | 核对 Express/Koa hello world 所需 req 字段。 |
 | M1-19 | Done | 100% | Pass | `mars-lib/packages/mars-node/src/server-response.ts` | 将 ServerResponse 写入转换为 Web Response。 | 核对 `res.send()` 和 Koa body 输出路径。 |
 | M1-20 | Done | 100% | Pass | `mars-lib/packages/mars-shell/src/parser.ts` | 实现基础 shell 命令解析，支持命令、参数、`&&`。 | 核对 RFC 第 15 节基础 Shell 范围。 |
@@ -67,16 +67,16 @@
 | M1-24 | Done | 100% | Pass | `mars-lib/packages/mars-client/src/preview.ts` | 实现 `preview(port)`，生成 `http://mars.localhost:${port}/`。 | 核对 RFC 第 10 和第 19.2 节虚拟服务访问。 |
 | M1-25 | Done | 100% | Pass | `mars-lib/packages/mars-test/src/acceptance.ts` | 定义 `AcceptanceCase`、`AcceptanceRunnerOptions`、`AcceptanceResult` 测试接口。 | 核对 RFC 第 21 节验收测试接口。 |
 | M1-26 | Done | 100% | Pass | `mars-lib/playground/core-modules/bun/`, `mars-lib/playground/node-http/` | 编写 Runtime/VFS/Shell、Bun.file/Bun.write、Bun.serve 和纯 node:http 使用实例。 | 核对 RFC 第 6、9、11、12、15、19.1 与 20.5 节验收标准。 |
-| M1-27 | Done | 100% | Pass | `mars-lib/playground/express/server.ts` | 编写 Express 风格 app/use/get/post/listen 验收样例，覆盖 middleware、GET query、POST JSON body 和 close 解绑。 | 核对 RFC 第 20.1 节 Express 验收标准。 |
-| M1-28 | Done | 100% | Pass | `mars-lib/playground/koa/server.ts` | 编写 Koa async middleware 洋葱模型验收样例，覆盖 next/after middleware、GET query、POST body 和 close 解绑。 | 核对 RFC 第 20.2 节 Koa 验收标准。 |
-| M1-29 | Done | 100% | Pass | `mars-lib/packages/mars-test/src/phase1.acceptance.test.ts` | 真实读取 playground Phase 1 使用实例，覆盖 VFS、Bun.serve、node:http、Express、Koa、Shell 基础命令。 | 核对 RFC 第 20 和第 21 节验收项。 |
+| M1-27 | Done | 100% | Pass | `mars-lib/playground/express/server.ts` | 编写 Express 风格 app/use/get/post/listen 验收样例，源码通过 `node:http` 创建服务，覆盖 middleware、GET query、POST JSON body 和 close 解绑。 | 核对 RFC 第 20.1 节 Express 验收标准。 |
+| M1-28 | Done | 100% | Pass | `mars-lib/playground/koa/server.ts` | 编写 Koa async middleware 洋葱模型验收样例，源码通过 `http` 创建服务，覆盖 next/after middleware、GET query、POST body 和 close 解绑。 | 核对 RFC 第 20.2 节 Koa 验收标准。 |
+| M1-29 | Done | 100% | Pass | `mars-lib/packages/mars-test/src/phase1.acceptance.test.ts` | 真实读取 playground Phase 1 使用实例，通过 Mars loader 执行源码并覆盖 VFS、Bun.serve、node:http、http、Express、Koa、Shell 基础命令。 | 核对 RFC 第 20 和第 21 节验收项。 |
 
 ## Phase 完成标准
 
 - `MarsRuntime.boot()` 可以创建可用 runtime。
 - MarsVFS 可以完成基础读写、目录操作和 stat。
 - `Bun.serve()` 注册虚拟 3000 端口后，Service Worker router 可以将请求转发到对应 handler。
-- 纯 node:http、Express app/router/middleware 和 Koa async middleware 洋葱模型通过验收。
+- 纯 `node:http`、`http`、Express app/router/middleware 和 Koa async middleware 洋葱模型通过验收，且应用源码走 Node core specifier 而不是 `@mars/node`。
 - Playground 已接入 `playground/core-modules/bun`、`playground/node-http`、`playground/express` 与 `playground/koa`，并在 Phase 1 acceptance test 和 Vite React playground 中覆盖核心路径。
 - MarsShell 可执行 `ls`、`cd`、`pwd`、`cat`、`echo`、`mkdir`、`rm`，返回 `CommandResult`。
 - Phase 1 测试全部通过。

@@ -5,6 +5,9 @@ export interface MarsRuntimeCapabilities {
   opfs: boolean
   webCrypto: boolean
   worker: boolean
+  crossOriginIsolated: boolean
+  broadcastChannel: boolean
+  indexedDB: boolean
 }
 
 export function detectMarsCapabilities(scope: typeof globalThis = globalThis): MarsRuntimeCapabilities {
@@ -21,5 +24,8 @@ export function detectMarsCapabilities(scope: typeof globalThis = globalThis): M
     opfs: typeof navigatorLike?.storage?.getDirectory === "function",
     webCrypto: Boolean(scope.crypto?.subtle),
     worker: typeof scope.Worker === "function",
+    crossOriginIsolated: Boolean((scope as typeof globalThis & { crossOriginIsolated?: boolean }).crossOriginIsolated),
+    broadcastChannel: typeof (scope as typeof globalThis & { BroadcastChannel?: unknown }).BroadcastChannel === "function",
+    indexedDB: Boolean((scope as typeof globalThis & { indexedDB?: unknown }).indexedDB),
   }
 }

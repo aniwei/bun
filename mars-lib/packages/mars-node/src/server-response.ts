@@ -1,5 +1,8 @@
-export class ServerResponse {
+import { EventEmitter } from "./core"
+
+export class ServerResponse extends EventEmitter {
   statusCode = 200
+  statusMessage = "OK"
   readonly #headers = new Headers()
   readonly #chunks: Uint8Array[] = []
   #ended = false
@@ -8,6 +11,18 @@ export class ServerResponse {
     this.#resolveFinished = resolve
   })
 
+  get headersSent(): boolean {
+    return this.#ended
+  }
+
+  get finished(): boolean {
+    return this.#ended
+  }
+
+  get writableEnded(): boolean {
+    return this.#ended
+  }
+
   setHeader(name: string, value: string | number | readonly string[]): this {
     this.#headers.set(name, Array.isArray(value) ? value.join(", ") : String(value))
     return this
@@ -15,6 +30,15 @@ export class ServerResponse {
 
   getHeader(name: string): string | null {
     return this.#headers.get(name)
+  }
+
+  getHeaders(): Record<string, string> {
+    return Object.fromEntries(this.#headers.entries())
+  }
+
+  removeHeader(name: string): this {
+    this.#headers.delete(name)
+    return this
   }
 
   writeHead(statusCode: number, headers?: Record<string, string | number>): this {
@@ -36,6 +60,8 @@ export class ServerResponse {
     if (this.#ended) return this
 
     this.#ended = true
+  this.emit("finish")
+  this.emit("close")
     this.#resolveFinished(this.toResponse())
     return this
   }

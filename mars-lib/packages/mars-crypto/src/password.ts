@@ -131,11 +131,25 @@ function parsePasswordHash(hash: string): { iterations: number; salt: Uint8Array
   const iterations = Number(iterationsText)
   if (!Number.isInteger(iterations) || iterations <= 0) return null
 
-  return {
-    iterations,
-    salt: fromBase64Url(saltText),
-    digest: fromBase64Url(digestText),
+  if (!isBase64Url(saltText) || !isBase64Url(digestText)) return null
+
+  try {
+    const salt = fromBase64Url(saltText)
+    const digest = fromBase64Url(digestText)
+    if (salt.byteLength === 0 || digest.byteLength !== digestBitLength / 8) return null
+
+    return {
+      iterations,
+      salt,
+      digest,
+    }
+  } catch {
+    return null
   }
+}
+
+function isBase64Url(value: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(value)
 }
 
 function randomSalt(): Uint8Array {

@@ -173,13 +173,15 @@ SWC 取舍:
 31. installer 覆盖 lifecycle scripts: package/root `preinstall`、`install`、`postinstall` 会在 `bun install` 写入 `node_modules` 后通过 MarsShell 执行，脚本失败会使安装失败。
 32. installer 覆盖 lifecycle env: lifecycle scripts 可获得 `npm_lifecycle_*`、`npm_command`、`npm_package_json` 和从所属 package.json 扁平化的 `npm_package_*`。
 33. installer 覆盖 package JS bins: package `bin` 元数据会生成 `node_modules/.bin` shim，lifecycle scripts 可通过 `PATH` 调用 shebang JS binary，并获得 Mars 注入的 `process.env` / `process.argv`。
+34. installer 覆盖冲突 transitive dependency: root 已有不兼容版本时，依赖会安装到 requester 的嵌套 `node_modules`，resolver 会从对应 package 路径命中 nested version。
+35. installer 与 runtime core module 注入联动覆盖官方 npm-installed `express@5.1.0` / `koa@2.14.2` fixture: `bun install` 写入 `node_modules` 后，CJS 应用可 `require("express")`、`require("koa")` 和 `require("node:http")`，并通过 Mars 注入的 `http`/`node:http` 启动虚拟服务。
 
 验证结果:
 
 ```text
-98 pass
+151 pass
 0 fail
-594 expect() calls
+991 expect() calls
 ```
 
 ## 2.1 新增工程化模块复核

@@ -33,7 +33,7 @@ export async function createInstallPlan(
   }
 
   const orderedPackages = [...packages.values()].sort((left, right) => {
-    return left.name.localeCompare(right.name)
+    return packageInstallKey(left).localeCompare(packageInstallKey(right))
   })
   const lockfile = options.lockfile === false
     ? undefined
@@ -46,11 +46,11 @@ export async function createInstallPlan(
         peerDependencies: requestedPeerDependencies,
       },
       packages: Object.fromEntries(
-        orderedPackages.map(pkg => [pkg.name, pkg.version]),
+        orderedPackages.map(pkg => [packageInstallKey(pkg), pkg.version]),
       ),
       entries: Object.fromEntries(
         orderedPackages.map(pkg => [
-          pkg.name,
+          packageInstallKey(pkg),
           {
             version: pkg.version,
             dependencies: resolveLockfileDependencyVersions(pkg.dependencies, packages),
@@ -69,25 +69,40 @@ export async function createInstallPlan(
     ...(lockfile ? { lockfile } : {}),
   }
 
-  async function addPackage(name: string, range: string): Promise<void> {
-    const existingPackage = packages.get(name)
-    if (existingPackage) {
-      assertPackageRange(existingPackage, range, name)
+  async function addPackage(name: string, range: string, requester?: ResolvedPackage): Promise<void> {
+    const existingPackage = findVisiblePackage(packages, requester, name, range)
+    if (existingPackage) return
+
+    if (!requester) {
+      const rootPackage = packages.get(name)
+      if (rootPackage) {
+        assertPackageRange(rootPackage, range, name)
+      }
+    }
+
+    const installPath = chooseInstallPath(packages, requester, name)
+    const packageAtInstallPath = packages.get(installPath)
+    if (packageAtInstallPath) {
+      assertPackageRange(packageAtInstallPath, range, name)
       return
     }
 
     const workspacePackage = workspacePackages.get(name)
-    const resolvedPackage = workspacePackage
+    const packageResolution = workspacePackage
       ? resolveWorkspacePackage(workspacePackage, range)
       : await resolvePackage(cache, name, range, options, registryClient)
-    packages.set(name, resolvedPackage)
+    const resolvedPackage = {
+      ...packageResolution,
+      ...(installPath === name ? {} : { installPath }),
+    }
+    packages.set(installPath, resolvedPackage)
 
     for (const [dependencyName, dependencyRange] of sortedEntries(resolvedPackage.dependencies)) {
-      await addPackage(dependencyName, dependencyRange)
+      await addPackage(dependencyName, dependencyRange, resolvedPackage)
     }
 
     for (const [dependencyName, dependencyRange] of sortedEntries(resolvedPackage.optionalDependencies)) {
-      await addOptionalPackage(dependencyName, dependencyRange)
+      await addOptionalPackage(dependencyName, dependencyRange, resolvedPackage)
     }
 
     for (const [dependencyName, dependencyRange] of sortedEntries(resolvedPackage.peerDependencies)) {
@@ -105,9 +120,17 @@ export async function createInstallPlan(
   }
 
   async function addPeerPackage(requester: ResolvedPackage, name: string, range: string): Promise<void> {
-    const existingPackage = packages.get(name)
-    if (existingPackage) {
-      assertPackageRange(existingPackage, range, name, requester)
+    const visiblePackage = findNearestVisiblePackage(packages, requester, name)
+    if (visiblePackage) {
+      assertPackageRange(visiblePackage, range, name, requester)
+      return
+    }
+
+    const rootRequestedRange = requestedDependencies[name] ?? requestedPeerDependencies[name]
+    if (rootRequestedRange) {
+      await addPackage(name, rootRequestedRange)
+      const installedPackage = findNearestVisiblePackage(packages, requester, name)
+      if (installedPackage) assertPackageRange(installedPackage, range, name, requester)
       return
     }
 
@@ -115,24 +138,18 @@ export async function createInstallPlan(
   }
 
   async function addOptionalPeerPackage(requester: ResolvedPackage, name: string, range: string): Promise<void> {
-    const existingPackage = packages.get(name)
-    if (existingPackage) {
-      assertPackageRange(existingPackage, range, name, requester)
-      return
-    }
-
-    await addOptionalPackage(name, range)
+    await addOptionalPackage(name, range, requester)
   }
 
-  async function addOptionalPackage(name: string, range: string): Promise<void> {
+  async function addOptionalPackage(name: string, range: string, requester?: ResolvedPackage): Promise<void> {
     const packageSnapshot = new Map(packages)
 
     try {
-      await addPackage(name, range)
+      await addPackage(name, range, requester)
     } catch {
       packages.clear()
-      for (const [packageName, pkg] of packageSnapshot) {
-        packages.set(packageName, pkg)
+      for (const [installPath, pkg] of packageSnapshot) {
+        packages.set(installPath, pkg)
       }
     }
   }
@@ -144,8 +161,79 @@ function resolveLockfileDependencyVersions(
 ): Record<string, string> {
   return Object.fromEntries(
     sortedEntries(dependencies)
-      .map(([name, range]) => [name, resolvedPackages.get(name)?.version ?? range]),
+      .map(([name, range]) => [name, findResolvedPackageByName(resolvedPackages, name)?.version ?? range]),
   )
+}
+
+function packageInstallKey(pkg: ResolvedPackage): string {
+  return pkg.installPath ?? pkg.name
+}
+
+function findResolvedPackageByName(
+  packages: Map<string, ResolvedPackage>,
+  name: string,
+): ResolvedPackage | null {
+  for (const pkg of packages.values()) {
+    if (pkg.name === name) return pkg
+  }
+
+  return null
+}
+
+function findVisiblePackage(
+  packages: Map<string, ResolvedPackage>,
+  requester: ResolvedPackage | undefined,
+  name: string,
+  range: string,
+): ResolvedPackage | null {
+  for (const installPath of visiblePackageInstallPaths(requester, name)) {
+    const pkg = packages.get(installPath)
+    if (pkg && packageVersionSatisfies(pkg.version, range)) return pkg
+  }
+
+  return null
+}
+
+function findNearestVisiblePackage(
+  packages: Map<string, ResolvedPackage>,
+  requester: ResolvedPackage | undefined,
+  name: string,
+): ResolvedPackage | null {
+  for (const installPath of visiblePackageInstallPaths(requester, name)) {
+    const pkg = packages.get(installPath)
+    if (pkg) return pkg
+  }
+
+  return null
+}
+
+function chooseInstallPath(
+  packages: Map<string, ResolvedPackage>,
+  requester: ResolvedPackage | undefined,
+  name: string,
+): string {
+  if (!requester || !packages.has(name)) return name
+
+  for (const installPath of visiblePackageInstallPaths(requester, name).filter(path => path !== name)) {
+    if (!packages.has(installPath)) return installPath
+  }
+
+  return `${packageInstallKey(requester)}/node_modules/${name}`
+}
+
+function visiblePackageInstallPaths(requester: ResolvedPackage | undefined, name: string): string[] {
+  const paths: string[] = []
+  let cursor = requester ? packageInstallKey(requester) : ""
+
+  while (cursor) {
+    paths.push(`${cursor}/node_modules/${name}`)
+    const nestedIndex = cursor.lastIndexOf("/node_modules/")
+    if (nestedIndex === -1) break
+    cursor = cursor.slice(0, nestedIndex)
+  }
+
+  paths.push(name)
+  return paths
 }
 
 function resolveWorkspacePackage(workspacePackage: WorkspacePackage, range: string): ResolvedPackage {

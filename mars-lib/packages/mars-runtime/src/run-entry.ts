@@ -2,6 +2,7 @@ import { createModuleLoader } from "@mars/loader"
 import { normalizePath } from "@mars/vfs"
 
 import { installMarsRuntimeContext } from "./install-global"
+import { createRuntimeNodeCoreModules } from "./node-core-modules"
 
 import type { RuntimeContext } from "./types"
 
@@ -16,6 +17,7 @@ export async function runEntryScript(
 ): Promise<unknown> {
   const moduleLoader = createModuleLoader({
     vfs: context.vfs,
+    coreModules: createRuntimeNodeCoreModules(context),
   })
   const baseDirectory = options.cwd ?? context.vfs.cwd()
   const entryPath = normalizePath(entry, baseDirectory)

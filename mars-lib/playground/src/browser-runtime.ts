@@ -6,11 +6,11 @@ import { createMemoryPackageCacheFromFixture, createNpmRegistryClient } from "@m
 import { connectMarsKernelWorker, createKernelWorkerController, createMarsKernel, createMarsProcessWorkerFactory, installKernelWorkerBootstrap, supportsKernelWorkerClient } from "@mars/kernel"
 import { createModuleLoader } from "@mars/loader"
 import { resolve } from "@mars/resolver"
-import { createProcessWorkerBootstrapBlobURL, createProcessWorkerBootstrapScript, installProcessWorkerRuntimeBootstrap } from "@mars/runtime"
+import { createProcessWorkerBootstrapBlobURL, createProcessWorkerBootstrapScript, createRuntimeNodeCoreModules, installProcessWorkerRuntimeBootstrap } from "@mars/runtime"
 import { createBridgeServiceWorkerKernelClient, createServiceWorkerBridgeController, createServiceWorkerRouter, installServiceWorkerBootstrap, moduleUrlFromPath } from "@mars/sw"
 import { createTranspiler } from "@mars/transpiler"
 import { createOPFSPersistenceAdapter, createWriteFilePatch, restoreVFSSnapshot, snapshotVFS } from "@mars/vfs"
-import { createHmac } from "@mars/node"
+import { createHmac } from "node:crypto"
 import {
   sqliteDatabasePath,
   sqliteFirstNote,
@@ -28,30 +28,6 @@ import {
   sqliteWasmTableName,
   sqliteWasmValue,
 } from "../core-modules/runtime/sqlite-wasm"
-import {
-  createExpressPlaygroundApp,
-  expressCreatePath,
-  expressRequestBody,
-  expressTraceHeader,
-  expressTraceHeaderValue,
-  expressUsersPath,
-} from "../express/server"
-import {
-  createKoaPlaygroundApp,
-  koaEchoPath,
-  koaProfilePath,
-  koaRequestBody,
-  koaTraceHeader,
-  koaTraceHeaderValue,
-} from "../koa/server"
-import {
-  createNodeHttpPlaygroundServer,
-  nodeHttpExpectedMethod,
-  nodeHttpHeaderName,
-  nodeHttpHeaderValue,
-  nodeHttpRequestBody,
-  nodeHttpRequestPath,
-} from "../node-http/server"
 import { cryptoFixtureText, cryptoHmacKey, expectedHmacSha256Hex, expectedMd5Hex, expectedSha256Hex } from "../core-modules/runtime/crypto"
 import {
   processWorkerBootstrapArgv,
@@ -87,6 +63,9 @@ import moduleCasesJson from "../module-cases.json"
 
 import phase1BunFileSource from "../core-modules/bun/bun-file.ts?raw"
 import phase1BunServeSource from "../core-modules/bun/bun-serve.ts?raw"
+import phase1ExpressSource from "../express/server.ts?raw"
+import phase1KoaSource from "../koa/server.ts?raw"
+import phase1NodeHttpSource from "../node-http/server.ts?raw"
 import phase1RuntimeVfsShellSource from "../core-modules/bun/vfs-shell.ts?raw"
 import resolverManifestText from "../core-modules/resolver/browser-map.json?raw"
 import transpilerAppSource from "../core-modules/transpiler/app.tsx?raw"
@@ -199,6 +178,33 @@ interface BunServePlayground {
 
 interface GrepJsonResult {
   matches: Array<{ file: string; line: number; text: string }>
+}
+
+interface NodeHttpPlaygroundModule {
+  createNodeHttpPlaygroundServer(): { listen(port?: number, callback?: () => void): unknown; address(): { port: number } | null; close(): void; on(event: string, listener: () => void): unknown }
+  nodeHttpExpectedMethod: string
+  nodeHttpHeaderName: string
+  nodeHttpHeaderValue: string
+  nodeHttpRequestBody: string
+  nodeHttpRequestPath: string
+}
+
+interface ExpressPlaygroundModule {
+  createExpressPlaygroundApp(): { listen(port?: number, callback?: () => void): { close(): void } }
+  expressCreatePath: string
+  expressRequestBody: string
+  expressTraceHeader: string
+  expressTraceHeaderValue: string
+  expressUsersPath: string
+}
+
+interface KoaPlaygroundModule {
+  createKoaPlaygroundApp(): { listen(port?: number, callback?: () => void): { close(): void } }
+  koaEchoPath: string
+  koaProfilePath: string
+  koaRequestBody: string
+  koaTraceHeader: string
+  koaTraceHeaderValue: string
 }
 
 class PlaygroundServiceWorkerController implements MarsServiceWorkerController {
@@ -677,11 +683,34 @@ async function runPhase1BunServeCase(): Promise<PlaygroundRunResult> {
   }
 }
 
+async function importPhase1ServerPlayground<T>(source: string): Promise<{
+  runtime: Awaited<ReturnType<typeof createMarsRuntime>>
+  playground: T
+}> {
+  const runtime = await createMarsRuntime({
+    initialFiles: {
+      src: {
+        "server.ts": source,
+      },
+    },
+  })
+  const moduleLoader = createModuleLoader({
+    vfs: runtime.vfs,
+    coreModules: createRuntimeNodeCoreModules({
+      vfs: runtime.vfs,
+      kernel: runtime.kernel,
+    }),
+  })
+  const playground = await moduleLoader.import("./server", "/workspace/src/index.ts") as T
+
+  return { runtime, playground }
+}
+
 async function runPhase1NodeHttpCase(): Promise<PlaygroundRunResult> {
-  const runtime = await createMarsRuntime()
+  const { runtime, playground } = await importPhase1ServerPlayground<NodeHttpPlaygroundModule>(phase1NodeHttpSource)
 
   try {
-    const server = createNodeHttpPlaygroundServer(runtime.kernel)
+    const server = playground.createNodeHttpPlaygroundServer()
     let requestEvents = 0
     let listeningEvents = 0
     let closeEvents = 0
@@ -701,12 +730,12 @@ async function runPhase1NodeHttpCase(): Promise<PlaygroundRunResult> {
     const address = server.address()
     if (!address || address.port <= 0) return fail("phase1-node-http-core", "server did not listen")
 
-    const response = await runtime.fetch(`${runtime.preview(address.port)}${nodeHttpRequestPath.slice(1)}`, {
-      method: nodeHttpExpectedMethod,
+    const response = await runtime.fetch(`${runtime.preview(address.port)}${playground.nodeHttpRequestPath.slice(1)}`, {
+      method: playground.nodeHttpExpectedMethod,
       headers: {
-        [nodeHttpHeaderName]: nodeHttpHeaderValue,
+        [playground.nodeHttpHeaderName]: playground.nodeHttpHeaderValue,
       },
-      body: nodeHttpRequestBody,
+      body: playground.nodeHttpRequestBody,
     })
     const payload = await response.json() as {
       method?: string
@@ -718,36 +747,36 @@ async function runPhase1NodeHttpCase(): Promise<PlaygroundRunResult> {
 
     if (response.status !== 201) return fail("phase1-node-http-core", `status ${response.status}`)
     if (response.headers.get("x-mars-handler") !== "node-http") return fail("phase1-node-http-core", "missing handler header")
-    if (payload.method !== nodeHttpExpectedMethod) return fail("phase1-node-http-core", JSON.stringify(payload))
-    if (payload.url !== nodeHttpRequestPath) return fail("phase1-node-http-core", JSON.stringify(payload))
-    if (payload.header !== nodeHttpHeaderValue) return fail("phase1-node-http-core", JSON.stringify(payload))
-    if (payload.body !== nodeHttpRequestBody) return fail("phase1-node-http-core", JSON.stringify(payload))
+    if (payload.method !== playground.nodeHttpExpectedMethod) return fail("phase1-node-http-core", JSON.stringify(payload))
+    if (payload.url !== playground.nodeHttpRequestPath) return fail("phase1-node-http-core", JSON.stringify(payload))
+    if (payload.header !== playground.nodeHttpHeaderValue) return fail("phase1-node-http-core", JSON.stringify(payload))
+    if (payload.body !== playground.nodeHttpRequestBody) return fail("phase1-node-http-core", JSON.stringify(payload))
     if (runtime.kernel.resolvePort(address.port) !== null) return fail("phase1-node-http-core", "port still registered after close")
     if (!listenCallbackCalled || listeningEvents !== 1 || requestEvents !== 1 || closeEvents !== 1) {
       return fail("phase1-node-http-core", `events ${listeningEvents}/${requestEvents}/${closeEvents}`)
     }
 
-    return pass("phase1-node-http-core", `${nodeHttpExpectedMethod} ${payload.url} port=${address.port}`)
+    return pass("phase1-node-http-core", `${playground.nodeHttpExpectedMethod} ${payload.url} port=${address.port}`)
   } finally {
     await runtime.dispose()
   }
 }
 
 async function runPhase1ExpressCase(): Promise<PlaygroundRunResult> {
-  const runtime = await createMarsRuntime()
+  const { runtime, playground } = await importPhase1ServerPlayground<ExpressPlaygroundModule>(phase1ExpressSource)
 
   try {
-    const server = createExpressPlaygroundApp(runtime.kernel).listen(3001)
-    const response = await runtime.fetch(runtime.preview(3001) + expressUsersPath.slice(1))
+    const server = playground.createExpressPlaygroundApp().listen(3001)
+    const response = await runtime.fetch(runtime.preview(3001) + playground.expressUsersPath.slice(1))
     const payload = await response.json() as { framework: string; method: string; route: string; active: string; middleware: string }
-    const createResponse = await runtime.fetch(runtime.preview(3001) + expressCreatePath.slice(1), {
+    const createResponse = await runtime.fetch(runtime.preview(3001) + playground.expressCreatePath.slice(1), {
       method: "POST",
-      body: expressRequestBody,
+      body: playground.expressRequestBody,
     })
     const createPayload = await createResponse.json() as { framework: string; route: string; method: string; body: { name: string; role: string } }
     server.close()
 
-    if (response.headers.get(expressTraceHeader) !== expressTraceHeaderValue) return fail("phase1-node-http-express", "missing middleware header")
+    if (response.headers.get(playground.expressTraceHeader) !== playground.expressTraceHeaderValue) return fail("phase1-node-http-express", "missing middleware header")
     if (payload.framework !== "express" || payload.route !== "users.index" || payload.active !== "1") return fail("phase1-node-http-express", JSON.stringify(payload))
     if (createResponse.status !== 201 || createPayload.route !== "users.create" || createPayload.body.name !== "Ada") return fail("phase1-node-http-express", JSON.stringify(createPayload))
     if (runtime.kernel.resolvePort(3001) !== null) return fail("phase1-node-http-express", "port still registered after close")
@@ -759,22 +788,22 @@ async function runPhase1ExpressCase(): Promise<PlaygroundRunResult> {
 }
 
 async function runPhase1KoaCase(): Promise<PlaygroundRunResult> {
-  const runtime = await createMarsRuntime()
+  const { runtime, playground } = await importPhase1ServerPlayground<KoaPlaygroundModule>(phase1KoaSource)
 
   try {
-    const server = createKoaPlaygroundApp(runtime.kernel).listen(3002)
-    const response = await runtime.fetch(runtime.preview(3002) + koaProfilePath.slice(1))
+    const server = playground.createKoaPlaygroundApp().listen(3002)
+    const response = await runtime.fetch(runtime.preview(3002) + playground.koaProfilePath.slice(1))
     const payload = await response.json() as { framework: string; route: string; name: string; middleware: string }
-    const echoResponse = await runtime.fetch(runtime.preview(3002) + koaEchoPath.slice(1), {
+    const echoResponse = await runtime.fetch(runtime.preview(3002) + playground.koaEchoPath.slice(1), {
       method: "POST",
-      body: koaRequestBody,
+      body: playground.koaRequestBody,
     })
     const echoPayload = await echoResponse.json() as { framework: string; route: string; body: string }
     server.close()
 
-    if (response.headers.get(koaTraceHeader) !== koaTraceHeaderValue || response.headers.get("x-mars-koa-after") !== "returned") return fail("phase1-node-http-koa", "missing middleware headers")
+    if (response.headers.get(playground.koaTraceHeader) !== playground.koaTraceHeaderValue || response.headers.get("x-mars-koa-after") !== "returned") return fail("phase1-node-http-koa", "missing middleware headers")
     if (payload.framework !== "koa" || payload.route !== "profile.show" || payload.name !== "mars") return fail("phase1-node-http-koa", JSON.stringify(payload))
-    if (echoResponse.status !== 202 || echoPayload.route !== "echo.create" || echoPayload.body !== koaRequestBody) return fail("phase1-node-http-koa", JSON.stringify(echoPayload))
+    if (echoResponse.status !== 202 || echoPayload.route !== "echo.create" || echoPayload.body !== playground.koaRequestBody) return fail("phase1-node-http-koa", JSON.stringify(echoPayload))
     if (runtime.kernel.resolvePort(3002) !== null) return fail("phase1-node-http-koa", "port still registered after close")
 
     return pass("phase1-node-http-koa", `${payload.route}; ${echoPayload.route}`)

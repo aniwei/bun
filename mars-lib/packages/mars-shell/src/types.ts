@@ -5,6 +5,7 @@ import type { MarsVFS } from "@mars/vfs"
 export interface ShellRunOptions {
   cwd?: string
   env?: Record<string, string>
+  stdin?: ReadableStream<Uint8Array> | string
   structured?: boolean
 }
 

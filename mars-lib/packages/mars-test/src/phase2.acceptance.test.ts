@@ -5,6 +5,7 @@ import { createMarsRuntime } from "@mars/client"
 import { createMarsInstaller, createMemoryPackageCache, createNpmRegistryClient } from "@mars/installer"
 import { createModuleLoader } from "@mars/loader"
 import { resolve } from "@mars/resolver"
+import { createRuntimeNodeCoreModules } from "@mars/runtime"
 import { createWasmLoader } from "@mars/shared"
 import { createTranspiler } from "@mars/transpiler"
 import {
@@ -1133,6 +1134,151 @@ test("Phase 2 installer loads offline cache from playground fixture", async () =
         : null,
     },
   })).toBe("/workspace/node_modules/react/index.js")
+
+  await runtime.dispose()
+})
+
+test("Phase 2 npm-installed official express, koa and node:http run through Mars core modules", async () => {
+  const runtime = await createMarsRuntime({
+    packageCache: await loadPlaygroundPackageCache(),
+  })
+  await runtime.vfs.writeFile("/workspace/package.json", JSON.stringify({
+    name: "npm-http-frameworks",
+    dependencies: {
+      express: "latest",
+      koa: "latest",
+    },
+  }))
+  const installResult = await runtime.shell.run("bun install")
+
+  expect(installResult.code).toBe(0)
+  expect(installResult.stdout).toContain("express@5.1.0")
+  expect(installResult.stdout).toContain("koa@2.14.2")
+  const expressPackageJson = JSON.parse(String(await runtime.vfs.readFile("/workspace/node_modules/express/package.json", "utf8"))) as { name: string; version: string }
+  const koaPackageJson = JSON.parse(String(await runtime.vfs.readFile("/workspace/node_modules/koa/package.json", "utf8"))) as { name: string; version: string }
+  expect(expressPackageJson.name).toBe("express")
+  expect(expressPackageJson.version).toBe("5.1.0")
+  expect(koaPackageJson.name).toBe("koa")
+  expect(koaPackageJson.version).toBe("2.14.2")
+
+  await runtime.vfs.mkdir("/workspace/src", { recursive: true })
+  await runtime.vfs.writeFile("/workspace/src/app.cjs", `
+const express = require("express")
+const Koa = require("koa")
+const { createServer } = require("node:http")
+
+exports.nodePath = "/npm-node-http?source=core"
+exports.expressPath = "/npm-express?active=1"
+exports.koaPath = "/npm-koa?name=mars"
+
+exports.startNodeHttpServer = function startNodeHttpServer() {
+  return createServer(async (request, response) => {
+    response.writeHead(203, {
+      "content-type": "application/json; charset=utf-8",
+      "x-mars-npm-node-http": "core",
+    })
+    response.end(JSON.stringify({
+      framework: "node:http",
+      method: request.method,
+      url: request.url,
+      body: await request.request.text(),
+    }))
+  }).listen(0)
+}
+
+exports.startExpressServer = function startExpressServer() {
+  const app = express()
+  app.use(async (_request, response, next) => {
+    response.setHeader("x-mars-npm-express", "middleware")
+    await next()
+  })
+  app.get("/npm-express", (request, response) => {
+    const url = new URL("http://mars.localhost" + request.url)
+    response.send({
+      framework: "express",
+      method: request.method,
+      active: url.searchParams.get("active"),
+    })
+  })
+  return app.listen(3101)
+}
+
+exports.startKoaServer = function startKoaServer() {
+  const app = new Koa()
+  app.use(async (context, next) => {
+    context.set("x-mars-npm-koa", "onion")
+    await next()
+    context.set("x-mars-npm-koa-after", "returned")
+  })
+  app.use(async context => {
+    if (context.method === "GET" && context.path === "/npm-koa") {
+      context.status = 202
+      context.body = {
+        framework: "koa",
+        name: context.query.name,
+      }
+    }
+  })
+  return app.listen(3102)
+}
+`)
+  const moduleLoader = createModuleLoader({
+    vfs: runtime.vfs,
+    coreModules: createRuntimeNodeCoreModules({
+      vfs: runtime.vfs,
+      kernel: runtime.kernel,
+    }),
+  })
+  const app = moduleLoader.require("./app.cjs", "/workspace/src/index.cjs") as {
+    nodePath: string
+    expressPath: string
+    koaPath: string
+    startNodeHttpServer(): { address(): { port: number } | null; close(): void }
+    startExpressServer(): { close(): void }
+    startKoaServer(): { close(): void }
+  }
+  const nodeServer = app.startNodeHttpServer()
+  const nodePort = nodeServer.address()?.port ?? 0
+  const expressServer = app.startExpressServer()
+  const koaServer = app.startKoaServer()
+
+  const nodeResponse = await runtime.fetch(`${runtime.preview(nodePort)}${app.nodePath.slice(1)}`, {
+    method: "POST",
+    body: "hello npm node",
+  })
+  expect(nodeResponse.status).toBe(203)
+  expect(nodeResponse.headers.get("x-mars-npm-node-http")).toBe("core")
+  expect(await nodeResponse.json()).toEqual({
+    framework: "node:http",
+    method: "POST",
+    url: app.nodePath,
+    body: "hello npm node",
+  })
+
+  const expressResponse = await runtime.fetch(runtime.preview(3101) + app.expressPath.slice(1))
+  expect(expressResponse.headers.get("x-mars-npm-express")).toBe("middleware")
+  const expressBody = await expressResponse.text()
+  expect(JSON.parse(expressBody)).toEqual({
+    framework: "express",
+    method: "GET",
+    active: "1",
+  })
+
+  const koaResponse = await runtime.fetch(runtime.preview(3102) + app.koaPath.slice(1))
+  expect(koaResponse.status).toBe(202)
+  expect(koaResponse.headers.get("x-mars-npm-koa")).toBe("onion")
+  expect(koaResponse.headers.get("x-mars-npm-koa-after")).toBe("returned")
+  expect(await koaResponse.json()).toEqual({
+    framework: "koa",
+    name: "mars",
+  })
+
+  nodeServer.close()
+  expressServer.close()
+  koaServer.close()
+  expect(runtime.kernel.resolvePort(nodePort)).toBe(null)
+  expect(runtime.kernel.resolvePort(3101)).toBe(null)
+  expect(runtime.kernel.resolvePort(3102)).toBe(null)
 
   await runtime.dispose()
 })

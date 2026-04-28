@@ -26,6 +26,17 @@ import type { CommandResult, MarsShell, ShellCommand } from "@mars/shell"
 import type { MarsBunSpawnOptions } from "@mars/runtime"
 import type { Disposable, MarsVFS, MarsVFSPatch, VFSWatchEvent } from "@mars/vfs"
 
+interface PackageScriptRun {
+  scriptName: string
+  steps: PackageScriptStep[]
+}
+
+interface PackageScriptStep {
+  name: string
+  commandLine: string
+  env: Record<string, string>
+}
+
 export interface MarsBootOptions {
   root?: string
   initialFiles?: FileTree
@@ -256,6 +267,11 @@ class DefaultMarsRuntime implements MarsRuntime {
       run: async context => {
         if (isBunInstallCommand(context.argv)) {
           return await this.#runBunInstall(context.cwd)
+        }
+
+        const packageScript = this.#resolveBunRunPackageScript(context.argv, context.cwd, context.env)
+        if (packageScript) {
+          return await this.#runPackageScript(packageScript, context.cwd, context.stdin)
         }
 
         const entry = parseBunRunEntry(context.argv)
@@ -543,6 +559,11 @@ class DefaultMarsRuntime implements MarsRuntime {
     options: Omit<SpawnOptions, "argv"> = {},
   ): Promise<ProcessHandle> {
     const argv = [command, ...args]
+    const packageScript = this.#resolveBunRunPackageScript(argv, options.cwd ?? this.vfs.cwd(), options.env)
+    if (packageScript) {
+      return this.#runPackageScriptProcess(packageScript, argv, options)
+    }
+
     const entry = parseBunRunEntry(argv)
     if (entry) {
       return this.#runBunRunScript(
@@ -658,6 +679,16 @@ class DefaultMarsRuntime implements MarsRuntime {
   }
 
   async #runShellCommand(argv: string[], options: Omit<SpawnOptions, "argv">): Promise<ProcessHandle> {
+    const commandLine = argv.map(escapeShellArg).join(" ")
+
+    return this.#runShellScript(commandLine, argv, options)
+  }
+
+  async #runShellScript(
+    commandLine: string,
+    argv: string[],
+    options: Omit<SpawnOptions, "argv">,
+  ): Promise<ProcessHandle> {
     const cwd = options.cwd ?? this.vfs.cwd()
     const processHandle = await this.kernel.spawn({
       ...options,
@@ -667,10 +698,10 @@ class DefaultMarsRuntime implements MarsRuntime {
     })
 
     try {
-      const commandLine = argv.map(escapeShellArg).join(" ")
       const result = await this.shell.run(commandLine, {
         cwd,
         env: options.env,
+        stdin: processHandle.stdin,
       })
 
       if (result.stdout) this.kernel.writeStdio(processHandle.pid, 1, result.stdout)
@@ -683,6 +714,144 @@ class DefaultMarsRuntime implements MarsRuntime {
     }
 
     return processHandle
+  }
+
+  async #runPackageScriptProcess(
+    packageScript: PackageScriptRun,
+    argv: string[],
+    options: Omit<SpawnOptions, "argv">,
+  ): Promise<ProcessHandle> {
+    const cwd = options.cwd ?? this.vfs.cwd()
+    const processHandle = await this.kernel.spawn({
+      ...options,
+      argv,
+      cwd,
+      kind: options.kind ?? "shell",
+    })
+
+    try {
+      const result = await this.#runPackageScript(packageScript, cwd, processHandle.stdin)
+
+      if (result.stdout) this.kernel.writeStdio(processHandle.pid, 1, result.stdout)
+      if (result.stderr) this.kernel.writeStdio(processHandle.pid, 2, result.stderr)
+      await this.kernel.kill(processHandle.pid, result.code)
+    } catch (error) {
+      const message = `${error instanceof Error ? error.message : String(error)}\n`
+      this.kernel.writeStdio(processHandle.pid, 2, message)
+      await this.kernel.kill(processHandle.pid, 1)
+    }
+
+    return processHandle
+  }
+
+  async #runPackageScript(
+    packageScript: PackageScriptRun,
+    cwd: string,
+    stdin?: ReadableStream<Uint8Array>,
+  ): Promise<CommandResult> {
+    let stdout = ""
+    let stderr = ""
+    let json: unknown
+    let code = 0
+
+    for (const step of packageScript.steps) {
+      const result = await this.shell.run(step.commandLine, {
+        cwd,
+        env: step.env,
+        ...(step.name === packageScript.scriptName && stdin ? { stdin } : {}),
+      })
+      stdout += result.stdout
+      stderr += result.stderr
+      json = result.json ?? json
+      code = result.code
+      if (result.code !== 0) break
+    }
+
+    return { code, stdout, stderr, ...(json === undefined ? {} : { json }) }
+  }
+
+  #resolveBunRunPackageScript(
+    argv: string[],
+    cwd: string,
+    env: Record<string, string> | undefined,
+  ): PackageScriptRun | null {
+    const scriptName = parseBunRunScriptName(argv)
+    if (!scriptName) return null
+
+    try {
+      const packageJsonPath = normalizePath("package.json", cwd)
+      const packageJson = JSON.parse(String(this.vfs.readFileSync(packageJsonPath, "utf8"))) as {
+        scripts?: Record<string, unknown>
+        name?: string
+      }
+      const scripts = packageJson.scripts ?? {}
+      const script = scripts[scriptName]
+
+      return typeof script === "string" && script.length > 0
+        ? {
+          scriptName,
+          steps: this.#createRunScriptSteps(cwd, packageJson, scripts, scriptName, argv.slice(3), env),
+        }
+        : null
+    } catch {
+      return null
+    }
+  }
+
+  #createRunScriptSteps(
+    cwd: string,
+    packageJson: unknown,
+    scripts: Record<string, unknown>,
+    scriptName: string,
+    args: string[],
+    env: Record<string, string> | undefined,
+  ): PackageScriptStep[] {
+    const stepNames = [`pre${scriptName}`, scriptName, `post${scriptName}`]
+    const steps: PackageScriptStep[] = []
+
+    for (const stepName of stepNames) {
+      const script = scripts[stepName]
+      if (typeof script !== "string" || script.length === 0) continue
+
+      steps.push({
+        name: stepName,
+        commandLine: stepName === scriptName ? appendBunRunScriptArgs(script, args) : script,
+        env: this.#createRunScriptEnv(cwd, packageJson, stepName, script, env),
+      })
+    }
+
+    return steps
+  }
+
+  #createRunScriptEnv(
+    cwd: string,
+    packageJson: unknown,
+    scriptName: string,
+    script: string,
+    env: Record<string, string> | undefined,
+  ): Record<string, string> {
+    const packageJsonPath = normalizePath("package.json", cwd)
+    const packageBinPath = normalizePath(".bin", normalizePath("node_modules", cwd))
+    const pathEntries = [packageBinPath, env?.PATH].filter((entry): entry is string => Boolean(entry))
+    const packageEnv = flattenPackageJsonEnv(packageJson)
+
+    return {
+      ...env,
+      ...packageEnv,
+      PATH: pathEntries.join(":"),
+      INIT_CWD: cwd,
+      npm_command: "run-script",
+      npm_config_global: "false",
+      npm_config_local_prefix: cwd,
+      npm_config_prefix: cwd,
+      npm_config_user_agent: "bun/mars",
+      npm_execpath: "bun",
+      npm_node_execpath: "bun",
+      npm_lifecycle_event: scriptName,
+      npm_lifecycle_script: script,
+      npm_package_json: packageJsonPath,
+      npm_package_name: packageEnv.npm_package_name ?? "root",
+    }
   }
 
   #spawnBunCommand(options: MarsBunSpawnOptions): Promise<ProcessHandle> {
@@ -821,6 +990,20 @@ function parseBunRunEntry(argv: string[]): string | null {
   if (argv[1] && argv[1] !== "run") return argv[1]
 
   return null
+}
+
+function parseBunRunScriptName(argv: string[]): string | null {
+  if (argv[0] !== "bun" || argv[1] !== "run" || !argv[2]) return null
+  if (argv[2].startsWith("-") || argv[2].includes("/")) return null
+
+  return argv[2]
+}
+
+function appendBunRunScriptArgs(script: string, args: string[]): string {
+  const forwardedArgs = args[0] === "--" ? args.slice(1) : args
+  if (forwardedArgs.length === 0) return script
+
+  return `${script} ${forwardedArgs.map(escapeShellArg).join(" ")}`
 }
 
 function isBunInstallCommand(argv: string[]): boolean {

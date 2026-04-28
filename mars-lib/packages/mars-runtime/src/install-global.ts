@@ -6,6 +6,7 @@ import { createBunFile } from "./bun-file"
 import { bunBuild } from "./bun-build"
 import { bunServe } from "./bun-serve"
 import { bunWrite } from "./bun-write"
+import { createRuntimeNodeCoreModules } from "./node-core-modules"
 import { detectMarsCapabilities } from "@mars/kernel"
 import { createModuleLoader } from "@mars/loader"
 import { normalizePath } from "@mars/vfs"
@@ -113,7 +114,10 @@ export function installBunGlobal(context: RuntimeContext): MarsBun {
 export function installMarsRuntimeContext(context: RuntimeContext): MarsRuntimeContextInstallation {
   const marsBun = createMarsBun(context)
   const scope = (context.scope ?? globalThis) as RuntimeGlobalScope
-  const moduleLoader = createModuleLoader({ vfs: context.vfs })
+  const moduleLoader = createModuleLoader({
+    vfs: context.vfs,
+    coreModules: createRuntimeNodeCoreModules(context),
+  })
   const processGlobal = createMarsProcessGlobal(context)
   const requireParent = normalizePath("__mars_context__.js", context.cwd ?? context.vfs.cwd())
   const require = (specifier: string) => moduleLoader.require(specifier, requireParent)
@@ -218,7 +222,7 @@ function bunSpawnSync(context: RuntimeContext, options: MarsBunSpawnOptions): Ma
   const command = options.cmd.join(" ")
   if (capabilities.sharedArrayBuffer && capabilities.atomicsWait) {
     const [executable = "", ...args] = options.cmd
-    const result = runBuiltinSyncCommand(executable, args)
+    const result = runBuiltinSyncCommand(executable, args, context, options)
     if (result !== null) return result
 
     const message = `Bun.spawnSync SAB profile detected but sync executor is currently available only for built-in commands: ${command}`
@@ -242,8 +246,14 @@ function bunSpawnSync(context: RuntimeContext, options: MarsBunSpawnOptions): Ma
   }
 }
 
-function runBuiltinSyncCommand(executable: string, args: string[]): MarsBunSpawnSyncResult | null {
+function runBuiltinSyncCommand(
+  executable: string,
+  args: string[],
+  context: RuntimeContext,
+  options: MarsBunSpawnOptions,
+): MarsBunSpawnSyncResult | null {
   const enc = new TextEncoder()
+  const cwd = options.cwd ?? context.cwd ?? context.vfs.cwd()
 
   if (executable === "echo") {
     return {
@@ -271,8 +281,24 @@ function runBuiltinSyncCommand(executable: string, args: string[]): MarsBunSpawn
     return {
       success: true,
       exitCode: 0,
-      stdout: enc.encode("/\n"),
+      stdout: enc.encode(`${cwd}\n`),
       stderr: new Uint8Array(),
+    }
+  }
+
+  if (executable === "ls") {
+    try {
+      const target = normalizePath(args[0] ?? ".", cwd)
+      const entries = context.vfs.readdirSync(target) as string[]
+
+      return {
+        success: true,
+        exitCode: 0,
+        stdout: enc.encode(entries.length ? `${entries.join("\n")}\n` : ""),
+        stderr: new Uint8Array(),
+      }
+    } catch (error) {
+      return failedSyncCommand(`ls: ${error instanceof Error ? error.message : String(error)}\n`)
     }
   }
 
@@ -287,14 +313,137 @@ function runBuiltinSyncCommand(executable: string, args: string[]): MarsBunSpawn
   }
 
   if (executable === "cat") {
-    // cat with no args or args that are not real file paths: return empty output rather than blocking.
-    return {
-      success: true,
-      exitCode: 0,
-      stdout: new Uint8Array(),
-      stderr: new Uint8Array(),
+    if (args.length === 0) {
+      if (typeof options.stdin === "string") {
+        return {
+          success: true,
+          exitCode: 0,
+          stdout: enc.encode(options.stdin),
+          stderr: new Uint8Array(),
+        }
+      }
+
+      if (options.stdin) {
+        return failedSyncCommand("cat: ReadableStream stdin is not available in Bun.spawnSync browser context\n")
+      }
+
+      return {
+        success: true,
+        exitCode: 0,
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+      }
+    }
+
+    try {
+      const output = args
+        .map(path => context.vfs.readFileSync(normalizePath(path, cwd), "utf8"))
+        .join("")
+
+      return {
+        success: true,
+        exitCode: 0,
+        stdout: enc.encode(output),
+        stderr: new Uint8Array(),
+      }
+    } catch (error) {
+      return failedSyncCommand(`cat: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
+  }
+
+  if (executable === "grep") {
+    return runSyncGrep(args, context, cwd)
+  }
+
+  if (executable === "mkdir") {
+    try {
+      const recursive = args.includes("-p")
+      const paths = args.filter(value => value !== "-p")
+      for (const path of paths) {
+        context.vfs.mkdirSync(normalizePath(path, cwd), { recursive })
+      }
+
+      return {
+        success: true,
+        exitCode: 0,
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+      }
+    } catch (error) {
+      return failedSyncCommand(`mkdir: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
+  }
+
+  if (executable === "rm") {
+    try {
+      const paths = args.filter(value => value !== "-r" && value !== "-rf")
+      for (const path of paths) {
+        context.vfs.unlinkSync(normalizePath(path, cwd))
+      }
+
+      return {
+        success: true,
+        exitCode: 0,
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+      }
+    } catch (error) {
+      return failedSyncCommand(`rm: ${error instanceof Error ? error.message : String(error)}\n`)
     }
   }
 
   return null
+}
+
+function runSyncGrep(args: string[], context: RuntimeContext, cwd: string): MarsBunSpawnSyncResult {
+  const recursive = args.includes("-R") || args.includes("-r")
+  const filteredArgs = args.filter(value => value !== "-R" && value !== "-r")
+  const pattern = filteredArgs[0]
+  if (!pattern) return failedSyncCommand("grep: missing pattern\n")
+
+  try {
+    const root = normalizePath(filteredArgs[1] ?? ".", cwd)
+    const files = recursive ? collectSyncGrepFiles(context, root) : [root]
+    const matches: string[] = []
+
+    for (const file of files) {
+      const text = context.vfs.readFileSync(file, "utf8") as string
+      const lines = text.split("\n")
+
+      for (const [index, line] of lines.entries()) {
+        if (line.includes(pattern)) matches.push(`${file}:${index + 1}:${line}`)
+      }
+    }
+
+    return {
+      success: matches.length > 0,
+      exitCode: matches.length > 0 ? 0 : 1,
+      stdout: new TextEncoder().encode(matches.length ? `${matches.join("\n")}\n` : ""),
+      stderr: new Uint8Array(),
+    }
+  } catch (error) {
+    return failedSyncCommand(`grep: ${error instanceof Error ? error.message : String(error)}\n`)
+  }
+}
+
+function collectSyncGrepFiles(context: RuntimeContext, root: string): string[] {
+  const stats = context.vfs.statSync(root)
+  if (stats.isFile()) return [root]
+
+  const files: string[] = []
+  for (const entry of context.vfs.readdirSync(root) as string[]) {
+    files.push(...collectSyncGrepFiles(context, normalizePath(entry, root)))
+  }
+
+  return files
+}
+
+function failedSyncCommand(message: string): MarsBunSpawnSyncResult {
+  return {
+    success: false,
+    exitCode: 1,
+    stdout: new Uint8Array(),
+    stderr: new TextEncoder().encode(message),
+    error: new Error(message.trim()),
+  }
 }

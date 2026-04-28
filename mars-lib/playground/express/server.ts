@@ -1,7 +1,6 @@
-import { createServer } from "@mars/node"
+import { createServer } from "node:http"
 
-import type { MarsKernel } from "@mars/kernel"
-import type { IncomingMessage, NodeHttpServer, ServerResponse } from "@mars/node"
+import type { IncomingMessage, Server as NodeHttpServer, ServerResponse } from "node:http"
 
 export const expressUsersPath = "/users?active=1"
 export const expressCreatePath = "/users"
@@ -29,7 +28,7 @@ export interface ExpressPlaygroundApp {
   listen(port?: number, callback?: () => void): NodeHttpServer
 }
 
-export function createExpressPlaygroundApp(kernel: MarsKernel): ExpressPlaygroundApp {
+export function createExpressPlaygroundApp(): ExpressPlaygroundApp {
   const middlewares: ExpressMiddleware[] = []
   const routes: ExpressRoute[] = []
 
@@ -63,7 +62,7 @@ export function createExpressPlaygroundApp(kernel: MarsKernel): ExpressPlaygroun
         }
 
         await dispatch(0)
-      }, { kernel }).listen(port, callback)
+      }).listen(port, callback)
     },
   }
 
@@ -96,8 +95,8 @@ export function createExpressPlaygroundApp(kernel: MarsKernel): ExpressPlaygroun
   return app
 }
 
-export function createExpressHelloWorldServer(kernel: MarsKernel): NodeHttpServer {
-  return createExpressPlaygroundApp(kernel).listen(3001)
+export function createExpressHelloWorldServer(): NodeHttpServer {
+  return createExpressPlaygroundApp().listen(3001)
 }
 
 function notFound(_request: IncomingMessage, response: ServerResponse): void {

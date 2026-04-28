@@ -43,6 +43,7 @@ export interface InstallLockfileEntry {
 export interface ResolvedPackage {
   name: string
   version: string
+  installPath?: string
   dependencies: Record<string, string>
   optionalDependencies: Record<string, string>
   peerDependencies: Record<string, string>

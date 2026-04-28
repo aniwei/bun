@@ -29,6 +29,10 @@
       "@mars/installer": ["packages/mars-installer/src/index.ts"],
       "@mars/bundler": ["packages/mars-bundler/src/index.ts"],
       "@mars/node": ["packages/mars-node/src/index.ts"],
+      "http": ["packages/mars-node/src/index.ts"],
+      "node:http": ["packages/mars-node/src/index.ts"],
+      "crypto": ["packages/mars-node/src/index.ts"],
+      "node:crypto": ["packages/mars-node/src/index.ts"],
       "@mars/shell": ["packages/mars-shell/src/index.ts"],
       "@mars/client": ["packages/mars-client/src/index.ts"],
       "@mars/test": ["packages/mars-test/src/index.ts"]
