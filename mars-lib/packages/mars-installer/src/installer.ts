@@ -1,3 +1,4 @@
+import { extractPackageTarball } from "./extract-tarball"
 import { createInstallPlan, resolvePackage } from "./plan"
 import { writeNodeModules } from "./write-node-modules"
 
@@ -20,11 +21,7 @@ export class MarsInstaller implements PackageInstaller {
   async install(options: InstallOptions): Promise<InstallResult> {
     const plan = await createInstallPlan(options, this.#options.cache, this.#options.registryClient)
     for (const pkg of plan.packages) {
-      if (!pkg.tarballKey) continue
-      if (await this.#options.cache.getTarball(pkg.tarballKey)) continue
-      if (options.offline || !this.#options.registryClient) continue
-
-      await this.#options.cache.setTarball(pkg.tarballKey, await this.#options.registryClient.fetchTarball(pkg))
+      await this.#hydratePackageFiles(pkg, options)
     }
     await this.writeNodeModules(plan)
 
@@ -53,6 +50,23 @@ export class MarsInstaller implements PackageInstaller {
   async writeNodeModules(plan: InstallPlan): Promise<void> {
     await writeNodeModules(this.#options.vfs, plan)
   }
+
+  async #hydratePackageFiles(pkg: ResolvedPackage, options: InstallOptions): Promise<void> {
+    if (!pkg.tarballKey) return
+
+    let tarball = await this.#options.cache.getTarball(pkg.tarballKey)
+    if (!tarball && !options.offline && this.#options.registryClient) {
+      tarball = await this.#options.registryClient.fetchTarball(pkg)
+      await this.#options.cache.setTarball(pkg.tarballKey, tarball)
+    }
+    if (!tarball || hasPackageFiles(pkg)) return
+
+    pkg.files = await extractPackageTarball(tarball)
+  }
+}
+
+function hasPackageFiles(pkg: ResolvedPackage): boolean {
+  return Object.keys(pkg.files).length > 0
 }
 
 export function createMarsInstaller(options: MarsInstallerOptions): PackageInstaller {

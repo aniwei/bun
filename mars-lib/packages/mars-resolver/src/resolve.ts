@@ -1,12 +1,12 @@
 import { basename, dirname, normalizePath } from "@mars/vfs"
 
-import { resolveExports, resolveImports } from "./exports"
-import { parsePackageJson, pickBrowserMapTarget, pickPackageEntry } from "./package-json"
+import { blocksSubpathFallback, resolveExportsTarget, resolveImports } from "./exports"
+import { hasPackageJsonExports, parsePackageJson, pickBrowserMapTarget, pickPackageEntry } from "./package-json"
 import { createTsconfigPathResolver } from "./tsconfig-paths"
 
 import type { ResolveOptions } from "./types"
 
-const defaultExtensions = [".ts", ".tsx", ".js", ".jsx", ".json"]
+const defaultExtensions = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json"]
 const defaultConditions = ["browser", "import", "default"]
 
 class EmptyResolverFileSystem {
@@ -94,6 +94,15 @@ function resolvePackageSpecifier(
   fileSystem: ResolveOptions["fileSystem"],
 ): string | null {
   const parsedSpecifier = parsePackageSpecifier(specifier)
+  const selfReference = resolvePackageSelfReference(
+    parsedSpecifier,
+    importingFile,
+    conditions,
+    extensions,
+    fileSystem,
+  )
+  if (selfReference !== undefined) return selfReference
+
   let cursor = dirname(importingFile)
 
   while (true) {
@@ -103,55 +112,15 @@ function resolvePackageSpecifier(
     const packageJson = parsePackageJson(packageJsonContent)
 
     if (packageJson) {
-      const exportedPath = resolveExports(
-        packageJson.exports,
-        parsedSpecifier.subpath,
+      const packageResolution = resolvePackageFromDirectory(
+        parsedSpecifier,
+        packageDirectory,
+        packageJson,
         conditions,
-      )
-      if (exportedPath) {
-        const browserTarget = pickBrowserMapTarget(packageJson, exportedPath)
-          ?? pickBrowserMapTarget(packageJson, parsedSpecifier.subpath)
-        if (browserTarget === false) return null
-
-        const resolvedExport = resolveWithExtensions(
-          normalizePath(browserTarget ?? exportedPath, packageDirectory),
-          extensions,
-          fileSystem,
-        )
-        if (resolvedExport) return resolvedExport
-      }
-
-      if (parsedSpecifier.subpath !== ".") {
-        const browserTarget = pickBrowserMapTarget(packageJson, parsedSpecifier.subpath)
-        if (browserTarget === false) return null
-
-        const resolvedSubpath = resolveWithExtensions(
-          normalizePath((browserTarget ?? parsedSpecifier.subpath).replace(/^\.\//, ""), packageDirectory),
-          extensions,
-          fileSystem,
-        )
-        if (resolvedSubpath) return resolvedSubpath
-      }
-
-      const packageEntry = pickPackageEntry(packageJson, conditions)
-      if (packageEntry) {
-        const browserTarget = pickBrowserMapTarget(packageJson, packageEntry)
-        if (browserTarget === false) return null
-
-        const resolvedEntry = resolveWithExtensions(
-          normalizePath(browserTarget ?? packageEntry, packageDirectory),
-          extensions,
-          fileSystem,
-        )
-        if (resolvedEntry) return resolvedEntry
-      }
-
-      const fallbackIndex = resolveWithExtensions(
-        normalizePath("index", packageDirectory),
         extensions,
         fileSystem,
       )
-      if (fallbackIndex) return fallbackIndex
+      if (packageResolution !== undefined) return packageResolution
     }
 
     if (cursor === "/") break
@@ -159,6 +128,103 @@ function resolvePackageSpecifier(
   }
 
   return null
+}
+
+function resolvePackageSelfReference(
+  parsedSpecifier: ParsedPackageSpecifier,
+  importingFile: string,
+  conditions: string[],
+  extensions: string[],
+  fileSystem: ResolveOptions["fileSystem"],
+): string | null | undefined {
+  let cursor = dirname(importingFile)
+
+  while (true) {
+    const packageJsonPath = normalizePath("package.json", cursor)
+    const packageJsonContent = fileSystem?.readFileSync(packageJsonPath) ?? null
+    const packageJson = parsePackageJson(packageJsonContent)
+
+    if (packageJson?.name === parsedSpecifier.packageName) {
+      return resolvePackageFromDirectory(
+        parsedSpecifier,
+        cursor,
+        packageJson,
+        conditions,
+        extensions,
+        fileSystem,
+      )
+    }
+
+    if (cursor === "/") break
+    cursor = dirname(cursor)
+  }
+
+  return undefined
+}
+
+function resolvePackageFromDirectory(
+  parsedSpecifier: ParsedPackageSpecifier,
+  packageDirectory: string,
+  packageJson: NonNullable<ReturnType<typeof parsePackageJson>>,
+  conditions: string[],
+  extensions: string[],
+  fileSystem: ResolveOptions["fileSystem"],
+): string | null | undefined {
+  const exportedPath = resolveExportsTarget(
+    packageJson.exports,
+    parsedSpecifier.subpath,
+    conditions,
+  )
+  if (exportedPath === null) return null
+  if (exportedPath) {
+    const browserTarget = pickBrowserMapTarget(packageJson, exportedPath)
+      ?? pickBrowserMapTarget(packageJson, parsedSpecifier.subpath)
+    if (browserTarget === false) return null
+
+    const resolvedExport = resolveWithExtensions(
+      normalizePath(browserTarget ?? exportedPath, packageDirectory),
+      extensions,
+      fileSystem,
+    )
+    if (resolvedExport) return resolvedExport
+  }
+
+  if (blocksSubpathFallback(packageJson.exports, parsedSpecifier.subpath)) return null
+  if (hasPackageJsonExports(packageJson) && parsedSpecifier.subpath === ".") return null
+
+  if (parsedSpecifier.subpath !== ".") {
+    const browserTarget = pickBrowserMapTarget(packageJson, parsedSpecifier.subpath)
+    if (browserTarget === false) return null
+
+    const resolvedSubpath = resolveWithExtensions(
+      normalizePath((browserTarget ?? parsedSpecifier.subpath).replace(/^\.\//, ""), packageDirectory),
+      extensions,
+      fileSystem,
+    )
+    if (resolvedSubpath) return resolvedSubpath
+  }
+
+  const packageEntry = pickPackageEntry(packageJson, conditions)
+  if (packageEntry) {
+    const browserTarget = pickBrowserMapTarget(packageJson, packageEntry)
+    if (browserTarget === false) return null
+
+    const resolvedEntry = resolveWithExtensions(
+      normalizePath(browserTarget ?? packageEntry, packageDirectory),
+      extensions,
+      fileSystem,
+    )
+    if (resolvedEntry) return resolvedEntry
+  }
+
+  const fallbackIndex = resolveWithExtensions(
+    normalizePath("index", packageDirectory),
+    extensions,
+    fileSystem,
+  )
+  if (fallbackIndex) return fallbackIndex
+
+  return undefined
 }
 
 function resolveImportSpecifier(
@@ -177,7 +243,7 @@ function resolveImportSpecifier(
     const importedPath = resolveImports(packageJson?.imports, specifier, conditions)
 
     if (importedPath) {
-      return resolveWithExtensions(normalizePath(importedPath, cursor), extensions, fileSystem)
+      return resolveImportTarget(importedPath, cursor, conditions, extensions, fileSystem)
     }
 
     if (cursor === "/") break
@@ -187,7 +253,26 @@ function resolveImportSpecifier(
   return null
 }
 
-function parsePackageSpecifier(specifier: string): { packageName: string; subpath: string } {
+function resolveImportTarget(
+  target: string,
+  packageDirectory: string,
+  conditions: string[],
+  extensions: string[],
+  fileSystem: ResolveOptions["fileSystem"],
+): string | null {
+  if (target.startsWith("./") || target.startsWith("../") || target.startsWith("/")) {
+    return resolveWithExtensions(normalizePath(target, packageDirectory), extensions, fileSystem)
+  }
+
+  return resolvePackageSpecifier(target, normalizePath("package.json", packageDirectory), conditions, extensions, fileSystem)
+}
+
+interface ParsedPackageSpecifier {
+  packageName: string
+  subpath: string
+}
+
+function parsePackageSpecifier(specifier: string): ParsedPackageSpecifier {
   const parts = specifier.split("/")
   const packageName = specifier.startsWith("@")
     ? `${parts[0]}/${parts[1]}`

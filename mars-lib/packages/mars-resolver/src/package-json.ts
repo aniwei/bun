@@ -1,11 +1,16 @@
+interface PackageJsonTargetObject {
+  [key: string]: PackageJsonTarget | undefined
+}
+type PackageJsonTarget = string | null | PackageJsonTarget[] | PackageJsonTargetObject
+
 export interface PackageJsonShape {
   name?: string
   type?: "module" | "commonjs"
   main?: string
   module?: string
   browser?: string | Record<string, string | false>
-  exports?: string | Record<string, string | Record<string, string | undefined> | undefined>
-  imports?: Record<string, string | Record<string, string | undefined>>
+  exports?: PackageJsonTarget
+  imports?: Record<string, PackageJsonTarget>
 }
 
 export function parsePackageJson(content: string | null): PackageJsonShape | null {
@@ -17,6 +22,10 @@ export function parsePackageJson(content: string | null): PackageJsonShape | nul
   } catch {
     return null
   }
+}
+
+export function hasPackageJsonExports(packageJson: PackageJsonShape | null): boolean {
+  return packageJson?.exports !== undefined
 }
 
 export function pickPackageEntry(
@@ -57,7 +66,7 @@ function browserMapCandidates(subpath: string): string[] {
       : `./${subpath}`
   const candidates = [normalizedSubpath]
 
-  for (const extension of [".ts", ".tsx", ".js", ".jsx", ".json"]) {
+  for (const extension of [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json"]) {
     if (normalizedSubpath.endsWith(extension)) continue
     candidates.push(`${normalizedSubpath}${extension}`)
   }

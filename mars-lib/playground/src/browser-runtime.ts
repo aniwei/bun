@@ -1790,6 +1790,9 @@ async function runInstallerCase(id: string): Promise<PlaygroundRunResult> {
 
 async function runInstallerRegistryFetchCase(): Promise<PlaygroundRunResult> {
   const fetchedUrls: string[] = []
+  const tarballBytes = await gzipBytes(createTarArchive({
+    "package/index.js": "module.exports = { playground: true }",
+  }))
   const runtime = await createMarsRuntime({
     packageRegistryClient: createNpmRegistryClient({
       registry: "https://registry.mars.test",
@@ -1803,12 +1806,13 @@ async function runInstallerRegistryFetchCase(): Promise<PlaygroundRunResult> {
             versions: {
               "0.2.0": {
                 version: "0.2.0",
-                files: {
-                  "index.js": "module.exports = { playground: true }",
-                },
+                dist: { tarball: "https://registry.mars.test/playground-registry-demo/-/playground-registry-demo-0.2.0.tgz" },
               },
             },
           })
+        }
+        if (url === "https://registry.mars.test/playground-registry-demo/-/playground-registry-demo-0.2.0.tgz") {
+          return new Response(toArrayBuffer(tarballBytes))
         }
 
         return new Response("not found", { status: 404 })
@@ -1827,7 +1831,7 @@ async function runInstallerRegistryFetchCase(): Promise<PlaygroundRunResult> {
 
     const installed = await runtime.vfs.readFile("/workspace/node_modules/playground-registry-demo/index.js", "utf8")
     if (!String(installed).includes("playground: true")) return fail("phase2-installer-registry-fetch", String(installed))
-    if (fetchedUrls.join(",") !== "https://registry.mars.test/playground-registry-demo") {
+    if (fetchedUrls.join(",") !== "https://registry.mars.test/playground-registry-demo,https://registry.mars.test/playground-registry-demo/-/playground-registry-demo-0.2.0.tgz") {
       return fail("phase2-installer-registry-fetch", fetchedUrls.join(","))
     }
 
@@ -1936,6 +1940,62 @@ function createPlaygroundPackageCache() {
       "vite-0.0.0-mars.tgz": viteTarballText,
     },
   )
+}
+
+function createTarArchive(files: Record<string, string>): Uint8Array {
+  const encoder = new TextEncoder()
+  const chunks: Uint8Array[] = []
+
+  for (const [path, content] of Object.entries(files)) {
+    const body = encoder.encode(content)
+    const header = new Uint8Array(512)
+    writeTarString(header, 0, 100, path)
+    writeTarString(header, 100, 8, "0000644")
+    writeTarString(header, 108, 8, "0000000")
+    writeTarString(header, 116, 8, "0000000")
+    writeTarString(header, 124, 12, body.byteLength.toString(8).padStart(11, "0"))
+    writeTarString(header, 136, 12, "00000000000")
+    header.fill(32, 148, 156)
+    header[156] = 48
+    writeTarString(header, 257, 6, "ustar")
+    writeTarString(header, 263, 2, "00")
+    writeTarString(header, 148, 8, checksumTarHeader(header).toString(8).padStart(6, "0"))
+    header[154] = 0
+    header[155] = 32
+    chunks.push(header, body, new Uint8Array(padToTarBlock(body.byteLength)))
+  }
+
+  chunks.push(new Uint8Array(1024))
+  const byteLength = chunks.reduce((total, chunk) => total + chunk.byteLength, 0)
+  const archive = new Uint8Array(byteLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    archive.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+
+  return archive
+}
+
+async function gzipBytes(data: Uint8Array): Promise<Uint8Array> {
+  const stream = new Blob([toArrayBuffer(data)]).stream().pipeThrough(new CompressionStream("gzip"))
+  return new Uint8Array(await new Response(stream).arrayBuffer())
+}
+
+function toArrayBuffer(data: Uint8Array): ArrayBuffer {
+  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
+}
+
+function writeTarString(header: Uint8Array, offset: number, length: number, value: string): void {
+  header.set(new TextEncoder().encode(value).subarray(0, length), offset)
+}
+
+function checksumTarHeader(header: Uint8Array): number {
+  return header.reduce((total, byte) => total + byte, 0)
+}
+
+function padToTarBlock(byteLength: number): number {
+  return (512 - byteLength % 512) % 512
 }
 
 function pass(id: string, detail: string): PlaygroundRunResult {

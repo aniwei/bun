@@ -8,6 +8,7 @@ export async function evaluateEsmModule(
   code: string,
   require: EsmRequire,
   dynamicImport: EsmDynamicImport,
+  namespace: ModuleNamespace = {},
 ): Promise<ModuleNamespace> {
   void path
   const evaluator = new Function(
@@ -16,12 +17,15 @@ export async function evaluateEsmModule(
     "__mars_dynamic_import",
     `${code}\n\nreturn exports`,
   )
-  const exportsObject: ModuleNamespace = {}
-  const result = evaluator(exportsObject, require, dynamicImport)
+  const result = evaluator(namespace, require, dynamicImport)
+
+  if (result === namespace) return namespace
 
   if (result && typeof result === "object") {
-    return result as ModuleNamespace
+    Object.assign(namespace, result)
+    return namespace
   }
 
-  return { default: result }
+  namespace.default = result
+  return namespace
 }

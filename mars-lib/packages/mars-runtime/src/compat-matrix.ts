@@ -55,8 +55,8 @@ export const bunApiCompatMatrix: BunApiCompatEntry[] = [
     api: "bun install",
     status: "partial",
     phase: "M2",
-    notes: "Shell command `bun install` reads package.json dependencies/devDependencies from MarsVFS and writes node_modules plus mars-lock.json through MarsInstaller. Cache miss can fetch registry metadata and tarball bytes through an injected registry client; real tgz extraction, lifecycle scripts, workspaces and Bun lockfile parity are pending. Current Express/Koa playground cases use built-in app-shaped fixtures, not npm express/koa packages.",
-    tests: ["Phase 2 shell bun install writes offline packages from package.json", "Phase 2 installer fetches missing packages from registry", "Phase 2 shell bun install can fetch package.json dependencies from registry"],
+    notes: "Shell command `bun install` reads package.json dependencies/devDependencies from MarsVFS and writes node_modules plus mars-lock.json through MarsInstaller. Cache miss can fetch registry metadata and tarball bytes through an injected registry client, and basic npm .tgz archives are extracted into package files; lifecycle scripts, workspaces, full semver and Bun lockfile parity are pending. Current Express/Koa playground cases use built-in app-shaped fixtures, not npm express/koa packages.",
+    tests: ["Phase 2 shell bun install writes offline packages from package.json", "Phase 2 installer fetches missing packages from registry", "Phase 2 installer extracts registry tgz package files", "Phase 2 shell bun install can fetch package.json dependencies from registry"],
   },
   {
     api: "Bun.spawn",

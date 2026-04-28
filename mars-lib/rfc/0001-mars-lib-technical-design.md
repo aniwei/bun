@@ -936,7 +936,7 @@ nx run vite-typescript-react:test:acceptance
 
 ## 17. Package Installer 与离线缓存
 
-MarsInstaller 负责 npm metadata、tarball cache、依赖解析和 VFS 中的 `node_modules` 写入。当前 `bun install` shell 命令是最小实现: 从 MarsVFS `package.json` 读取 dependencies/devDependencies，使用注入的 package cache 写入 `node_modules` 与 `mars-lock.json`；cache miss 时可通过 registry fetch provider 拉取 metadata 和 tarball bytes。真实 tgz 解包、lifecycle scripts、workspaces 和 Bun lockfile 完整兼容仍待补。
+MarsInstaller 负责 npm metadata、tarball cache、依赖解析和 VFS 中的 `node_modules` 写入。当前 `bun install` shell 命令是最小实现: 从 MarsVFS `package.json` 读取 dependencies/devDependencies，使用注入的 package cache 写入 `node_modules` 与 `mars-lock.json`；cache miss 时可通过 registry fetch provider 拉取 metadata 和 tgz tarball，并支持基础 npm `.tgz` 解包。lifecycle scripts、workspaces、完整 semver 和 Bun lockfile 完整兼容仍待补。
 
 ```ts
 export interface PackageInstaller {
@@ -975,7 +975,7 @@ playground/fixtures/npm-cache/
 └── typescript-*.tgz
 ```
 
-M2 验收要求 `metadata.json` 可被测试工具加载为离线 `PackageCache`，并能安装 Vite playground 所需的递归依赖。真实 tgz 解包可作为后续硬化项，但 fixture 不得只是未被测试读取的静态占位。
+M2 验收要求 `metadata.json` 可被测试工具加载为离线 `PackageCache`，并能安装 Vite playground 所需的递归依赖。registry fetch provider 与基础 npm `.tgz` 解包已纳入验收；fixture 不得只是未被测试读取的静态占位。
 
 ## 18. MarsCore Rust/WASM 边界
 

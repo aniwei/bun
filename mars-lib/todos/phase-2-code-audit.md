@@ -4,9 +4,9 @@
 - 日期: 2026-04-27
 - 对应技术设计文档: `mars-lib/rfc/0001-mars-lib-technical-design.md`
 - 审计范围: M2-01 到 M2-27 当前实现，以及 `phase2.acceptance.test.ts` 覆盖情况
-- 验证命令: `bun run typecheck && bun run test`
+- 验证命令: `bun run check`
 - 验证结果: Pass
-- 追加复核: package exports pattern、tsconfig paths、package browser map、installer fixture cache、dev server、module response、HMR、static/dynamic import 执行、基础 JSX 转换、runtime stdout/stderr、vite config root、alias、define、HMR root、first screen render model 与统一 playground fixture 加载已补验收
+- 追加复核: package exports pattern、exports/imports array fallback、exports subpath 封装、exports/imports null target、imports 外部 package target、package self-reference、`.mjs`/`.cjs` 扩展名补全、条件 exports object、tsconfig paths、package browser map、cyclic ESM/CJS namespace cache、递归 importer invalidation、installer fixture cache、dev server、module response、HMR、static/dynamic import 执行、基础 JSX 转换、runtime stdout/stderr、vite config root、alias、define、HMR root、first screen render model 与统一 playground fixture 加载已补验收
 
 ## 1. 技术设计核对结论
 
@@ -25,12 +25,13 @@
 | --- | --- | --- |
 | 相对路径解析 | Done | `resolve("./feature", importer)` 已覆盖测试。 |
 | 绝对路径解析 | Done | 通过 `normalizePath()` 和 `resolveWithExtensions()` 支持。 |
-| 扩展名补全 | Done | 默认支持 `.ts`、`.tsx`、`.js`、`.jsx`、`.json`。 |
+| 扩展名补全 | Done | 默认支持 `.ts`、`.tsx`、`.js`、`.jsx`、`.mjs`、`.cjs`、`.json`。 |
 | 目录 index | Done | 支持 `candidate/index + extension`。 |
 | bare package | Done | 支持向上查找 `node_modules/<package>`。 |
+| package self-reference | Done | 包内部可按自身 `package.json#name` 解析 `pkg` / `pkg/subpath`，并复用 exports/null target 封装语义。 |
 | package subpath | Done | 支持 `pkg/subpath` 映射到 package 目录内部路径。 |
-| package exports | Done | 支持 `.`、条件对象、subpath 和 `./features/*` 这类 pattern fallback。 |
-| package imports | Done | 支持从最近 `package.json` 解析 `#alias` 和 `#features/*` 这类 pattern fallback。 |
+| package exports | Done | 支持 `.`、条件对象、subpath、array fallback、`./features/*` 这类 pattern fallback、`null` target 阻断，并阻止带 exports 的未导出 subpath 回退到 package 内部文件。 |
+| package imports | Done | 支持从最近 `package.json` 解析 `#alias`、array fallback、`#features/*` 这类 pattern fallback、`null` target 阻断和外部 package target。 |
 | module/main | Done | `module` 优先于 `main`。 |
 | browser 字段 | Done | 条件 exports 会优先 `browser`，并已支持独立 browser field/map 与 `false` 禁用映射。 |
 | tsconfig paths | Done | `createTsconfigPathResolver()` 已实现，并已接入 `resolve()` 主链路。 |
@@ -41,6 +42,11 @@
 - 新增 package subpath 解析。
 - 新增 `#imports` 解析。
 - 新增 package exports/imports pattern fallback。
+- 新增 package exports/imports array fallback。
+- 新增 `.mjs`/`.cjs` extensionless resolve 与 browser map candidate 测试覆盖。
+- 新增 package exports 未导出 subpath 封装、exports/imports `null` target 与条件 exports object 测试覆盖。
+- 新增 package self-reference 测试覆盖。
+- 新增 package imports 外部 package target 测试覆盖。
 - 新增 package browser field/map 与 `false` 禁用映射测试覆盖。
 - 将 `tsconfig paths` 和 `baseUrl` 接入 `resolve()` 主链路。
 - 新增相关测试覆盖。
@@ -157,20 +163,21 @@ SWC 取舍:
 21. installer 从 `playground/fixtures/npm-cache/metadata.json` 加载真实 fixture cache 并安装递归依赖。
 22. TSX/Vite playground first screen render model 验收。
 23. `playground/core-modules` 覆盖 resolver、transpiler、loader、runtime、installer、bundler-dev-server 核心模块用例，并由 acceptance test 真实执行。
+24. resolver 阻止 package exports 未导出 subpath 回退，并覆盖 root conditional exports object、exports/imports array fallback、`.mjs`/`.cjs` 扩展名补全、exports/imports direct null target、条件 null target、imports 外部 package target 与 package self-reference。
 
 验证结果:
 
 ```text
-35 pass
+83 pass
 0 fail
-141 expect() calls
+501 expect() calls
 ```
 
 ## 2.1 新增工程化模块复核
 
 | 模块 | 状态 | 说明 |
 | --- | --- | --- |
-| MarsInstaller | Done | 已支持离线 metadata/tarball cache、fixture manifest 加载、依赖计划、基础 semver 选择、写入 `node_modules` 和 `mars-lock.json`；真实 tgz 解包作为后续硬化项。 |
+| MarsInstaller | Done | 已支持离线 metadata/tarball cache、registry fetch provider、fixture manifest 加载、依赖计划、基础 semver 选择、基础 npm tgz 解包、写入 `node_modules` 和 `mars-lock.json`；lifecycle scripts、workspaces、完整 semver 和 Bun lockfile 作为后续硬化项。 |
 | MarsBundler DevServer | Done | 已支持 `/@vite/client`、`transformRequest()`、`loadModule()`、vite config root、alias、define、HMR update payload；完整 Vite plugin/server 生命周期作为后续硬化项。 |
 | ModuleGraph | Done | 已记录 imports/importers 并支持 invalidation；复杂依赖图清理作为后续硬化项。 |
 | Service Worker module response | Done | 已将 module 请求转成 transpiled JavaScript Response，并接入 runtime router。 |
@@ -181,7 +188,7 @@ SWC 取舍:
 ### 高优先级
 
 1. 硬化当前 SWC WASM/Rust 转译路径，补齐 worker 缓存、source map 消费和更完整 JSX/TSX runtime。
-2. 完整 ESM live binding、循环依赖和 CJS/ESM 细节语义仍需硬化。
+2. 完整 ESM live binding、循环依赖边界和 CJS/ESM 细节语义仍需硬化；基础 cyclic ESM/CJS namespace cache 已补验收。
 3. Vite React TS 真实浏览器首屏仍依赖完整 React JSX runtime、plugin pipeline 和依赖预构建。
 4. HMR 浏览器 WebSocket 兼容层需要在 Phase 3 WebSocket/API 稳定性中补齐。
 
@@ -189,12 +196,13 @@ SWC 取舍:
 
 1. ESM static import: VFS 中 `entry.ts` 引入 `./dep` 后，`ModuleLoader.import()` 曾报 `SyntaxError: Unexpected token '{'. import call expects one or two arguments.`，现已修复常见路径并覆盖测试。
 2. Package exports pattern: `exports: { "./features/*": "./src/features/*.ts" }` 下解析 `demo/features/a` 曾返回 `null`，现已修复并覆盖测试。
+3. Cyclic module cache: ESM/CJS 循环依赖曾因模块记录执行后才写入缓存而可能重复加载，现已通过预创建 namespace cache 修复常见路径并覆盖测试。
 
 ### 中优先级
 
 1. CJS/ESM bridge 需要支持更多 ESM import CJS、CJS require ESM 的边界语义。
-2. Module graph 与 invalidation 需要补依赖边清理、插件 transform 结果缓存、浏览器 HMR 协议兼容。
-3. Installer 需要补真实 tgz 解包、完整 semver 范围选择。
+2. Module graph 与 invalidation 需要补插件 transform 结果缓存、浏览器 HMR 协议兼容；loader importer cache 已支持递归失效并覆盖测试。
+3. Installer 需要补完整 semver 范围选择、lifecycle scripts、workspaces 和 Bun lockfile 兼容。
 
 ### 低优先级
 
@@ -206,4 +214,4 @@ SWC 取舍:
 
 Phase 2 当前 M2-01 到 M2-27 已达到工程化验收闭环，测试通过；但其中 `MarsTranspiler`、`MarsLoader`、`MarsBundler` 和 `MarsInstaller` 的部分能力仍是基础实现，不应视为完整 Vite/TSX 生产能力。
 
-后续建议优先替换或增强 transpiler 与 ESM 语义，再补真实 tgz 解包、Vite config/plugin pipeline、真实浏览器 React 首屏和浏览器 HMR 协议兼容。
+后续建议优先替换或增强 transpiler 与 ESM 语义，再补 Vite config/plugin pipeline、真实浏览器 React 首屏、浏览器 HMR 协议兼容和更完整包管理语义。

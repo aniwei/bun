@@ -1,6 +1,8 @@
 export type ExportsField =
   | string
-  | Record<string, string | Record<string, string | undefined> | undefined>
+  | null
+  | ConditionalTarget[]
+  | Record<string, ConditionalTarget>
   | undefined
 
 export function resolveExports(
@@ -8,50 +10,96 @@ export function resolveExports(
   subpath: string,
   conditions: string[],
 ): string | null {
-  if (!exportsField) return null
-  if (typeof exportsField === "string") return subpath === "." ? exportsField : null
+  return resolveExportsTarget(exportsField, subpath, conditions) ?? null
+}
 
-  const direct = exportsField[subpath]
-  if (direct) return resolveConditionalTarget(direct, conditions)
+export function resolveExportsTarget(
+  exportsField: ExportsField,
+  subpath: string,
+  conditions: string[],
+): ResolvedTarget {
+  if (exportsField === undefined) return undefined
+  if (exportsField === null) return null
+  if (typeof exportsField === "string") return subpath === "." ? exportsField : undefined
+  if (Array.isArray(exportsField)) return subpath === "." ? resolveConditionalTarget(exportsField, conditions) : undefined
+
+  if (subpath === "." && isConditionalExportsObject(exportsField)) {
+    return resolveConditionalTarget(exportsField, conditions)
+  }
+
+  if (Object.prototype.hasOwnProperty.call(exportsField, subpath)) {
+    return resolveConditionalTarget(exportsField[subpath], conditions)
+  }
 
   return resolvePatternTarget(exportsField, subpath, conditions)
 }
 
+export function hasExports(exportsField: ExportsField): boolean {
+  return exportsField !== undefined
+}
+
+export function blocksSubpathFallback(exportsField: ExportsField, subpath: string): boolean {
+  return subpath !== "." && hasExports(exportsField)
+}
+
 export function resolveImports(
-  importsField: Record<string, string | Record<string, string | undefined>> | undefined,
+  importsField: Record<string, ConditionalTarget> | undefined,
   specifier: string,
   conditions: string[],
 ): string | null {
   if (!importsField) return null
 
-  const entry = importsField[specifier]
-  if (entry) return resolveConditionalTarget(entry, conditions)
+  if (Object.prototype.hasOwnProperty.call(importsField, specifier)) {
+    return resolveConditionalTarget(importsField[specifier], conditions) ?? null
+  }
 
-  return resolvePatternTarget(importsField, specifier, conditions)
+  return resolvePatternTarget(importsField, specifier, conditions) ?? null
 }
 
-type ConditionalTarget = string | Record<string, string | undefined> | undefined
+interface ConditionalTargetObject {
+  [key: string]: ConditionalTarget
+}
+type ConditionalTarget = string | null | ConditionalTarget[] | ConditionalTargetObject | undefined
+type ResolvedTarget = string | null | undefined
 
 function resolveConditionalTarget(
   target: ConditionalTarget,
   conditions: string[],
-): string | null {
-  if (!target) return null
+): ResolvedTarget {
+  if (target === undefined) return undefined
+  if (target === null) return null
   if (typeof target === "string") return target
+  if (Array.isArray(target)) return resolveFallbackTargets(target, conditions)
 
   for (const condition of conditions) {
-    const value = target[condition]
-    if (typeof value === "string") return value
+    if (!Object.prototype.hasOwnProperty.call(target, condition)) continue
+    const value = resolveConditionalTarget(target[condition], conditions)
+    if (value !== undefined) return value
   }
 
-  return typeof target.default === "string" ? target.default : null
+  if (!Object.prototype.hasOwnProperty.call(target, "default")) return undefined
+  return resolveConditionalTarget(target.default, conditions) ?? null
+}
+
+function resolveFallbackTargets(
+  targets: ConditionalTarget[],
+  conditions: string[],
+): ResolvedTarget {
+  for (const target of targets) {
+    const resolvedTarget = resolveConditionalTarget(target, conditions)
+    if (resolvedTarget === undefined) continue
+
+    return resolvedTarget
+  }
+
+  return undefined
 }
 
 function resolvePatternTarget(
   entries: Record<string, ConditionalTarget>,
   subpath: string,
   conditions: string[],
-): string | null {
+): ResolvedTarget {
   const patternEntries = Object.entries(entries)
     .filter(([pattern]) => pattern.includes("*"))
     .sort(([left], [right]) => patternPrefixLength(right) - patternPrefixLength(left))
@@ -61,12 +109,17 @@ function resolvePatternTarget(
     if (wildcardValue === null) continue
 
     const resolvedTarget = resolveConditionalTarget(target, conditions)
-    if (!resolvedTarget) continue
+    if (resolvedTarget === null) return null
+    if (resolvedTarget === undefined) continue
 
     return resolvedTarget.replace("*", wildcardValue)
   }
 
-  return null
+  return undefined
+}
+
+function isConditionalExportsObject(entries: Record<string, ConditionalTarget>): boolean {
+  return Object.keys(entries).every(key => !key.startsWith("."))
 }
 
 function matchPattern(pattern: string, value: string): string | null {

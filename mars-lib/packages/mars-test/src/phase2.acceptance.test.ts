@@ -44,21 +44,33 @@ test("Phase 2 resolver resolves relative modules with extensions", () => {
   const files = new Map<string, string>([
     ["/workspace/src/index.ts", "import './feature'"],
     ["/workspace/src/feature.ts", "export const value = 1"],
+    ["/workspace/src/module.mjs", "export const value = 'esm'"],
+    ["/workspace/src/legacy.cjs", "module.exports = 'cjs'"],
   ])
+  const fileSystem = {
+    existsSync: (path: string) => files.has(path),
+    readFileSync: (path: string) => files.get(path) ?? null,
+  }
 
   const resolvedPath = resolve("./feature", "/workspace/src/index.ts", {
-    fileSystem: {
-      existsSync: path => files.has(path),
-      readFileSync: path => files.get(path) ?? null,
-    },
+    fileSystem,
   })
 
   expect(resolvedPath).toBe("/workspace/src/feature.ts")
+  expect(resolve("./module", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/src/module.mjs",
+  )
+  expect(resolve("./legacy", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/src/legacy.cjs",
+  )
 })
 
 test("Phase 2 resolver honors package exports and imports", () => {
   const files = new Map<string, string>([
-    ["/workspace/package.json", JSON.stringify({ imports: { "#shared": "./src/shared.ts" } })],
+    [
+      "/workspace/package.json",
+      JSON.stringify({ imports: { "#shared": "./src/shared.ts", "#blocked": null, "#conditional-blocked": { browser: null, default: "./src/shared.ts" }, "#fallback": [{ node: "./src/node.ts" }, "./src/shared.ts"], "#external": "demo", "#external-feature": "browser-demo/feature", "#external-fallback": [{ node: "node-only" }, "browser-demo/array"] } }),
+    ],
     ["/workspace/src/index.ts", "import '#shared'"],
     ["/workspace/src/shared.ts", "export const shared = true"],
     [
@@ -67,6 +79,57 @@ test("Phase 2 resolver honors package exports and imports", () => {
     ],
     ["/workspace/node_modules/demo/browser.ts", "export const target = 'browser'"],
     ["/workspace/node_modules/demo/index.ts", "export const target = 'default'"],
+    ["/workspace/node_modules/demo/private.ts", "export const hidden = true"],
+    [
+      "/workspace/node_modules/browser-demo/package.json",
+      JSON.stringify({ exports: { "./feature": { browser: "./feature.browser.ts", default: "./feature.node.ts" }, "./array": [{ node: "./array.node.ts" }, { browser: "./array.browser.ts" }, "./array.default.ts"], "./esm": "./esm", "./cjs": "./legacy" } }),
+    ],
+    ["/workspace/node_modules/browser-demo/feature.browser.ts", "export const target = 'browser-feature'"],
+    ["/workspace/node_modules/browser-demo/feature.node.ts", "export const target = 'node-feature'"],
+    ["/workspace/node_modules/browser-demo/array.browser.ts", "export const target = 'browser-array'"],
+    ["/workspace/node_modules/browser-demo/array.node.ts", "export const target = 'node-array'"],
+    ["/workspace/node_modules/browser-demo/array.default.ts", "export const target = 'default-array'"],
+    ["/workspace/node_modules/browser-demo/esm.mjs", "export const target = 'esm'"],
+    ["/workspace/node_modules/browser-demo/legacy.cjs", "module.exports = 'cjs'"],
+    [
+      "/workspace/node_modules/array-root-demo/package.json",
+      JSON.stringify({ exports: [{ node: "./node.ts" }, { browser: "./browser.ts" }, "./index.ts"] }),
+    ],
+    ["/workspace/node_modules/array-root-demo/browser.ts", "export const target = 'browser-array-root'"],
+    ["/workspace/node_modules/array-root-demo/index.ts", "export const target = 'default-array-root'"],
+    [
+      "/workspace/node_modules/conditional-demo/package.json",
+      JSON.stringify({ exports: { browser: "./browser.ts", default: "./index.ts" } }),
+    ],
+    ["/workspace/node_modules/conditional-demo/browser.ts", "export const target = 'browser'"],
+    ["/workspace/node_modules/conditional-demo/index.ts", "export const target = 'default'"],
+    [
+      "/workspace/node_modules/null-target-demo/package.json",
+      JSON.stringify({
+        exports: {
+          "./features/*": "./features/*.ts",
+          "./features/private": null,
+          "./conditional-blocked": { browser: null, default: "./features/public.ts" },
+        },
+      }),
+    ],
+    ["/workspace/node_modules/null-target-demo/features/public.ts", "export const target = 'public'"],
+    ["/workspace/node_modules/null-target-demo/features/private.ts", "export const target = 'private'"],
+    [
+      "/workspace/packages/self-demo/package.json",
+      JSON.stringify({
+        name: "self-demo",
+        exports: {
+          ".": "./src/index.ts",
+          "./feature": "./src/feature.ts",
+          "./blocked": null,
+        },
+      }),
+    ],
+    ["/workspace/packages/self-demo/src/index.ts", "export const target = 'self-index'"],
+    ["/workspace/packages/self-demo/src/feature.ts", "export const target = 'self-feature'"],
+    ["/workspace/packages/self-demo/src/blocked.ts", "export const target = 'self-blocked'"],
+    ["/workspace/packages/self-demo/src/consumer.ts", "import 'self-demo'"],
   ])
 
   const fileSystem = {
@@ -77,9 +140,51 @@ test("Phase 2 resolver honors package exports and imports", () => {
   expect(resolve("#shared", "/workspace/src/index.ts", { fileSystem })).toBe(
     "/workspace/src/shared.ts",
   )
+  expect(resolve("#blocked", "/workspace/src/index.ts", { fileSystem })).toBe(null)
+  expect(resolve("#conditional-blocked", "/workspace/src/index.ts", { fileSystem })).toBe(null)
+  expect(resolve("#fallback", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/src/shared.ts",
+  )
+  expect(resolve("#external", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/demo/browser.ts",
+  )
+  expect(resolve("#external-feature", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/browser-demo/feature.browser.ts",
+  )
+  expect(resolve("#external-fallback", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/browser-demo/array.browser.ts",
+  )
   expect(resolve("demo", "/workspace/src/index.ts", { fileSystem })).toBe(
     "/workspace/node_modules/demo/browser.ts",
   )
+  expect(resolve("demo/private", "/workspace/src/index.ts", { fileSystem })).toBe(null)
+  expect(resolve("conditional-demo", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/conditional-demo/browser.ts",
+  )
+  expect(resolve("browser-demo/array", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/browser-demo/array.browser.ts",
+  )
+  expect(resolve("browser-demo/esm", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/browser-demo/esm.mjs",
+  )
+  expect(resolve("browser-demo/cjs", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/browser-demo/legacy.cjs",
+  )
+  expect(resolve("array-root-demo", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/array-root-demo/browser.ts",
+  )
+  expect(resolve("null-target-demo/features/public", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/null-target-demo/features/public.ts",
+  )
+  expect(resolve("null-target-demo/features/private", "/workspace/src/index.ts", { fileSystem })).toBe(null)
+  expect(resolve("null-target-demo/conditional-blocked", "/workspace/src/index.ts", { fileSystem })).toBe(null)
+  expect(resolve("self-demo", "/workspace/packages/self-demo/src/consumer.ts", { fileSystem })).toBe(
+    "/workspace/packages/self-demo/src/index.ts",
+  )
+  expect(resolve("self-demo/feature", "/workspace/packages/self-demo/src/consumer.ts", { fileSystem })).toBe(
+    "/workspace/packages/self-demo/src/feature.ts",
+  )
+  expect(resolve("self-demo/blocked", "/workspace/packages/self-demo/src/consumer.ts", { fileSystem })).toBe(null)
 })
 
 test("Phase 2 resolver honors package browser field and browser map", () => {
@@ -89,14 +194,21 @@ test("Phase 2 resolver honors package browser field and browser map", () => {
       "/workspace/node_modules/browser-demo/package.json",
       JSON.stringify({
         main: "server.js",
+        exports: {
+          ".": "./server.js",
+          "./module": "./module",
+        },
         browser: {
           "./server.js": "./browser.js",
+          "./module.mjs": "./module.browser.mjs",
           "./disabled.js": false,
         },
       }),
     ],
     ["/workspace/node_modules/browser-demo/server.js", "module.exports = 'server'"],
     ["/workspace/node_modules/browser-demo/browser.js", "module.exports = 'browser'"],
+    ["/workspace/node_modules/browser-demo/module.mjs", "export const target = 'server'"],
+    ["/workspace/node_modules/browser-demo/module.browser.mjs", "export const target = 'browser'"],
     ["/workspace/node_modules/browser-demo/disabled.js", "module.exports = 'disabled'"],
   ])
   const fileSystem = {
@@ -106,6 +218,9 @@ test("Phase 2 resolver honors package browser field and browser map", () => {
 
   expect(resolve("browser-demo", "/workspace/src/index.ts", { fileSystem })).toBe(
     "/workspace/node_modules/browser-demo/browser.js",
+  )
+  expect(resolve("browser-demo/module", "/workspace/src/index.ts", { fileSystem })).toBe(
+    "/workspace/node_modules/browser-demo/module.browser.mjs",
   )
   expect(resolve("browser-demo/disabled", "/workspace/src/index.ts", { fileSystem })).toBe(null)
 })
@@ -324,6 +439,86 @@ test("Phase 2 loader evaluates dynamic imports through module cache", async () =
   await runtime.dispose()
 })
 
+test("Phase 2 loader preserves namespaces across cyclic ESM imports", async () => {
+  const runtime = await createMarsRuntime({
+    initialFiles: {
+      src: {
+        "a.ts": [
+          "import * as b from './b'",
+          "export const value = 'a'",
+          "export function readB() { return b.value }",
+          "export function readBThroughCycle() { return b.readA() }",
+        ].join("\n"),
+        "b.ts": [
+          "import * as a from './a'",
+          "export const value = 'b'",
+          "export function readA() { return a.value }",
+        ].join("\n"),
+      },
+    },
+  })
+
+  const moduleLoader = createModuleLoader({ vfs: runtime.vfs })
+  const moduleNamespace = await moduleLoader.import("./a", "/workspace/src/index.ts") as Record<string, () => string>
+
+  expect(moduleNamespace.readB()).toBe("b")
+  expect(moduleNamespace.readBThroughCycle()).toBe("a")
+
+  await runtime.dispose()
+})
+
+test("Phase 2 loader preserves namespaces across cyclic CommonJS require", async () => {
+  const runtime = await createMarsRuntime({
+    initialFiles: {
+      src: {
+        "a.cjs": [
+          "exports.value = 'a'",
+          "const b = require('./b')",
+          "exports.readB = () => b.value",
+          "exports.readBThroughCycle = () => b.readA()",
+        ].join("\n"),
+        "b.cjs": [
+          "exports.value = 'b'",
+          "const a = require('./a')",
+          "exports.readA = () => a.value",
+        ].join("\n"),
+      },
+    },
+  })
+
+  const moduleLoader = createModuleLoader({ vfs: runtime.vfs })
+  const moduleNamespace = await moduleLoader.import("./a", "/workspace/src/index.ts") as Record<string, () => string>
+
+  expect(moduleNamespace.readB()).toBe("b")
+  expect(moduleNamespace.readBThroughCycle()).toBe("a")
+
+  await runtime.dispose()
+})
+
+test("Phase 2 loader invalidates cached importers recursively", async () => {
+  const runtime = await createMarsRuntime({
+    initialFiles: {
+      src: {
+        "entry.ts": "import { readDep } from './middle'\nexport function read() { return readDep() }",
+        "middle.ts": "import { value } from './dep'\nexport function readDep() { return value }",
+        "dep.ts": "export const value = 'before'",
+      },
+    },
+  })
+
+  const moduleLoader = createModuleLoader({ vfs: runtime.vfs })
+  const firstNamespace = await moduleLoader.import("./entry", "/workspace/src/index.ts") as Record<string, () => string>
+  expect(firstNamespace.read()).toBe("before")
+
+  await runtime.vfs.writeFile("/workspace/src/dep.ts", "export const value = 'after'")
+  moduleLoader.invalidate("/workspace/src/dep.ts")
+
+  const secondNamespace = await moduleLoader.import("./entry", "/workspace/src/index.ts") as Record<string, () => string>
+  expect(secondNamespace.read()).toBe("after")
+
+  await runtime.dispose()
+})
+
 test("Phase 2 loader evaluates CommonJS require through resolver", async () => {
   const runtime = await createMarsRuntime({
     initialFiles: {
@@ -369,6 +564,7 @@ test("Phase 2 core module playground cases execute", async () => {
     view: unknown
     loadMessage(): Promise<string>
     loadCommonJsValue(): number
+    loadCyclicValue(): string
   }
 
   expect(loaderModule.view).toEqual({
@@ -378,6 +574,18 @@ test("Phase 2 core module playground cases execute", async () => {
   })
   expect(await loaderModule.loadMessage()).toBe("loader dynamic import:json")
   expect(loaderModule.loadCommonJsValue()).toBe(42)
+  expect(loaderModule.loadCyclicValue()).toBe("cycle-b:cycle-a")
+
+  await loaderRuntime.vfs.writeFile("/workspace/src/title.ts", "export const title = 'Mars Loader Updated'")
+  moduleLoader.invalidate("/workspace/src/title.ts")
+  const updatedLoaderModule = await moduleLoader.import("./entry", "/workspace/src/index.tsx") as {
+    view: unknown
+  }
+  expect(updatedLoaderModule.view).toEqual({
+    tag: "main",
+    props: {},
+    children: ["Mars Loader Updated"],
+  })
 
   await loaderRuntime.dispose()
 
@@ -608,6 +816,56 @@ test("Phase 2 installer fetches missing packages from registry", async () => {
   })
   expect(new TextDecoder().decode(await packageCache.getTarball("https://registry.mars.test/registry-demo/-/registry-demo-1.2.3.tgz") ?? new Uint8Array())).toBe("registry tarball bytes")
   expect(await runtime.vfs.readFile("/workspace/node_modules/registry-demo/index.js", "utf8")).toBe("module.exports = { source: 'registry' }")
+
+  await runtime.dispose()
+})
+
+test("Phase 2 installer extracts registry tgz package files", async () => {
+  const runtime = await createMarsRuntime()
+  const packageCache = createMemoryPackageCache()
+  const tarballBytes = await gzipBytes(createTarArchive({
+    "package/index.js": "module.exports = { extracted: true }",
+    "package/lib/message.js": "module.exports = 'from tgz'",
+  }))
+  const registryClient = createNpmRegistryClient({
+    registry: "https://registry.mars.test",
+    fetch: async input => {
+      const url = String(input)
+      if (url === "https://registry.mars.test/tgz-demo") {
+        return Response.json({
+          name: "tgz-demo",
+          "dist-tags": { latest: "2.0.0" },
+          versions: {
+            "2.0.0": {
+              version: "2.0.0",
+              dependencies: {},
+              dist: { tarball: "https://registry.mars.test/tgz-demo/-/tgz-demo-2.0.0.tgz" },
+            },
+          },
+        })
+      }
+      if (url === "https://registry.mars.test/tgz-demo/-/tgz-demo-2.0.0.tgz") {
+        return new Response(toArrayBuffer(tarballBytes))
+      }
+
+      return new Response("not found", { status: 404 })
+    },
+  })
+  const installer = createMarsInstaller({ vfs: runtime.vfs, cache: packageCache, registryClient })
+
+  const result = await installer.install({
+    cwd: "/workspace",
+    dependencies: {
+      "tgz-demo": "latest",
+    },
+  })
+
+  expect(result.packages.map(pkg => `${pkg.name}@${pkg.version}`)).toEqual([
+    "tgz-demo@2.0.0",
+  ])
+  expect(await runtime.vfs.readFile("/workspace/node_modules/tgz-demo/index.js", "utf8")).toBe("module.exports = { extracted: true }")
+  expect(await runtime.vfs.readFile("/workspace/node_modules/tgz-demo/lib/message.js", "utf8")).toBe("module.exports = 'from tgz'")
+  expect((await packageCache.getTarball("https://registry.mars.test/tgz-demo/-/tgz-demo-2.0.0.tgz"))?.byteLength).toBe(tarballBytes.byteLength)
 
   await runtime.dispose()
 })
@@ -866,3 +1124,60 @@ test("Phase 2 playground module cases reference real files", async () => {
     expect(source.length > 0).toBe(true)
   }
 })
+
+function createTarArchive(files: Record<string, string>): Uint8Array {
+  const encoder = new TextEncoder()
+  const chunks: Uint8Array[] = []
+
+  for (const [path, content] of Object.entries(files)) {
+    const body = encoder.encode(content)
+    const header = new Uint8Array(512)
+    writeTarString(header, 0, 100, path)
+    writeTarString(header, 100, 8, "0000644")
+    writeTarString(header, 108, 8, "0000000")
+    writeTarString(header, 116, 8, "0000000")
+    writeTarString(header, 124, 12, body.byteLength.toString(8).padStart(11, "0"))
+    writeTarString(header, 136, 12, "00000000000")
+    header.fill(32, 148, 156)
+    header[156] = 48
+    writeTarString(header, 257, 6, "ustar")
+    writeTarString(header, 263, 2, "00")
+    writeTarString(header, 148, 8, checksumTarHeader(header).toString(8).padStart(6, "0"))
+    header[154] = 0
+    header[155] = 32
+
+    chunks.push(header, body, new Uint8Array(padToTarBlock(body.byteLength)))
+  }
+
+  chunks.push(new Uint8Array(1024))
+  const byteLength = chunks.reduce((total, chunk) => total + chunk.byteLength, 0)
+  const archive = new Uint8Array(byteLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    archive.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+
+  return archive
+}
+
+async function gzipBytes(data: Uint8Array): Promise<Uint8Array> {
+  const stream = new Blob([toArrayBuffer(data)]).stream().pipeThrough(new CompressionStream("gzip"))
+  return new Uint8Array(await new Response(stream).arrayBuffer())
+}
+
+function toArrayBuffer(data: Uint8Array): ArrayBuffer {
+  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
+}
+
+function writeTarString(header: Uint8Array, offset: number, length: number, value: string): void {
+  header.set(new TextEncoder().encode(value).subarray(0, length), offset)
+}
+
+function checksumTarHeader(header: Uint8Array): number {
+  return header.reduce((total, byte) => total + byte, 0)
+}
+
+function padToTarBlock(byteLength: number): number {
+  return (512 - byteLength % 512) % 512
+}

@@ -28,6 +28,7 @@ class MarsModuleLoader implements ModuleLoader {
   readonly #transpiler: Transpiler
   readonly #resolveOptions?: ResolveOptions
   readonly #records = new Map<string, ModuleRecord>()
+  readonly #importers = new Map<string, Set<string>>()
 
   constructor(options: ModuleLoaderOptions) {
     this.#vfs = options.vfs
@@ -37,16 +38,18 @@ class MarsModuleLoader implements ModuleLoader {
 
   async import(specifier: string, parentUrl = "/workspace/index.ts"): Promise<unknown> {
     const loadedModule = await this.#load(specifier, parentUrl)
+    this.#trackImporter(parentUrl, loadedModule.path)
     const cachedRecord = this.#records.get(loadedModule.path)
     if (cachedRecord) return cachedRecord.namespace
 
-    const namespace = await this.evaluateModule(loadedModule)
-
+    const namespace: ModuleNamespace = {}
     this.#records.set(loadedModule.path, {
       path: loadedModule.path,
       namespace,
       loadedModule,
     })
+
+    await this.evaluateModule(loadedModule, namespace)
 
     return namespace
   }
@@ -54,6 +57,7 @@ class MarsModuleLoader implements ModuleLoader {
   require(specifier: string, parentPath: string): unknown {
     const resolvedPath = this.#resolve(specifier, parentPath)
     if (!resolvedPath) throw new Error(`Cannot resolve module: ${specifier}`)
+    this.#trackImporter(parentPath, resolvedPath)
 
     const cachedRecord = this.#records.get(resolvedPath)
     if (cachedRecord) return cachedRecord.namespace.default ?? cachedRecord.namespace
@@ -85,12 +89,7 @@ class MarsModuleLoader implements ModuleLoader {
     const transformedCode = moduleFormat === "cjs"
       ? sourceCode
       : transformSourceCode(sourceCode, inferSourceLoader(resolvedPath))
-    const namespace = evaluateCommonJsModule(
-      resolvedPath,
-      transformedCode,
-      childSpecifier => this.require(childSpecifier, resolvedPath),
-    )
-
+    const namespace: ModuleNamespace = {}
     this.#records.set(resolvedPath, {
       path: resolvedPath,
       namespace,
@@ -106,21 +105,30 @@ class MarsModuleLoader implements ModuleLoader {
       },
     })
 
+    evaluateCommonJsModule(
+      resolvedPath,
+      transformedCode,
+      childSpecifier => this.require(childSpecifier, resolvedPath),
+      namespace,
+    )
+
     return namespace.default ?? namespace
   }
 
-  async evaluateModule(module: LoadedModule): Promise<ModuleNamespace> {
+  async evaluateModule(module: LoadedModule, namespace: ModuleNamespace = {}): Promise<ModuleNamespace> {
     if (module.format === "cjs") {
       return evaluateCommonJsModule(
         module.path,
         module.transformed.code,
         specifier => this.require(specifier, module.path),
+        namespace,
       )
     }
 
     if (module.format === "json") {
       const jsonValue = JSON.parse(module.sourceCode)
-      return { default: jsonValue }
+      namespace.default = jsonValue
+      return namespace
     }
 
     return evaluateEsmModule(
@@ -128,11 +136,40 @@ class MarsModuleLoader implements ModuleLoader {
       module.transformed.code,
       specifier => this.require(specifier, module.path),
       specifier => this.import(specifier, module.path),
+      namespace,
     )
   }
 
   invalidate(path: string): void {
-    this.#records.delete(normalizePath(path))
+    this.#invalidateRecord(normalizePath(path), new Set())
+  }
+
+  #trackImporter(parentPath: string, childPath: string): void {
+    const normalizedParent = normalizePath(parentPath)
+    const normalizedChild = normalizePath(childPath)
+    if (normalizedParent === normalizedChild) return
+    if (!this.#records.has(normalizedParent)) return
+
+    const importers = this.#importers.get(normalizedChild) ?? new Set<string>()
+    importers.add(normalizedParent)
+    this.#importers.set(normalizedChild, importers)
+  }
+
+  #invalidateRecord(path: string, visited: Set<string>): void {
+    if (visited.has(path)) return
+    visited.add(path)
+
+    const importers = this.#importers.get(path) ?? new Set<string>()
+    this.#records.delete(path)
+    this.#importers.delete(path)
+
+    for (const importerPath of importers) {
+      this.#invalidateRecord(importerPath, visited)
+    }
+
+    for (const importerSet of this.#importers.values()) {
+      importerSet.delete(path)
+    }
   }
 
   async #load(specifier: string, parentPath: string): Promise<LoadedModule> {

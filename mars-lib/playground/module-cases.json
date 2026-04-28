@@ -67,7 +67,7 @@
     "entry": "core-modules/resolver/browser-map.json",
     "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
     "status": "covered",
-    "description": "Resolver playground 用例覆盖 package browser field/map、exports/imports、pattern fallback 和禁用映射。"
+    "description": "Resolver playground 用例覆盖 package browser field/map、exports/imports、array fallback、imports 外部 package target、pattern fallback、.mjs/.cjs 扩展名补全、null target 阻断、package self-reference 和禁用映射。"
   },
   {
     "id": "phase2-transpiler-core",
@@ -87,7 +87,7 @@
     "entry": "core-modules/loader/entry.tsx",
     "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
     "status": "covered",
-    "description": "Loader playground 用例覆盖 TSX 执行、static import、dynamic import、JSON require 和 CJS require。"
+    "description": "Loader playground 用例覆盖 TSX 执行、static import、dynamic import、JSON require、CJS require、cyclic ESM namespace cache 和递归 importer invalidation。"
   },
   {
     "id": "phase2-runtime-run-core",
@@ -117,7 +117,7 @@
     "entry": "core-modules/installer/dependencies.ts",
     "acceptance": "packages/mars-test/src/phase2.acceptance.test.ts",
     "status": "covered",
-    "description": "Installer playground 用例通过注入 registry fetch provider，在 cache miss 时拉取 package metadata 并由 `bun install` 写入 node_modules。"
+    "description": "Installer playground 用例通过注入 registry fetch provider，在 cache miss 时拉取 package metadata 与 tgz tarball，并由 `bun install` 解包写入 node_modules。"
   },
   {
     "id": "phase2-bundler-core",

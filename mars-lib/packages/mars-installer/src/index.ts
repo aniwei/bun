@@ -1,4 +1,5 @@
 export * from "./cache"
+export * from "./extract-tarball"
 export * from "./installer"
 export * from "./plan"
 export * from "./registry"

@@ -86,6 +86,8 @@ export async function loadPlaygroundFiles(name: PlaygroundName): Promise<FileTre
       "entry.tsx": await readPlaygroundText("core-modules/loader/entry.tsx"),
       "title.ts": await readPlaygroundText("core-modules/loader/title.ts"),
       "message.ts": await readPlaygroundText("core-modules/loader/message.ts"),
+      "cycle-a.ts": await readPlaygroundText("core-modules/loader/cycle-a.ts"),
+      "cycle-b.ts": await readPlaygroundText("core-modules/loader/cycle-b.ts"),
       "config.json": await readPlaygroundText("core-modules/loader/config.json"),
       "feature.cjs": await readPlaygroundText("core-modules/loader/feature.cjs"),
     }

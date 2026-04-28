@@ -24,12 +24,12 @@
 | Phase 1 | `node-http/` | `node-http/server.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖纯 `node:http` `createServer()`、`listen(0)` 动态端口、POST headers/body、`address()` 和 `close()` 解绑。 |
 | Phase 1 | `express/` | `express/server.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 Express 风格 `app.use()`、`app.get()`、`app.post()`、`app.listen()`，包含 middleware header、GET query、POST JSON body 和 `close()` 解绑。 |
 | Phase 1 | `koa/` | `koa/server.ts` | `packages/mars-test/src/phase1.acceptance.test.ts` | Done | 覆盖 Koa 风格 `app.use()` 洋葱中间件、async `next()`、`app.listen()`，包含 after middleware header、GET query、POST body 和 `close()` 解绑。 |
-| Phase 2 | `core-modules/resolver/` | `core-modules/resolver/browser-map.json` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 package browser field/map、exports/imports、pattern fallback 和禁用映射。 |
+| Phase 2 | `core-modules/resolver/` | `core-modules/resolver/browser-map.json` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 package browser field/map、exports/imports、array fallback、imports 外部 package target、pattern fallback、`.mjs`/`.cjs` 扩展名补全、`null` target 阻断、package self-reference 和禁用映射。 |
 | Phase 2 | `core-modules/transpiler/` | `core-modules/transpiler/app.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 通过 `@swc/wasm-web` 覆盖 static import、dynamic import、JSX 和 export async function，wasm 初始化由 `@mars/shared` 统一管理。 |
-| Phase 2 | `core-modules/loader/` | `core-modules/loader/entry.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖经 SWC WASM 转译后的 TSX 执行、static import、dynamic import、JSON require 和 CJS require。 |
+| Phase 2 | `core-modules/loader/` | `core-modules/loader/entry.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖经 SWC WASM 转译后的 TSX 执行、static import、dynamic import、JSON require、CJS require、cyclic ESM namespace cache 和递归 importer invalidation。 |
 | Phase 2 | `core-modules/runtime/` | `core-modules/runtime/run-entry.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 `MarsRuntime.run()` 通过 `@swc/wasm-web` 转译 TS entry，并映射 stdout/stderr stream。 |
 | Phase 2 | `core-modules/installer/` | `core-modules/installer/dependencies.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖离线安装入口依赖，写入 `package.json` 后通过 `bun install` shell 命令配合 npm-cache fixture 真实安装递归依赖。 |
-| Phase 2 | `core-modules/installer/` | `core-modules/installer/dependencies.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 registry fetch provider: cache miss 时拉取 package metadata，并由 `bun install` 写入 `node_modules`。 |
+| Phase 2 | `core-modules/installer/` | `core-modules/installer/dependencies.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 registry fetch provider: cache miss 时拉取 package metadata 与 tgz tarball，并由 `bun install` 解包写入 `node_modules`。 |
 | Phase 2 | `core-modules/bundler/` | `core-modules/bundler/vite.config.ts` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 Vite root、alias、define、DevServer module response 和 HMR path。 |
 | Phase 2 | `tsx/` | `tsx/app.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 覆盖 `@swc/wasm-web` TSX/JSX 转换、loader 执行、stdout/stderr 映射和 first screen render model。 |
 | Phase 2 | `vite-react-ts/` | `vite-react-ts/src/App.tsx` | `packages/mars-test/src/phase2.acceptance.test.ts` | Done | 通过 `loadPlaygroundFiles("vite-react-ts")` 被 DevServer 和 loader render model 真实加载；运行时转译走 SWC WASM，Bun.build 预研走 esbuild-wasm。 |
@@ -92,7 +92,7 @@ Playground 需要浏览器 secure context 才能启用 `SharedArrayBuffer` 和 `
 
 Vite 会启动 React playground 页面。页面中的 `Run All` 会运行当前已接线的 runnable cases，包括 Phase 1 的 runtime/VFS/Shell、Bun file、Bun.serve、纯 node:http、Express app/router/middleware 和 Koa 洋葱中间件，Phase 2 的 resolver、transpiler、loader、runtime、installer、bundler-dev-server、TSX 和 Vite React TS 用例，以及 Phase 3 的 prework 用例；其中 bridge-chain 用例会跑通 client->SW、SW->Kernel bridge-backed server request、Kernel->Process Worker lifecycle、`process.worker.vfs.patch`、`process.worker.run` 和 `kernel.spawn(kind: "worker")` 自动 worker 创建/stdio/exit，ServiceWorker module response 用例会跑通 `/src/*.ts` 原生 URL 首跳、`/__mars__/module` ESM 入口、相对依赖二跳和 VFS `node_modules` bare import 二跳加载，Kernel Worker bootstrap 用例会跑通页面侧 `new Worker()` carrier 到 `kernel.connect` MessagePort，Process Worker runtime bootstrap 用例会验证 worker scope 内 Bun/process/require context 注入。
 
-当前 `bun install` 是浏览器 runtime 内的最小实现: 读取 MarsVFS 中的 `package.json`，使用注入的 package cache 写入 `node_modules` 与 `mars-lock.json`；cache miss 时可通过 registry fetch provider 拉取 package metadata 和 tarball bytes。它还不是完整 Bun package manager；真实 tgz 解包、lifecycle scripts、workspaces 和 Bun lockfile 完整兼容仍待补。Express/Koa runnable cases 使用的是 playground 内置的 app/middleware fixture，不需要真实 npm `express`/`koa` 包。
+当前 `bun install` 是浏览器 runtime 内的最小实现: 读取 MarsVFS 中的 `package.json`，使用注入的 package cache 写入 `node_modules` 与 `mars-lock.json`；cache miss 时可通过 registry fetch provider 拉取 package metadata 和 tgz tarball，并支持基础 npm `.tgz` 解包。它还不是完整 Bun package manager；lifecycle scripts、workspaces、完整 semver 和 Bun lockfile 完整兼容仍待补。Express/Koa runnable cases 使用的是 playground 内置的 app/middleware fixture，不需要真实 npm `express`/`koa` 包。
 
 构建 playground:
 
@@ -115,4 +115,4 @@ bun run typecheck && bun run test
 | 类型检查 | TS/TSX playground 纳入 typecheck。 |
 | 文档同步 | 更新本文件、对应 Phase todo、必要 RFC 段落。 |
 | 模块用例 | 更新 `module-cases.json`，并确认 acceptance test 校验入口文件。 |
-| 剩余缺口 | 若仍是 partial/prework，必须在 Phase todo 中明确，不得标记 Done。 |
+| 剩余缺口 | Phase 验收范围内的 partial/prework 必须在 Phase todo 中明确，且不得作为 Done 依据；超出当前 Phase 的生产级 hardening 必须在 audit/backlog 中明确边界。 |
