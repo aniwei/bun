@@ -8,7 +8,7 @@
 
 import type { CargoBuild, Dependency } from "../source.ts";
 
-const LOLHTML_COMMIT = "77127cd2b8545998756e8d64e36ee2313c4bb312";
+const LOLHTML_COMMIT = "c2cfb7b086ccaca10308365a3ed7205cba98608b";
 
 export const lolhtml: Dependency = {
   name: "lolhtml",
