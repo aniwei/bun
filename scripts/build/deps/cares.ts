@@ -5,7 +5,7 @@
 
 import type { Dependency } from "../source.ts";
 
-const CARES_COMMIT = "3ac47ee46edd8ea40370222f91613fc16c434853";
+const CARES_COMMIT = "bc91829cce983a35ec01f5dbc05465858a3df469";
 
 export const cares: Dependency = {
   name: "cares",
