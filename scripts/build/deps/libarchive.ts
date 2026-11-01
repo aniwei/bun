@@ -12,7 +12,7 @@
 import type { Dependency } from "../source.ts";
 import { depBuildDir } from "../source.ts";
 
-const LIBARCHIVE_COMMIT = "ded82291ab41d5e355831b96b0e1ff49e24d8939";
+const LIBARCHIVE_COMMIT = "03036ffa409a2aa1c5bbad35be2202641a040fda";
 
 export const libarchive: Dependency = {
   name: "libarchive",
